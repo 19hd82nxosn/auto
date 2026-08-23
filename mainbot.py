@@ -35,14 +35,14 @@ if not ADMIN_ID:
     raise ValueError("ADMIN_ID environment variable not set")
 
 # ======================================================================
-# مسیر پایدار (برای ریلیو)
+# مسیر پایدار
 # ======================================================================
 DATA_DIR = os.getenv("DATA_DIR", ".")
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "bot.db")
 
 # ======================================================================
-# تنظیم لاگ
+# لاگ
 # ======================================================================
 logging.basicConfig(
     level=logging.INFO,
@@ -66,16 +66,13 @@ def get_tehran_date() -> str:
     return datetime.now(TEHRAN_TZ).strftime('%Y-%m-%d')
 
 # ======================================================================
-# اتصال به دیتابیس
+# دیتابیس
 # ======================================================================
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 conn.execute("PRAGMA journal_mode=WAL")
 conn.execute("PRAGMA synchronous=NORMAL")
 c = conn.cursor()
 
-# ======================================================================
-# توابع کمکی برای اطمینان از وجود ستون
-# ======================================================================
 def ensure_column(table, column, col_type, default=None):
     try:
         c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
@@ -86,9 +83,7 @@ def ensure_column(table, column, col_type, default=None):
     except sqlite3.OperationalError:
         pass
 
-# ======================================================================
-# ایجاد جداول
-# ======================================================================
+# ---------- ایجاد جداول ----------
 c.execute("""CREATE TABLE IF NOT EXISTS seen (
     uuid TEXT,
     address TEXT,
@@ -96,17 +91,12 @@ c.execute("""CREATE TABLE IF NOT EXISTS seen (
     first_seen TEXT,
     last_posted TEXT,
     UNIQUE(uuid, address))""")
-
-c.execute("""CREATE TABLE IF NOT EXISTS cfg (
-    k TEXT PRIMARY KEY,
-    v TEXT)""")
-
+c.execute("""CREATE TABLE IF NOT EXISTS cfg (k TEXT PRIMARY KEY, v TEXT)""")
 c.execute("""CREATE TABLE IF NOT EXISTS posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content TEXT,
     count INTEGER,
     created_at TEXT)""")
-
 ensure_column("seen", "source", "TEXT DEFAULT ''")
 ensure_column("seen", "profile_id", "INTEGER DEFAULT 1", 1)
 
@@ -114,7 +104,6 @@ c.execute("""CREATE TABLE IF NOT EXISTS country_cache (
     ip TEXT PRIMARY KEY,
     country TEXT,
     flag TEXT)""")
-
 c.execute("""CREATE TABLE IF NOT EXISTS source_passwords (
     source TEXT,
     password TEXT,
@@ -150,7 +139,6 @@ c.execute("""CREATE TABLE IF NOT EXISTS proxies_seen (
     last_posted TEXT)""")
 ensure_column("proxies_seen", "profile_id", "INTEGER DEFAULT 1", 1)
 
-# ---------- جدول profiles با ستون‌های جدید ----------
 c.execute("""CREATE TABLE IF NOT EXISTS profiles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     dest_name TEXT UNIQUE NOT NULL,
@@ -171,14 +159,13 @@ c.execute("""CREATE TABLE IF NOT EXISTS profiles (
     show_date_config INTEGER DEFAULT 1,
     show_date_proxy INTEGER DEFAULT 1)""")
 conn.commit()
-
 ensure_column("profiles", "show_numbers", "INTEGER DEFAULT 1", 1)
 ensure_column("profiles", "custom_query", "TEXT DEFAULT ''", "")
 ensure_column("profiles", "show_date_config", "INTEGER DEFAULT 1", 1)
 ensure_column("profiles", "show_date_proxy", "INTEGER DEFAULT 1", 1)
 
 # ======================================================================
-# مهاجرت از تنظیمات قدیمی
+# مهاجرت
 # ======================================================================
 def migrate_old_config():
     existing = c.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
@@ -291,7 +278,7 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
         (dest_name, sources, banner_config, banner_proxy,
          interval_min, max_post, max_proxies,
          post_configs, post_proxies, ping_mode, last_num,
-         datetime.now().isoformat(), display_name, show_numbers, custom_query,
+         get_tehran_time(), display_name, show_numbers, custom_query,
          show_date_config, show_date_proxy))
     conn.commit()
     return c.lastrowid
@@ -419,7 +406,7 @@ def set_profile_show_date_proxy(profile_id, enabled):
     update_profile(profile_id, show_date_proxy=1 if enabled else 0)
 
 # ======================================================================
-# رمزهای اشتراک
+# رمزها
 # ======================================================================
 def get_pw(profile_id, source):
     return [r[0] for r in c.execute(
@@ -454,6 +441,17 @@ def toggle_sponsor(sid):
     c.execute(
         "UPDATE sponsors SET enabled = CASE WHEN enabled=1 THEN 0 ELSE 1 END WHERE id=?",
         (sid,))
+    conn.commit()
+
+def update_sponsor(sid, name=None, url=None, button_text=None, color=None):
+    if name is not None:
+        c.execute("UPDATE sponsors SET name=? WHERE id=?", (name, sid))
+    if url is not None:
+        c.execute("UPDATE sponsors SET url=? WHERE id=?", (url, sid))
+    if button_text is not None:
+        c.execute("UPDATE sponsors SET button_text=? WHERE id=?", (button_text, sid))
+    if color is not None:
+        c.execute("UPDATE sponsors SET color=? WHERE id=?", (color, sid))
     conn.commit()
 
 def get_enabled_sponsors(profile_id):
@@ -774,7 +772,7 @@ def append_channel_and_flag_encoded(url, channel, flag, custom_query=""):
     return f"{base}#{encoded}"
 
 # ======================================================================
-# توابع پینگ
+# پینگ (سریع‌تر)
 # ======================================================================
 async def host_to_ip(host):
     try:
@@ -789,7 +787,7 @@ async def test_tcp_ping(host, port):
         start = loop.time()
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port),
-            timeout=2.0
+            timeout=1.5
         )
         writer.close()
         await writer.wait_closed()
@@ -806,7 +804,7 @@ async def ping_from_iran_only(host, port=None):
     log.info(f"🔍 Ping target: {target} (host: {host}, port: {port})")
 
     try:
-        async with httpx.AsyncClient(timeout=10) as cl:
+        async with httpx.AsyncClient(timeout=8) as cl:
             r = await cl.get(
                 f"https://check-host.net/check-ping?host={target}&json=1",
                 headers={"User-Agent": "Mozilla/5.0"},
@@ -875,7 +873,7 @@ async def check_full_link_ping(url):
     return ping, ok, cnt
 
 # ======================================================================
-# اسکرپ و رمزگشایی
+# اسکرپ (فقط جدید و سریع)
 # ======================================================================
 def decrypt_subscription(data: bytes, passwords: list):
     protocols = ("vless://", "vmess://", "trojan://",
@@ -939,7 +937,7 @@ def get_v2ray_links_from_text(text):
 async def fetch_files_from_channel(bot, profile_id, channel, source):
     try:
         chat_id = channel if channel.startswith('@') else '@' + channel
-        messages = await bot.get_chat_history(chat_id, limit=20)
+        messages = await bot.get_chat_history(chat_id, limit=10)  # کمتر برای سرعت
         new_links = []
         for msg in messages:
             if is_message_processed(profile_id, source, msg.message_id):
@@ -983,29 +981,15 @@ _USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
 ]
 
-async def scrape_channel_with_retry(profile_id, channel, only_new=False, max_retries=2):
-    last_error = None
-    wait_times = [30, 60]
-    for attempt in range(max_retries):
-        try:
-            result = await _scrape_channel_internal(profile_id, channel, only_new)
-            if result is not None:
-                return result
-        except Exception as e:
-            error_str = str(e).lower()
-            last_error = e
-            if "429" in error_str or "too many" in error_str or "rate" in error_str:
-                wait_time = wait_times[attempt] if attempt < len(wait_times) else 120
-                log.warning(f"⚠️ Rate limit for {channel}, waiting {wait_time}s (attempt {attempt+1}/{max_retries})")
-                await asyncio.sleep(wait_time)
-                continue
-            else:
-                log.error(f"❌ scrape {channel} error: {e}")
-                return [], []
-    log.error(f"❌ All retries failed for {channel}: {last_error}")
-    return [], []
+async def scrape_channel_with_retry(profile_id, channel, only_new=True, max_retries=1):
+    # only_new = True همیشه برای جلوگیری از تکراری
+    try:
+        return await _scrape_channel_internal(profile_id, channel, only_new)
+    except Exception as e:
+        log.error(f"❌ scrape {channel} error: {e}")
+        return [], []
 
-async def _scrape_channel_internal(profile_id, channel, only_new=False):
+async def _scrape_channel_internal(profile_id, channel, only_new=True):
     import time as _t
     current_time = _t.time()
     url = f"https://t.me/s/{channel.lstrip('@')}"
@@ -1022,7 +1006,9 @@ async def _scrape_channel_internal(profile_id, channel, only_new=False):
     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as cl:
         r = await cl.get(url, headers=headers)
         if r.status_code == 429:
-            raise Exception("429 Too Many Requests")
+            log.warning(f"Rate limit for {channel}, waiting 30s")
+            await asyncio.sleep(30)
+            r = await cl.get(url, headers=headers)
         if r.status_code != 200:
             log.warning(f"⚠️ {channel} returned status {r.status_code}")
             return [], []
@@ -1034,21 +1020,18 @@ async def _scrape_channel_internal(profile_id, channel, only_new=False):
         log.info(f"📊 {channel}: found {len(config_links)} configs, {len(proxy_links)} proxies")
         update_last_scrape_time(profile_id, channel, get_tehran_time())
 
-        if only_new:
-            cached = _scrape_cache.get((profile_id, channel), (0, [], []))
-            old_configs = cached[1] if len(cached) > 1 else []
-            old_proxies = cached[2] if len(cached) > 2 else []
-            new_configs = [link for link in config_links if link not in old_configs]
-            new_proxies = [link for link in proxy_links if link not in old_proxies]
-            log.info(f"🆕 {channel}: {len(new_configs)} new configs, {len(new_proxies)} new proxies")
-            _scrape_cache[(profile_id, channel)] = (current_time, config_links, proxy_links)
-            return new_configs, new_proxies
-
+        # همیشه فقط جدیدها را برگردان
+        cached = _scrape_cache.get((profile_id, channel), (0, [], []))
+        old_configs = cached[1] if len(cached) > 1 else []
+        old_proxies = cached[2] if len(cached) > 2 else []
+        new_configs = [link for link in config_links if link not in old_configs]
+        new_proxies = [link for link in proxy_links if link not in old_proxies]
+        log.info(f"🆕 {channel}: {len(new_configs)} new configs, {len(new_proxies)} new proxies")
         _scrape_cache[(profile_id, channel)] = (current_time, config_links, proxy_links)
-        return config_links, proxy_links
+        return new_configs, new_proxies
 
 # ======================================================================
-# توابع ارسال
+# ارسال
 # ======================================================================
 async def send_to_destination(bot, profile_id, text, buttons=None):
     dest = get_profile_dest(profile_id)
@@ -1158,7 +1141,6 @@ async def post_configs(bot, profile_id, working, source_for_seen=""):
     if sponsors:
         sid, sname, surl, stxt, scolor = sponsors[0]
         clean_txt = stxt.replace('★', '').replace('☆', '').strip()
-        # استفاده از رنگ اسپانسر برای استایل دکمه
         style_map = {"blue": "primary", "green": "success", "red": "danger", "yellow": "primary", "purple": "primary"}
         style = style_map.get(scolor, "primary")
         all_buttons.append([InlineKeyboardButton(clean_txt, url=surl, style=style)])
@@ -1216,13 +1198,12 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
     total_proxies = 0
     results = []
 
-    # ارسال کانفیگ‌ها (با تقسیم به چند پست)
+    # کانفیگ
     if post_configs_enabled and working:
         max_post = get_profile_max_post(profile_id)
         unique_working = []
         seen_urls = set()
         for url, ping, cnt in working:
-            # بررسی تکراری بودن
             if not is_already_posted(profile_id, url):
                 unique_working.append((url, ping, cnt))
             else:
@@ -1230,7 +1211,6 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
         if not unique_working:
             log.info("ℹ️ No new configs to post (all duplicates).")
         else:
-            # تقسیم به دسته‌های max_post
             for i in range(0, len(unique_working), max_post):
                 chunk = unique_working[i:i+max_post]
                 config_count, config_payload = await post_configs(bot, profile_id, chunk, source_for_seen)
@@ -1247,7 +1227,7 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
                             total_configs += config_count
                             results.append(f"{config_count} configs (plain)")
 
-    # ارسال پروکسی‌ها
+    # پروکسی
     if post_proxies_enabled and proxies_with_ping:
         valid_proxies = [p for p in proxies_with_ping if "t.me/proxy" in p[0].lower()]
         if valid_proxies:
@@ -1271,7 +1251,7 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
     return total_configs, result_msg
 
 # ======================================================================
-# سیکل کامل برای یک پروفایل
+# سیکل کامل (فقط جدید و تست محدود)
 # ======================================================================
 async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
     log.info("=" * 50)
@@ -1304,7 +1284,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
 
     for src in sources:
         log.info(f"🔍 Processing source: {src}")
-        config_links, proxy_links = await scrape_channel_with_retry(profile_id, src, only_new=only_new, max_retries=2)
+        config_links, proxy_links = await scrape_channel_with_retry(profile_id, src, only_new=True)
         log.info(f"  {src}: {len(config_links)} configs, {len(proxy_links)} proxies from web")
 
         for link in config_links:
@@ -1342,16 +1322,16 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
                     seen_configs.add(link)
                     all_configs.append((link, src))
 
+    # فقط کانفیگ‌هایی که قبلاً پست نشده‌اند
     new_configs = [u for u, src in all_configs if not is_already_posted(profile_id, u)]
     log.info(f"📊 New configs: {len(new_configs)}, New proxies: {len(all_proxies)}")
-    if not all_proxies:
-        log.info("ℹ️ No proxies found in any source.")
 
+    # تست پینگ روی حداکثر ۱۰ کانفیگ
     working = []
     if new_configs:
-        to_test = new_configs[:20]
+        to_test = new_configs[:10]  # فقط ۱۰ تا برای سرعت
         log.info(f"📊 Testing {len(to_test)} configs...")
-        sem = asyncio.Semaphore(20)
+        sem = asyncio.Semaphore(10)
         async def _check(u):
             async with sem:
                 try:
@@ -1376,12 +1356,13 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
     else:
         log.info("ℹ️ No new configs to test")
 
+    # پروکسی
     proxy_with_ping = []
     if all_proxies:
         valid_proxies = [p for p in all_proxies if "t.me/proxy" in p.lower()]
         if valid_proxies:
             log.info(f"📊 Testing {len(valid_proxies)} proxies...")
-            sem = asyncio.Semaphore(20)
+            sem = asyncio.Semaphore(10)
             async def check_proxy(proxy_url):
                 async with sem:
                     ping, ok, cnt = await check_full_link_ping(proxy_url)
@@ -1415,7 +1396,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
     return result
 
 # ======================================================================
-# حلقه خودکار
+# حلقه خودکار (دقیق و بر اساس فاصله)
 # ======================================================================
 async def profile_loop(bot, profile_id):
     while True:
@@ -1425,6 +1406,7 @@ async def profile_loop(bot, profile_id):
                 log.error(f"❌ Profile {profile_id} not found, stopping loop.")
                 break
             interval = profile["interval_min"]
+            # منتظر می‌مانیم تا دقیقه‌ی بعد
             now = datetime.now()
             next_run = now + timedelta(minutes=interval)
             sleep_seconds = (next_run - now).total_seconds()
@@ -1445,7 +1427,7 @@ async def profile_loop(bot, profile_id):
             await asyncio.sleep(60)
 
 # ======================================================================
-# کیبوردها و پیام‌ها (با استایل)
+# کیبوردها و پیام‌ها (با دکمه بازگشت کامل)
 # ======================================================================
 BOT_REF = None
 BOT_LANG = "fa"
@@ -1526,7 +1508,7 @@ T = {
         "sp_removed": "✅ حذف شد",
         "sp_title": "📢 اسپانسرها:",
         "sp_none": "خالی",
-        "sp_err": "❌ فرمت: name|url|text|color (رنگ‌ها: blue, green, red, yellow, purple)",
+        "sp_err": "❌ فرمت: name|url|text|color (رنگ‌ها: blue, green, red)",
         "pw_common_added": "✅ +۳ رمز رایج",
         "doc_select": "این فایل از کدوم منبعه؟",
         "doc_no_src": "❌ منبعی نیست، اول اضافه کن",
@@ -1558,6 +1540,13 @@ T = {
         "toggle_numbers_ok": "✅ شماره‌گذاری {'فعال' if status else 'غیرفعال'} شد.",
         "date_cfg_toggle": "✅ نمایش تاریخ در بنر کانفیگ {'فعال' if status else 'غیرفعال'} شد.",
         "date_prx_toggle": "✅ نمایش تاریخ در بنر پروکسی {'فعال' if status else 'غیرفعال'} شد.",
+        "sp_edit_prompt": "📢 **ویرایش اسپانسر**\n\nنام: {name}\nلینک: {url}\nمتن: {text}\nرنگ: {color}\n\nبرای ویرایش هر بخش، دکمه مربوطه را بزنید.",
+        "sp_edit_name": "نام جدید (خالی برای عدم تغییر):",
+        "sp_edit_url": "لینک جدید (خالی برای عدم تغییر):",
+        "sp_edit_text": "متن جدید دکمه (خالی برای عدم تغییر):",
+        "sp_edit_color": "رنگ جدید (blue/green/red) - خالی برای عدم تغییر:",
+        "sp_updated": "✅ اسپانسر به‌روزرسانی شد.",
+        "btn_edit_sponsor": "✏️ ویرایش",
     },
     "en": {
         "welcome": "🤖 **Config & Proxy Aggregator**\n\n"
@@ -1629,12 +1618,12 @@ T = {
         "src_none": "none",
         "reset_ok": "✅ Reset (#1)",
         "lang_ok": "✅ Switched to English",
-        "sp_prompt": "📢 Sponsor:\nFormat: name|url|button_text|color\nColors: blue, green, red, yellow, purple\nExample:\nMySite|https://site.com|Visit|blue",
+        "sp_prompt": "📢 Sponsor:\nFormat: name|url|button_text|color\nColors: blue, green, red\nExample:\nMySite|https://site.com|Visit|blue",
         "sp_added": "✅ '{name}' added",
         "sp_removed": "✅ Removed",
         "sp_title": "📢 Sponsors:",
         "sp_none": "none",
-        "sp_err": "❌ Bad format: name|url|text|color (colors: blue, green, red, yellow, purple)",
+        "sp_err": "❌ Bad format: name|url|text|color (colors: blue, green, red)",
         "pw_common_added": "✅ +3 common PW",
         "doc_select": "Which source is this from?",
         "doc_no_src": "❌ No sources. Add first",
@@ -1666,6 +1655,13 @@ T = {
         "toggle_numbers_ok": "✅ Numbering {'enabled' if status else 'disabled'}.",
         "date_cfg_toggle": "✅ Config date display {'enabled' if status else 'disabled'}.",
         "date_prx_toggle": "✅ Proxy date display {'enabled' if status else 'disabled'}.",
+        "sp_edit_prompt": "📢 **Edit Sponsor**\n\nName: {name}\nURL: {url}\nText: {text}\nColor: {color}\n\nClick a button to edit.",
+        "sp_edit_name": "New name (leave empty to keep):",
+        "sp_edit_url": "New URL (leave empty to keep):",
+        "sp_edit_text": "New button text (leave empty to keep):",
+        "sp_edit_color": "New color (blue/green/red - leave empty to keep):",
+        "sp_updated": "✅ Sponsor updated.",
+        "btn_edit_sponsor": "✏️ Edit",
     },
 }
 
@@ -1679,7 +1675,7 @@ def msg(key, **kwargs):
     return text
 
 # ======================================================================
-# ساخت کیبوردها (با استایل)
+# کیبوردها
 # ======================================================================
 def profiles_kb():
     profiles = get_profiles()
@@ -1795,6 +1791,9 @@ def sponsors_kb(profile_id):
             btns.append([
                 InlineKeyboardButton(f"{st} {name[:25]}", callback_data=f"spt_{profile_id}_{sid}", style=style),
                 InlineKeyboardButton("🗑", callback_data=f"spd_{profile_id}_{sid}", style="danger"),
+            ])
+            btns.append([
+                InlineKeyboardButton(msg("btn_edit_sponsor"), callback_data=f"sp_edit_{profile_id}_{sid}", style="primary")
             ])
     btns.append([InlineKeyboardButton("➕ add sponsor", callback_data=f"sp_add_{profile_id}", style="success")])
     btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")])
@@ -1924,7 +1923,7 @@ async def cmd_diag(update: Update, context):
     await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
 
 # ======================================================================
-# کالبک هندلر
+# کالبک
 # ======================================================================
 async def on_callback(u, ctx):
     q = u.callback_query
@@ -2011,6 +2010,99 @@ async def on_callback(u, ctx):
                 del ctx.user_data["sponsor_button_text"]
             else:
                 await q.answer("❌ اطلاعات ناقص است.")
+            return
+
+        if d.startswith("sp_edit_"):
+            # ویرایش اسپانسر
+            parts = d.split("_")
+            sid = int(parts[2])
+            sponsor = c.execute("SELECT id, name, url, button_text, color FROM sponsors WHERE id=?", (sid,)).fetchone()
+            if not sponsor:
+                await q.answer("❌ اسپانسر یافت نشد.")
+                return
+            ctx.user_data["sponsor_edit_id"] = sid
+            ctx.user_data["sponsor_edit_profile_id"] = profile_id
+            txt = msg("sp_edit_prompt",
+                      name=sponsor[1],
+                      url=sponsor[2],
+                      text=sponsor[3],
+                      color=sponsor[4])
+            await q.edit_message_text(
+                txt,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("نام", callback_data=f"sp_edit_name_{sid}", style="primary"),
+                     InlineKeyboardButton("لینک", callback_data=f"sp_edit_url_{sid}", style="primary")],
+                    [InlineKeyboardButton("متن دکمه", callback_data=f"sp_edit_text_{sid}", style="primary"),
+                     InlineKeyboardButton("رنگ", callback_data=f"sp_edit_color_{sid}", style="primary")],
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}", style="primary")]
+                ])
+            )
+            return
+
+        if d.startswith("sp_edit_name_"):
+            sid = int(d.split("_")[3])
+            ctx.user_data["sponsor_edit_field"] = "name"
+            await q.edit_message_text(
+                msg("sp_edit_name"),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_edit_{profile_id}_{sid}", style="primary")]
+                ])
+            )
+            return
+
+        if d.startswith("sp_edit_url_"):
+            sid = int(d.split("_")[3])
+            ctx.user_data["sponsor_edit_field"] = "url"
+            await q.edit_message_text(
+                msg("sp_edit_url"),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_edit_{profile_id}_{sid}", style="primary")]
+                ])
+            )
+            return
+
+        if d.startswith("sp_edit_text_"):
+            sid = int(d.split("_")[3])
+            ctx.user_data["sponsor_edit_field"] = "text"
+            await q.edit_message_text(
+                msg("sp_edit_text"),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_edit_{profile_id}_{sid}", style="primary")]
+                ])
+            )
+            return
+
+        if d.startswith("sp_edit_color_"):
+            sid = int(d.split("_")[3])
+            ctx.user_data["sponsor_edit_field"] = "color"
+            await q.edit_message_text(
+                "🎨 **رنگ جدید (blue / green / red):**",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔵 آبی", callback_data=f"sp_color_update_{sid}_blue", style="primary"),
+                     InlineKeyboardButton("🟢 سبز", callback_data=f"sp_color_update_{sid}_green", style="success"),
+                     InlineKeyboardButton("🔴 قرمز", callback_data=f"sp_color_update_{sid}_red", style="danger")],
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_edit_{profile_id}_{sid}", style="primary")]
+                ])
+            )
+            return
+
+        if d.startswith("sp_color_update_"):
+            parts = d.split("_")
+            sid = int(parts[3])
+            color = parts[4]
+            if color in ("blue", "green", "red"):
+                update_sponsor(sid, color=color)
+                await q.answer("✅ رنگ به‌روزرسانی شد.")
+                await q.edit_message_text(msg("sp_updated"), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 بازگشت به اسپانسرها", callback_data=f"sp_menu_{profile_id}", style="primary")]
+                ]))
+            else:
+                await q.answer("❌ رنگ نامعتبر.")
             return
 
         if d.startswith("spt_"):
@@ -2169,13 +2261,13 @@ async def on_callback(u, ctx):
         if d.startswith("ac_"):
             ctx.user_data["action"] = f"ac_{profile_id}"
             current_name = get_profile_dest(profile_id) or "نامشخص"
-            await q.edit_message_text(f"نام فعلی: {current_name}\nنام جدید را بفرست:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
+            await q.edit_message_text(f"نام فعلی: {current_name}\nنام جدید را بفرست (خالی برای حذف):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
             return
 
         if d.startswith("adn_"):
             ctx.user_data["action"] = f"adn_{profile_id}"
             current_display = get_profile_display_name(profile_id) or "تنظیم نشده"
-            await q.edit_message_text(f"نام نمایشی فعلی: {current_display}\nنام جدید را بفرست (خالی برای پاک کردن):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
+            await q.edit_message_text(f"نام نمایشی فعلی: {current_display}\nنام جدید را بفرست (خالی برای حذف):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
             return
 
         if d.startswith("rename_"):
@@ -2198,13 +2290,13 @@ async def on_callback(u, ctx):
         if d.startswith("ai_"):
             ctx.user_data["action"] = f"ai_{profile_id}"
             current = get_profile_interval(profile_id)
-            await q.edit_message_text(f"Now: {current}m\nSend 1-1440:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
+            await q.edit_message_text(f"Now: {current}m\nSend 1-1440 (خالی برای عدم تغییر):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
             return
 
         if d.startswith("setmax_"):
             ctx.user_data["action"] = f"setmax_{profile_id}"
             current = get_profile_max_post(profile_id)
-            await q.edit_message_text(f"Now: {current}\nSend 1-50:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
+            await q.edit_message_text(f"Now: {current}\nSend 1-50 (خالی برای عدم تغییر):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
             return
 
         if d.startswith("ast_"):
@@ -2404,7 +2496,44 @@ async def on_text(u, ctx):
     if PRIVATE_MODE and u.effective_user.id != ADMIN_ID:
         return
 
-    # پردازش مراحل اسپانسر
+    # ویرایش اسپانسر
+    if ctx.user_data.get("sponsor_edit_field"):
+        field = ctx.user_data["sponsor_edit_field"]
+        sid = ctx.user_data.get("sponsor_edit_id")
+        if not sid:
+            del ctx.user_data["sponsor_edit_field"]
+            return
+        txt = u.message.text.strip()
+        if field == "name":
+            if txt:
+                update_sponsor(sid, name=txt)
+            else:
+                await u.message.reply_text("❌ نام خالی ماند.")
+        elif field == "url":
+            if txt:
+                if not txt.startswith(("http://", "https://")):
+                    txt = "https://" + txt
+                update_sponsor(sid, url=txt)
+            else:
+                await u.message.reply_text("❌ لینک خالی ماند.")
+        elif field == "text":
+            if txt:
+                update_sponsor(sid, button_text=txt)
+            else:
+                await u.message.reply_text("❌ متن خالی ماند.")
+        elif field == "color":
+            if txt in ("blue", "green", "red"):
+                update_sponsor(sid, color=txt)
+            else:
+                await u.message.reply_text("❌ رنگ نامعتبر.")
+        del ctx.user_data["sponsor_edit_field"]
+        await u.message.reply_text(msg("sp_updated"), parse_mode="HTML")
+        profile_id = ctx.user_data.get("sponsor_edit_profile_id")
+        if profile_id:
+            await show_profile_admin(u.message, profile_id)
+        return
+
+    # مراحل اسپانسر جدید
     if ctx.user_data.get("sponsor_step"):
         profile_id = ctx.user_data.get("sponsor_profile_id")
         if not profile_id:
@@ -2425,7 +2554,10 @@ async def on_text(u, ctx):
             return
 
         if step == "url":
-            ctx.user_data["sponsor_url"] = u.message.text.strip()
+            url = u.message.text.strip()
+            if not url.startswith(("http://", "https://")):
+                url = "https://" + url
+            ctx.user_data["sponsor_url"] = url
             ctx.user_data["sponsor_step"] = "button_text"
             await u.message.reply_text(
                 "📝 **متن دکمه را وارد کنید (مثلاً «بازدید»):**",
@@ -2446,8 +2578,6 @@ async def on_text(u, ctx):
                     [InlineKeyboardButton("🔵 آبی", callback_data=f"sp_color_{profile_id}_blue", style="primary")],
                     [InlineKeyboardButton("🟢 سبز", callback_data=f"sp_color_{profile_id}_green", style="success")],
                     [InlineKeyboardButton("🔴 قرمز", callback_data=f"sp_color_{profile_id}_red", style="danger")],
-                    [InlineKeyboardButton("🟡 زرد", callback_data=f"sp_color_{profile_id}_yellow", style="primary")],
-                    [InlineKeyboardButton("🟣 بنفش", callback_data=f"sp_color_{profile_id}_purple", style="primary")],
                     [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}", style="primary")]
                 ])
             )
@@ -2460,7 +2590,10 @@ async def on_text(u, ctx):
     t = u.message.text.strip()
 
     if a == "prof_add":
-        dest_name = t
+        dest_name = t if t else None
+        if not dest_name:
+            await u.message.reply_text("❌ نام مقصد خالی است.")
+            return
         if not dest_name.startswith("@") and not dest_name.isdigit():
             dest_name = "@" + dest_name
         profiles = get_profiles()
@@ -2475,6 +2608,9 @@ async def on_text(u, ctx):
 
     if a.startswith("sa_"):
         profile_id = int(a.split("_")[1])
+        if not t:
+            await u.message.reply_text("❌ ورودی خالی است.")
+            return
         items = re.split(r'[,،\n]+', t)
         items = [x.strip() for x in items if x.strip()]
         srcs = get_profile_sources(profile_id)
@@ -2497,29 +2633,31 @@ async def on_text(u, ctx):
 
     if a.startswith("da_"):
         profile_id = int(a.split("_")[1])
-        dest = t
-        if not dest.startswith("@") and not dest.isdigit():
-            dest = "@" + dest
-        set_profile_dest(profile_id, dest)
-        await u.message.reply_text(msg("dest_set", dest=dest))
+        dest = t if t else None
+        if not dest:
+            set_profile_dest(profile_id, "")
+            await u.message.reply_text(msg("removed"))
+        else:
+            if not dest.startswith("@") and not dest.isdigit():
+                dest = "@" + dest
+            set_profile_dest(profile_id, dest)
+            await u.message.reply_text(msg("dest_set", dest=dest))
         del ctx.user_data["action"]
         await show_profile_admin(u.message, profile_id)
         return
 
     if a.startswith("ac_"):
         profile_id = int(a.split("_")[1])
-        name = t if t.startswith("@") or (not t.startswith("-") and not t.isdigit()) else "?@" + t
-        if name.startswith("?@"):
-            name = name[1:]
+        name = t if t else ""
         set_profile_dest(profile_id, name)
-        await u.message.reply_text(msg("name_set", name=name))
+        await u.message.reply_text(msg("name_set", name=name if name else "حذف شد"))
         del ctx.user_data["action"]
         await show_profile_admin(u.message, profile_id)
         return
 
     if a.startswith("adn_"):
         profile_id = int(a.split("_")[1])
-        new_name = t.strip()
+        new_name = t if t else ""
         set_profile_display_name(profile_id, new_name)
         await u.message.reply_text(msg("display_name_set", name=new_name if new_name else "پاک شد"))
         del ctx.user_data["action"]
@@ -2534,6 +2672,9 @@ async def on_text(u, ctx):
 
     if a.startswith("ab_config_"):
         profile_id = int(a.split("_")[2])
+        if not t:
+            await u.message.reply_text("❌ بنر خالی است.")
+            return
         if "{configs}" in t:
             update_profile(profile_id, banner_config=t)
             await u.message.reply_text(msg("banner_ok"))
@@ -2545,6 +2686,9 @@ async def on_text(u, ctx):
 
     if a.startswith("ab_proxy_"):
         profile_id = int(a.split("_")[2])
+        if not t:
+            await u.message.reply_text("❌ بنر خالی است.")
+            return
         if "{proxies}" in t:
             update_profile(profile_id, banner_proxy=t)
             await u.message.reply_text(msg("banner_ok"))
@@ -2556,6 +2700,11 @@ async def on_text(u, ctx):
 
     if a.startswith("ai_"):
         profile_id = int(a.split("_")[1])
+        if not t:
+            await u.message.reply_text("✅ بدون تغییر.")
+            del ctx.user_data["action"]
+            await show_profile_admin(u.message, profile_id)
+            return
         try:
             n = int(t)
         except:
@@ -2571,6 +2720,11 @@ async def on_text(u, ctx):
 
     if a.startswith("setmax_"):
         profile_id = int(a.split("_")[1])
+        if not t:
+            await u.message.reply_text("✅ بدون تغییر.")
+            del ctx.user_data["action"]
+            await show_profile_admin(u.message, profile_id)
+            return
         try:
             n = int(t)
         except:
@@ -2615,7 +2769,7 @@ async def on_text(u, ctx):
 
     if a.startswith("setquery_"):
         profile_id = int(a.split("_")[1])
-        query = t.strip()
+        query = t if t else ""
         set_profile_custom_query(profile_id, query)
         await u.message.reply_text(msg("custom_query_set", query=query if query else "خالی"))
         del ctx.user_data["action"]
@@ -2642,7 +2796,7 @@ async def on_document(u, ctx):
         return
 
 # ======================================================================
-# پردازش تغییر نام سرور
+# پردازش تغییر نام
 # ======================================================================
 async def process_rename(u, message, profile_id, is_document=False):
     p = await message.reply_text("⏳ در حال پردازش برای تغییر نام...")
@@ -2708,7 +2862,7 @@ async def process_rename(u, message, profile_id, is_document=False):
         await p.edit_text(f"❌ {str(e)[:200]}")
 
 # ======================================================================
-# پردازش ارسال دستی (با تقسیم)
+# ارسال دستی (با تقسیم)
 # ======================================================================
 async def process_manual_text(u, message, profile_id, is_document=False):
     p = await message.reply_text(msg("manual_send_processing"))
@@ -2758,7 +2912,6 @@ async def process_manual_text(u, message, profile_id, is_document=False):
 
         await p.edit_text(f"⏳ آماده‌سازی {len(new_configs)} کانفیگ و {len(new_proxies)} پروکسی...")
 
-        # ساخت لیست working با پینگ 0
         working = [(url, 0, 0) for url in new_configs[:30]]
         proxy_with_ping = []
         for proxy_url in new_proxies[:10]:

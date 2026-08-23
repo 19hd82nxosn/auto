@@ -13,6 +13,7 @@ import html
 from datetime import datetime, timedelta
 from urllib.parse import quote, unquote, urlparse, parse_qs, urlencode, urlunparse
 import httpx
+import pytz
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -23,7 +24,9 @@ from telegram.ext import (
 )
 from telegram.error import BadRequest
 
-# ---------- خواندن متغیرهای محیطی ----------
+# ======================================================================
+# متغیرهای محیطی
+# ======================================================================
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("BOT_TOKEN environment variable not set")
@@ -31,12 +34,16 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 if not ADMIN_ID:
     raise ValueError("ADMIN_ID environment variable not set")
 
-# ---------- مسیر دیتابیس روی فضای پایدار ----------
+# ======================================================================
+# مسیر پایدار (برای ریلیو)
+# ======================================================================
 DATA_DIR = os.getenv("DATA_DIR", ".")
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "bot.db")
 
-# ---------- تنظیم لاگ ----------
+# ======================================================================
+# تنظیم لاگ
+# ======================================================================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -47,12 +54,28 @@ logging.basicConfig(
 )
 log = logging.getLogger("bot")
 
+# ======================================================================
+# منطقه زمانی تهران
+# ======================================================================
+TEHRAN_TZ = pytz.timezone('Asia/Tehran')
+
+def get_tehran_time() -> str:
+    return datetime.now(TEHRAN_TZ).strftime('%Y-%m-%d %H:%M:%S')
+
+def get_tehran_date() -> str:
+    return datetime.now(TEHRAN_TZ).strftime('%Y-%m-%d')
+
+# ======================================================================
+# اتصال به دیتابیس
+# ======================================================================
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 conn.execute("PRAGMA journal_mode=WAL")
 conn.execute("PRAGMA synchronous=NORMAL")
 c = conn.cursor()
 
-# ---------- توابع کمکی برای اطمینان از وجود ستون‌ها ----------
+# ======================================================================
+# توابع کمکی برای اطمینان از وجود ستون
+# ======================================================================
 def ensure_column(table, column, col_type, default=None):
     try:
         c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
@@ -63,35 +86,37 @@ def ensure_column(table, column, col_type, default=None):
     except sqlite3.OperationalError:
         pass
 
-# ---------- ایجاد جداول ----------
+# ======================================================================
+# ایجاد جداول
+# ======================================================================
 c.execute("""CREATE TABLE IF NOT EXISTS seen (
-    uuid TEXT, 
+    uuid TEXT,
     address TEXT,
     source TEXT DEFAULT '',
-    first_seen TEXT, 
+    first_seen TEXT,
     last_posted TEXT,
     UNIQUE(uuid, address))""")
 
 c.execute("""CREATE TABLE IF NOT EXISTS cfg (
-    k TEXT PRIMARY KEY, 
+    k TEXT PRIMARY KEY,
     v TEXT)""")
 
 c.execute("""CREATE TABLE IF NOT EXISTS posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    content TEXT, 
-    count INTEGER, 
+    content TEXT,
+    count INTEGER,
     created_at TEXT)""")
 
 ensure_column("seen", "source", "TEXT DEFAULT ''")
 ensure_column("seen", "profile_id", "INTEGER DEFAULT 1", 1)
 
 c.execute("""CREATE TABLE IF NOT EXISTS country_cache (
-    ip TEXT PRIMARY KEY, 
-    country TEXT, 
+    ip TEXT PRIMARY KEY,
+    country TEXT,
     flag TEXT)""")
 
 c.execute("""CREATE TABLE IF NOT EXISTS source_passwords (
-    source TEXT, 
+    source TEXT,
     password TEXT,
     UNIQUE(source, password))""")
 ensure_column("source_passwords", "profile_id", "INTEGER DEFAULT 1", 1)
@@ -142,13 +167,19 @@ c.execute("""CREATE TABLE IF NOT EXISTS profiles (
     created_at TEXT,
     display_name TEXT DEFAULT '',
     show_numbers INTEGER DEFAULT 1,
-    custom_query TEXT DEFAULT '')""")
+    custom_query TEXT DEFAULT '',
+    show_date_config INTEGER DEFAULT 1,
+    show_date_proxy INTEGER DEFAULT 1)""")
 conn.commit()
 
 ensure_column("profiles", "show_numbers", "INTEGER DEFAULT 1", 1)
 ensure_column("profiles", "custom_query", "TEXT DEFAULT ''", "")
+ensure_column("profiles", "show_date_config", "INTEGER DEFAULT 1", 1)
+ensure_column("profiles", "show_date_proxy", "INTEGER DEFAULT 1", 1)
 
-# ------------------ مهاجرت از تنظیمات قدیمی به پروفایل‌ها ------------------
+# ======================================================================
+# مهاجرت از تنظیمات قدیمی
+# ======================================================================
 def migrate_old_config():
     existing = c.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
     if existing > 0:
@@ -178,18 +209,20 @@ def migrate_old_config():
         c.execute("""INSERT INTO profiles
             (dest_name, sources, banner_config, banner_proxy, interval_min,
              max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num, created_at, display_name,
-             show_numbers, custom_query)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             show_numbers, custom_query, show_date_config, show_date_proxy)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (dest, old_sources, old_banner_config, old_banner_proxy,
              old_interval, old_max_post, old_max_proxies,
              old_post_configs, old_post_proxies, old_ping_mode, old_last_num,
-             datetime.now().isoformat(), "", 1, ""))
+             datetime.now().isoformat(), "", 1, "", 1, 1))
     conn.commit()
     log.info(f"✅ Migrated {len(dest_list)} profiles.")
 
 migrate_old_config()
 
-# ------------------ توابع کمکی پروفایل‌ها ------------------
+# ======================================================================
+# توابع پروفایل
+# ======================================================================
 def get_profiles():
     rows = c.execute("SELECT * FROM profiles ORDER BY id").fetchall()
     profiles = []
@@ -210,7 +243,9 @@ def get_profiles():
             "created_at": row[12],
             "display_name": row[13] if len(row) > 13 else "",
             "show_numbers": row[14] if len(row) > 14 else 1,
-            "custom_query": row[15] if len(row) > 15 else ""
+            "custom_query": row[15] if len(row) > 15 else "",
+            "show_date_config": row[16] if len(row) > 16 else 1,
+            "show_date_proxy": row[17] if len(row) > 17 else 1
         })
     return profiles
 
@@ -234,13 +269,16 @@ def get_profile(profile_id):
         "created_at": row[12],
         "display_name": row[13] if len(row) > 13 else "",
         "show_numbers": row[14] if len(row) > 14 else 1,
-        "custom_query": row[15] if len(row) > 15 else ""
+        "custom_query": row[15] if len(row) > 15 else "",
+        "show_date_config": row[16] if len(row) > 16 else 1,
+        "show_date_proxy": row[17] if len(row) > 17 else 1
     }
 
 def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
                    interval_min=5, max_post=8, max_proxies=10,
                    post_configs=1, post_proxies=1, ping_mode="iran", last_num=0,
-                   display_name="", show_numbers=1, custom_query=""):
+                   display_name="", show_numbers=1, custom_query="",
+                   show_date_config=1, show_date_proxy=1):
     if not banner_config:
         banner_config = "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
     if not banner_proxy:
@@ -248,12 +286,13 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
     c.execute("""INSERT INTO profiles
         (dest_name, sources, banner_config, banner_proxy, interval_min,
          max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num, created_at, display_name,
-         show_numbers, custom_query)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         show_numbers, custom_query, show_date_config, show_date_proxy)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (dest_name, sources, banner_config, banner_proxy,
          interval_min, max_post, max_proxies,
          post_configs, post_proxies, ping_mode, last_num,
-         datetime.now().isoformat(), display_name, show_numbers, custom_query))
+         datetime.now().isoformat(), display_name, show_numbers, custom_query,
+         show_date_config, show_date_proxy))
     conn.commit()
     return c.lastrowid
 
@@ -261,7 +300,7 @@ def update_profile(profile_id, **kwargs):
     allowed = ["dest_name", "sources", "banner_config", "banner_proxy",
                "interval_min", "max_post", "max_proxies", "post_configs",
                "post_proxies", "ping_mode", "last_num", "display_name",
-               "show_numbers", "custom_query"]
+               "show_numbers", "custom_query", "show_date_config", "show_date_proxy"]
     for key, value in kwargs.items():
         if key in allowed:
             c.execute(f"UPDATE profiles SET {key}=? WHERE id=?", (value, profile_id))
@@ -365,123 +404,23 @@ def get_profile_custom_query(profile_id):
 def set_profile_custom_query(profile_id, query):
     update_profile(profile_id, custom_query=query)
 
-# ------------------ توابع دستکاری لینک (اصلاح‌شده) ------------------
-def strip_url_fragment(url):
-    if '#' in url:
-        return url.split('#')[0]
-    return url
+def get_profile_show_date_config(profile_id):
+    prof = get_profile(profile_id)
+    return prof["show_date_config"] == 1 if prof else True
 
-def extract_host(url):
-    try:
-        parsed = urlparse(url)
-        host = parsed.hostname
-        port = parsed.port
+def set_profile_show_date_config(profile_id, enabled):
+    update_profile(profile_id, show_date_config=1 if enabled else 0)
 
-        if host and host.lower() == 't.me' and parsed.path.startswith('/proxy'):
-            query = parse_qs(parsed.query)
-            server = query.get('server', [None])[0]
-            if server:
-                if ':' in server:
-                    host, port_str = server.rsplit(':', 1)
-                    port = int(port_str)
-                else:
-                    host = server
-                    port_str = query.get('port', [None])[0]
-                    if port_str:
-                        port = int(port_str)
-                return host, port
-            return host, port
+def get_profile_show_date_proxy(profile_id):
+    prof = get_profile(profile_id)
+    return prof["show_date_proxy"] == 1 if prof else True
 
-        if host:
-            if parsed.port:
-                return host, parsed.port
-            else:
-                if ':' in parsed.netloc:
-                    host_part, port_part = parsed.netloc.rsplit(':', 1)
-                    if port_part.isdigit():
-                        return host_part, int(port_part)
-                return host, None
-        if "://" in url:
-            url = url.split("://", 1)[1]
-        for c in '?#':
-            if c in url:
-                url = url.split(c)[0]
-        if "@" in url:
-            url = url.split("@")[-1]
-        if ":" in url:
-            host, port = url.rsplit(":", 1)
-            return host.strip(), int(port)
-        else:
-            return url.strip(), None
-    except Exception as e:
-        log.warning(f"extract_host error for {url}: {e}")
-        return None, None
+def set_profile_show_date_proxy(profile_id, enabled):
+    update_profile(profile_id, show_date_proxy=1 if enabled else 0)
 
-# ============================================================
-# تابع اصلاح‌شده برای قرار دادن کوئری در ابتدا
-# ============================================================
-def add_custom_query_to_url(url, custom_query, protocol):
-    """
-    اضافه کردن custom_query به ابتدای کوئری لینک (بعد از ? و قبل از سایر پارامترها)
-    فقط برای پروتکل‌های غیر از vmess
-    """
-    if not custom_query or protocol.lower() == 'vmess':
-        return url
-
-    # جدا کردن fragment
-    if '#' in url:
-        base, fragment = url.split('#', 1)
-    else:
-        base = url
-        fragment = None
-
-    parsed = urlparse(base)
-    
-    # پارامترهای موجود را دریافت کن
-    existing_params = parse_qs(parsed.query)
-    # پارامترهای سفارشی را دریافت کن
-    custom_params = parse_qs(custom_query)
-    
-    # دیکشنری جدید با اولویت سفارشی‌ها (برای حفظ ترتیب در پایتون 3.7+)
-    new_query_dict = {}
-    
-    # اول پارامترهای سفارشی رو اضافه کن
-    for k, v in custom_params.items():
-        new_query_dict[k] = v[-1] if v else ""
-    
-    # بعد پارامترهای موجود رو اضافه کن (اگر کلید تکراری بود، مقدار سفارشی نگه داشته میشه چون اول اضافه شد)
-    for k, v in existing_params.items():
-        if k not in new_query_dict:  # اگر قبلا اضافه نشده، اضافه کن
-            new_query_dict[k] = v[-1] if v else ""
-    
-    # ساخت کوئری جدید
-    new_query = urlencode(new_query_dict, doseq=True)
-    
-    # بازسازی لینک
-    new_base = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, ''))
-    if fragment:
-        new_base += '#' + fragment
-    return new_base
-
-def change_link_display_name(url, new_name, flag, custom_query=""):
-    protocol = url.split('://')[0].lower() if '://' in url else ''
-    if custom_query and protocol != 'vmess':
-        url = add_custom_query_to_url(url, custom_query, protocol)
-    base = strip_url_fragment(url)
-    fragment = f"{new_name} {flag}"
-    encoded = quote(fragment, safe='')
-    return f"{base}#{encoded}"
-
-def append_channel_and_flag_encoded(url, channel, flag, custom_query=""):
-    protocol = url.split('://')[0].lower() if '://' in url else ''
-    if custom_query and protocol != 'vmess':
-        url = add_custom_query_to_url(url, custom_query, protocol)
-    base = strip_url_fragment(url)
-    fragment = f"{channel} {flag}"
-    encoded = quote(fragment, safe='')
-    return f"{base}#{encoded}"
-
-# ------------------ رمزهای اشتراک ------------------
+# ======================================================================
+# رمزهای اشتراک
+# ======================================================================
 def get_pw(profile_id, source):
     return [r[0] for r in c.execute(
         "SELECT password FROM source_passwords WHERE source=? AND profile_id=?",
@@ -497,12 +436,14 @@ def del_pw(profile_id, source, password):
               (source.lower(), password, profile_id))
     conn.commit()
 
-# ------------------ اسپانسرها ------------------
+# ======================================================================
+# اسپانسرها
+# ======================================================================
 def add_sponsor(profile_id, name, url, button_text="Advertisement", color="blue"):
     c.execute("""INSERT INTO sponsors
         (profile_id, name, url, button_text, color, enabled, created_at)
         VALUES (?, ?, ?, ?, ?, 1, ?)""",
-        (profile_id, name, url, button_text, color, datetime.now().isoformat()))
+        (profile_id, name, url, button_text, color, get_tehran_time()))
     conn.commit()
 
 def remove_sponsor(sid):
@@ -527,7 +468,9 @@ def get_all_sponsors(profile_id):
         (profile_id,)
     ).fetchall()
 
-# ------------------ توابع کمکی دیگر ------------------
+# ======================================================================
+# توابع کمکی
+# ======================================================================
 def country_to_flag(code):
     if not code or len(code) != 2 or not code.isalpha():
         return "🌐"
@@ -589,7 +532,7 @@ def extract_links_from_text(text):
         link = re.sub(r'[.,;:!؟\'"`]+$', '', link)
         if len(link) > 10:
             results.append(link)
-    
+
     if not results:
         for token in text.split():
             token = token.strip()
@@ -598,7 +541,7 @@ def extract_links_from_text(text):
                     clean = re.sub(r'[.,;:!؟\'"`]+$', '', token)
                     if len(clean) > len(proto) + 5:
                         results.append(clean)
-    
+
     if not results:
         text_clean = text.replace('\n', '').replace('\r', '').strip()
         if re.match(r'^[A-Za-z0-9+/=]+$', text_clean):
@@ -611,7 +554,7 @@ def extract_links_from_text(text):
                             results.append(link)
             except Exception:
                 pass
-        
+
         for line in text.splitlines():
             line = line.strip()
             if not line or len(line) > 2000:
@@ -627,7 +570,7 @@ def extract_links_from_text(text):
                                 results.append(link)
                 except:
                     pass
-    
+
     if not results:
         for line in text.splitlines():
             line = line.strip()
@@ -635,7 +578,7 @@ def extract_links_from_text(text):
                 if line.lower().startswith(proto):
                     results.append(line)
                     break
-    
+
     return list(set(results))
 
 def normalize_proxy_url(url):
@@ -697,7 +640,7 @@ def mark_as_posted(profile_id, url, source=""):
     uid, host = extract_uuid_and_address(url)
     if not uid or not host:
         return
-    now = datetime.now().isoformat()
+    now = get_tehran_time()
     c.execute(
         "INSERT INTO seen (uuid,address,source,first_seen,last_posted,profile_id) "
         "VALUES (?,?,?,?,?,?) "
@@ -706,6 +649,133 @@ def mark_as_posted(profile_id, url, source=""):
         (uid, host, source, now, now, profile_id))
     conn.commit()
 
+def is_message_processed(profile_id, source, message_id):
+    r = c.execute("SELECT 1 FROM processed_messages WHERE source=? AND message_id=? AND profile_id=?", (source, message_id, profile_id)).fetchone()
+    return r is not None
+
+def mark_message_processed(profile_id, source, message_id):
+    c.execute("INSERT OR REPLACE INTO processed_messages (source, message_id, profile_id) VALUES (?,?,?)",
+              (source, message_id, profile_id))
+    conn.commit()
+
+def is_proxy_posted(profile_id, proxy_url):
+    r = c.execute("SELECT 1 FROM proxies_seen WHERE proxy_url=? AND profile_id=?", (proxy_url, profile_id)).fetchone()
+    return r is not None
+
+def mark_proxy_posted(profile_id, proxy_url):
+    now = get_tehran_time()
+    c.execute("INSERT OR REPLACE INTO proxies_seen (proxy_url, first_seen, last_posted, profile_id) VALUES (?,?,?,?)",
+              (proxy_url, now, now, profile_id))
+    conn.commit()
+
+def get_last_scrape_time(profile_id, source):
+    r = c.execute("SELECT last_scrape_time FROM last_scrape WHERE source=? AND profile_id=?", (source, profile_id)).fetchone()
+    return r[0] if r else None
+
+def update_last_scrape_time(profile_id, source, time_str):
+    c.execute("INSERT OR REPLACE INTO last_scrape (source, last_scrape_time, profile_id) VALUES (?,?,?)",
+              (source, time_str, profile_id))
+    conn.commit()
+
+def strip_url_fragment(url):
+    if '#' in url:
+        return url.split('#')[0]
+    return url
+
+def extract_host(url):
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+        port = parsed.port
+
+        if host and host.lower() == 't.me' and parsed.path.startswith('/proxy'):
+            query = parse_qs(parsed.query)
+            server = query.get('server', [None])[0]
+            if server:
+                if ':' in server:
+                    host, port_str = server.rsplit(':', 1)
+                    port = int(port_str)
+                else:
+                    host = server
+                    port_str = query.get('port', [None])[0]
+                    if port_str:
+                        port = int(port_str)
+                return host, port
+            return host, port
+
+        if host:
+            if parsed.port:
+                return host, parsed.port
+            else:
+                if ':' in parsed.netloc:
+                    host_part, port_part = parsed.netloc.rsplit(':', 1)
+                    if port_part.isdigit():
+                        return host_part, int(port_part)
+                return host, None
+        if "://" in url:
+            url = url.split("://", 1)[1]
+        for c in '?#':
+            if c in url:
+                url = url.split(c)[0]
+        if "@" in url:
+            url = url.split("@")[-1]
+        if ":" in url:
+            host, port = url.rsplit(":", 1)
+            return host.strip(), int(port)
+        else:
+            return url.strip(), None
+    except Exception as e:
+        log.warning(f"extract_host error for {url}: {e}")
+        return None, None
+
+def add_custom_query_to_url(url, custom_query, protocol):
+    if not custom_query or protocol.lower() == 'vmess':
+        return url
+
+    if '#' in url:
+        base, fragment = url.split('#', 1)
+    else:
+        base = url
+        fragment = None
+
+    parsed = urlparse(base)
+    existing_params = parse_qs(parsed.query)
+    custom_params = parse_qs(custom_query)
+
+    new_query_dict = {}
+    for k, v in custom_params.items():
+        new_query_dict[k] = v[-1] if v else ""
+    for k, v in existing_params.items():
+        if k not in new_query_dict:
+            new_query_dict[k] = v[-1] if v else ""
+
+    new_query = urlencode(new_query_dict, doseq=True)
+    new_base = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, ''))
+    if fragment:
+        new_base += '#' + fragment
+    return new_base
+
+def change_link_display_name(url, new_name, flag, custom_query=""):
+    protocol = url.split('://')[0].lower() if '://' in url else ''
+    if custom_query and protocol != 'vmess':
+        url = add_custom_query_to_url(url, custom_query, protocol)
+    base = strip_url_fragment(url)
+    fragment = f"{new_name} {flag}"
+    encoded = quote(fragment, safe='')
+    return f"{base}#{encoded}"
+
+def append_channel_and_flag_encoded(url, channel, flag, custom_query=""):
+    protocol = url.split('://')[0].lower() if '://' in url else ''
+    if custom_query and protocol != 'vmess':
+        url = add_custom_query_to_url(url, custom_query, protocol)
+    base = strip_url_fragment(url)
+    fragment = f"{channel} {flag}"
+    encoded = quote(fragment, safe='')
+    return f"{base}#{encoded}"
+
+# ======================================================================
+# توابع پینگ
+# ======================================================================
 async def host_to_ip(host):
     try:
         return socket.gethostbyname(host)
@@ -804,6 +874,9 @@ async def check_full_link_ping(url):
     ping, ok, cnt = await ping_from_iran_only(host, port)
     return ping, ok, cnt
 
+# ======================================================================
+# اسکرپ و رمزگشایی
+# ======================================================================
 def decrypt_subscription(data: bytes, passwords: list):
     protocols = ("vless://", "vmess://", "trojan://",
                   "hy2://", "tuic://")
@@ -901,34 +974,6 @@ async def fetch_files_from_channel(bot, profile_id, channel, source):
         log.warning(f"fetch_files_from_channel({channel}) error: {e}")
         return []
 
-def is_message_processed(profile_id, source, message_id):
-    r = c.execute("SELECT 1 FROM processed_messages WHERE source=? AND message_id=? AND profile_id=?", (source, message_id, profile_id)).fetchone()
-    return r is not None
-
-def mark_message_processed(profile_id, source, message_id):
-    c.execute("INSERT OR REPLACE INTO processed_messages (source, message_id, profile_id) VALUES (?,?,?)",
-              (source, message_id, profile_id))
-    conn.commit()
-
-def is_proxy_posted(profile_id, proxy_url):
-    r = c.execute("SELECT 1 FROM proxies_seen WHERE proxy_url=? AND profile_id=?", (proxy_url, profile_id)).fetchone()
-    return r is not None
-
-def mark_proxy_posted(profile_id, proxy_url):
-    now = datetime.now().isoformat()
-    c.execute("INSERT OR REPLACE INTO proxies_seen (proxy_url, first_seen, last_posted, profile_id) VALUES (?,?,?,?)",
-              (proxy_url, now, now, profile_id))
-    conn.commit()
-
-def get_last_scrape_time(profile_id, source):
-    r = c.execute("SELECT last_scrape_time FROM last_scrape WHERE source=? AND profile_id=?", (source, profile_id)).fetchone()
-    return r[0] if r else None
-
-def update_last_scrape_time(profile_id, source, time_str):
-    c.execute("INSERT OR REPLACE INTO last_scrape (source, last_scrape_time, profile_id) VALUES (?,?,?)",
-              (source, time_str, profile_id))
-    conn.commit()
-
 _scrape_cache = {}
 _USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -987,7 +1032,7 @@ async def _scrape_channel_internal(profile_id, channel, only_new=False):
         proxy_links = extract_proxy_links_from_text(html_text)
 
         log.info(f"📊 {channel}: found {len(config_links)} configs, {len(proxy_links)} proxies")
-        update_last_scrape_time(profile_id, channel, datetime.now().isoformat())
+        update_last_scrape_time(profile_id, channel, get_tehran_time())
 
         if only_new:
             cached = _scrape_cache.get((profile_id, channel), (0, [], []))
@@ -1002,7 +1047,9 @@ async def _scrape_channel_internal(profile_id, channel, only_new=False):
         _scrape_cache[(profile_id, channel)] = (current_time, config_links, proxy_links)
         return config_links, proxy_links
 
-# ------------------ توابع ارسال به مقصد ------------------
+# ======================================================================
+# توابع ارسال
+# ======================================================================
 async def send_to_destination(bot, profile_id, text, buttons=None):
     dest = get_profile_dest(profile_id)
     if not dest:
@@ -1069,6 +1116,7 @@ async def post_configs(bot, profile_id, working, source_for_seen=""):
     last_n = get_profile_last_num(profile_id)
     show_numbers = get_profile_show_numbers(profile_id)
     custom_query = get_profile_custom_query(profile_id)
+    show_date = get_profile_show_date_config(profile_id)
     dest = get_profile_dest(profile_id)
     configs_text = ""
     all_buttons = []
@@ -1110,7 +1158,10 @@ async def post_configs(bot, profile_id, working, source_for_seen=""):
     if sponsors:
         sid, sname, surl, stxt, scolor = sponsors[0]
         clean_txt = stxt.replace('★', '').replace('☆', '').strip()
-        all_buttons.append([InlineKeyboardButton(clean_txt, url=surl)])
+        # استفاده از رنگ اسپانسر برای استایل دکمه
+        style_map = {"blue": "primary", "green": "success", "red": "danger", "yellow": "primary", "purple": "primary"}
+        style = style_map.get(scolor, "primary")
+        all_buttons.append([InlineKeyboardButton(clean_txt, url=surl, style=style)])
 
     banner_config = get_profile_banner_config(profile_id)
     configs_text = configs_text.rstrip()
@@ -1128,6 +1179,7 @@ async def post_proxies(bot, profile_id, proxies_with_ping):
         return 0, None
 
     max_proxies = get_profile_max_proxies(profile_id)
+    show_date = get_profile_show_date_proxy(profile_id)
     proxy_text = ""
     for proxy_url, ping, flag in proxies_with_ping[:max_proxies]:
         if "t.me/proxy" not in proxy_url.lower():
@@ -1140,9 +1192,10 @@ async def post_proxies(bot, profile_id, proxies_with_ping):
 
     proxy_count = len(proxies_with_ping[:max_proxies])
     banner_proxy = get_profile_banner_proxy(profile_id)
+    date_str = get_tehran_date() if show_date else ""
     try:
         text = banner_proxy.format(
-            date=datetime.now().strftime("%Y-%m-%d"),
+            date=date_str,
             count=proxy_count,
             proxies=proxy_text,
         )
@@ -1152,71 +1205,74 @@ async def post_proxies(bot, profile_id, proxies_with_ping):
     return proxy_count, (text, None)
 
 async def post_working_configs(bot, profile_id, working, proxies_with_ping, source_for_seen="", force=False):
-    results = []
-    total_configs = 0
-    total_proxies = 0
-
     dest = get_profile_dest(profile_id)
     if not dest:
-        log.error(f"❌ Profile {profile_id} has no destination!")
         return 0, "❌ هیچ مقصدی تنظیم نشده!"
-
-    log.info(f"📤 Profile {profile_id} -> Destination: {dest}")
 
     post_configs_enabled = get_profile_post_configs(profile_id) if not force else True
     post_proxies_enabled = get_profile_post_proxies(profile_id) if not force else True
 
-    if not post_configs_enabled and not post_proxies_enabled:
-        log.warning(f"⚠️ Profile {profile_id}: both config and proxy posting disabled (force={force}).")
-        return 0, "Both config and proxy posting are disabled."
+    total_configs = 0
+    total_proxies = 0
+    results = []
 
+    # ارسال کانفیگ‌ها (با تقسیم به چند پست)
     if post_configs_enabled and working:
-        log.info(f"📤 Posting {len(working)} configs for profile {profile_id}...")
-        config_count, config_payload = await post_configs(bot, profile_id, working, source_for_seen)
-        if config_count > 0 and config_payload:
-            text, buttons = config_payload
-            sent = await send_to_destination(bot, profile_id, text, buttons)
-            if sent:
-                total_configs = config_count
-                results.append(f"{config_count} configs")
-                log.info(f"✅ Posted {config_count} configs to {dest}")
+        max_post = get_profile_max_post(profile_id)
+        unique_working = []
+        seen_urls = set()
+        for url, ping, cnt in working:
+            # بررسی تکراری بودن
+            if not is_already_posted(profile_id, url):
+                unique_working.append((url, ping, cnt))
             else:
-                log.error(f"❌ Failed to post configs to {dest}")
-                plain_text = re.sub(r'<[^>]+>', '', text)
-                sent = await send_to_destination(bot, profile_id, plain_text, None)
-                if sent:
-                    total_configs = config_count
-                    results.append(f"{config_count} configs (plain)")
-                    log.info(f"✅ Posted {config_count} configs (plain) to {dest}")
+                log.info(f"⏭️ Skipping duplicate: {url[:50]}...")
+        if not unique_working:
+            log.info("ℹ️ No new configs to post (all duplicates).")
         else:
-            log.info("ℹ️ No configs to post (either count 0 or payload missing)")
+            # تقسیم به دسته‌های max_post
+            for i in range(0, len(unique_working), max_post):
+                chunk = unique_working[i:i+max_post]
+                config_count, config_payload = await post_configs(bot, profile_id, chunk, source_for_seen)
+                if config_count > 0 and config_payload:
+                    text, buttons = config_payload
+                    sent = await send_to_destination(bot, profile_id, text, buttons)
+                    if sent:
+                        total_configs += config_count
+                        results.append(f"{config_count} configs")
+                    else:
+                        plain_text = re.sub(r'<[^>]+>', '', text)
+                        sent = await send_to_destination(bot, profile_id, plain_text, None)
+                        if sent:
+                            total_configs += config_count
+                            results.append(f"{config_count} configs (plain)")
 
+    # ارسال پروکسی‌ها
     if post_proxies_enabled and proxies_with_ping:
         valid_proxies = [p for p in proxies_with_ping if "t.me/proxy" in p[0].lower()]
         if valid_proxies:
-            log.info(f"📤 Posting {len(valid_proxies)} proxies for profile {profile_id}...")
-            proxy_count, proxy_payload = await post_proxies(bot, profile_id, valid_proxies)
-            if proxy_count > 0 and proxy_payload:
-                text, _ = proxy_payload
-                sent = await send_to_destination(bot, profile_id, text, None)
-                if sent:
-                    total_proxies = proxy_count
-                    results.append(f"{proxy_count} proxies")
-                    log.info(f"✅ Posted {proxy_count} proxies to {dest}")
-                else:
-                    log.error(f"❌ Failed to post proxies to {dest}")
-        else:
-            log.info(f"ℹ️ No valid Telegram proxies found for profile {profile_id}.")
+            unique_proxies = []
+            for p in valid_proxies:
+                if not is_proxy_posted(profile_id, p[0]):
+                    unique_proxies.append(p)
+            if unique_proxies:
+                proxy_count, proxy_payload = await post_proxies(bot, profile_id, unique_proxies)
+                if proxy_count > 0 and proxy_payload:
+                    text, _ = proxy_payload
+                    sent = await send_to_destination(bot, profile_id, text, None)
+                    if sent:
+                        total_proxies = proxy_count
+                        results.append(f"{proxy_count} proxies")
 
     if not results:
-        log.error(f"❌ No content was posted successfully for profile {profile_id}")
-        return 0, "no content sent - check logs"
+        return 0, "no new content to send"
 
     result_msg = "posted " + " and ".join(results)
-    log.info(f"✅ Final result for profile {profile_id}: {result_msg}")
     return total_configs, result_msg
 
-# ------------------ سیکل کامل برای یک پروفایل (با سرعت بیشتر) ------------------
+# ======================================================================
+# سیکل کامل برای یک پروفایل
+# ======================================================================
 async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
     log.info("=" * 50)
     log.info(f"🔄 run_full_cycle for profile {profile_id} STARTED")
@@ -1358,7 +1414,9 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
     log.info("=" * 50)
     return result
 
-# ------------------ حلقه خودکار با زمان‌بندی دقیق ------------------
+# ======================================================================
+# حلقه خودکار
+# ======================================================================
 async def profile_loop(bot, profile_id):
     while True:
         try:
@@ -1386,7 +1444,9 @@ async def profile_loop(bot, profile_id):
             log.error(traceback.format_exc())
             await asyncio.sleep(60)
 
-# ------------------ کیبوردها و پیام‌های چندزبانه (با استایل) ------------------
+# ======================================================================
+# کیبوردها و پیام‌ها (با استایل)
+# ======================================================================
 BOT_REF = None
 BOT_LANG = "fa"
 
@@ -1406,7 +1466,9 @@ T = {
                        "📡 کانفیگ: {cfg_status} | 🌐 پروکسی: {prx_status}\n"
                        "📝 نام نمایشی: {display_name}\n"
                        "🔢 شماره‌گذاری: {numbers_status}\n"
-                       "🔗 کوئری سفارشی: {custom_query}",
+                       "🔗 کوئری سفارشی: {custom_query}\n"
+                       "📅 تاریخ کانفیگ: {date_cfg}\n"
+                       "📅 تاریخ پروکسی: {date_prx}",
         "btn_back": "🔙 برگشت",
         "btn_add_source": "➕ منبع",
         "btn_add_dest": "➕ مقصد جدید",
@@ -1494,6 +1556,8 @@ T = {
         "source_list": "📡 **منابع پروفایل {name}**\n\n{sources}\n\nبرای حذف هر کدام روی دکمه مربوطه کلیک کنید.",
         "source_deleted": "✅ منبع حذف شد.",
         "toggle_numbers_ok": "✅ شماره‌گذاری {'فعال' if status else 'غیرفعال'} شد.",
+        "date_cfg_toggle": "✅ نمایش تاریخ در بنر کانفیگ {'فعال' if status else 'غیرفعال'} شد.",
+        "date_prx_toggle": "✅ نمایش تاریخ در بنر پروکسی {'فعال' if status else 'غیرفعال'} شد.",
     },
     "en": {
         "welcome": "🤖 **Config & Proxy Aggregator**\n\n"
@@ -1510,7 +1574,9 @@ T = {
                        "📡 Configs: {cfg_status} | 🌐 Proxies: {prx_status}\n"
                        "📝 Display Name: {display_name}\n"
                        "🔢 Numbering: {numbers_status}\n"
-                       "🔗 Custom Query: {custom_query}",
+                       "🔗 Custom Query: {custom_query}\n"
+                       "📅 Config Date: {date_cfg}\n"
+                       "📅 Proxy Date: {date_prx}",
         "btn_back": "🔙 Back",
         "btn_add_source": "➕ Source",
         "btn_add_dest": "➕ Add Destination",
@@ -1598,6 +1664,8 @@ T = {
         "source_list": "📡 **Sources for profile {name}**\n\n{sources}\n\nClick delete to remove.",
         "source_deleted": "✅ Source deleted.",
         "toggle_numbers_ok": "✅ Numbering {'enabled' if status else 'disabled'}.",
+        "date_cfg_toggle": "✅ Config date display {'enabled' if status else 'disabled'}.",
+        "date_prx_toggle": "✅ Proxy date display {'enabled' if status else 'disabled'}.",
     },
 }
 
@@ -1610,7 +1678,9 @@ def msg(key, **kwargs):
             return text
     return text
 
-# ------------------ کیبوردها با استایل (primary, success, danger) ------------------
+# ======================================================================
+# ساخت کیبوردها (با استایل)
+# ======================================================================
 def profiles_kb():
     profiles = get_profiles()
     btns = []
@@ -1629,9 +1699,14 @@ def profile_admin_kb(profile_id):
     post_cfg = prof["post_configs"] == 1
     post_prx = prof["post_proxies"] == 1
     show_num = prof["show_numbers"] == 1
+    show_date_cfg = prof["show_date_config"] == 1
+    show_date_prx = prof["show_date_proxy"] == 1
     cfg_status = "✅" if post_cfg else "❌"
     prx_status = "✅" if post_prx else "❌"
     num_status = "✅" if show_num else "❌"
+    date_cfg_status = "✅" if show_date_cfg else "❌"
+    date_prx_status = "✅" if show_date_prx else "❌"
+
     cfg_btn = msg("btn_toggle_configs", status=cfg_status)
     prx_btn = msg("btn_toggle_proxies", status=prx_status)
     num_btn = msg("btn_toggle_numbers", status=num_status)
@@ -1653,15 +1728,18 @@ def profile_admin_kb(profile_id):
          InlineKeyboardButton(cfg_btn, callback_data=f"tglcfg_{profile_id}", style="primary")],
         [InlineKeyboardButton(prx_btn, callback_data=f"tglproxy_{profile_id}", style="primary"),
          InlineKeyboardButton(num_btn, callback_data=f"togglenum_{profile_id}", style="primary")],
+        [InlineKeyboardButton(f"📅 تاریخ کانفیگ: {date_cfg_status}", callback_data=f"tgl_date_cfg_{profile_id}", style="primary"),
+         InlineKeyboardButton(f"📅 تاریخ پروکسی: {date_prx_status}", callback_data=f"tgl_date_prx_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_set_custom_query"), callback_data=f"setquery_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_stats"), callback_data=f"ast_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_test"), callback_data=f"sendtest_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_runnow"), callback_data=f"runnow_{profile_id}", style="success")],
-        [InlineKeyboardButton(msg("btn_manual_send"), callback_data=f"manual_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_reset"), callback_data=f"rn_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_clear"), callback_data=f"cd1_{profile_id}", style="danger"),
-         InlineKeyboardButton("❌ Delete Profile", callback_data=f"delprof_{profile_id}", style="danger")],
-        [InlineKeyboardButton(msg("btn_back"), callback_data="profiles_list", style="primary")],
+         InlineKeyboardButton("🧹 پاک کردن کوئری", callback_data=f"clearquery_{profile_id}", style="danger")],
+        [InlineKeyboardButton(msg("btn_stats"), callback_data=f"ast_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_test"), callback_data=f"sendtest_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_runnow"), callback_data=f"runnow_{profile_id}", style="success"),
+         InlineKeyboardButton(msg("btn_manual_send"), callback_data=f"manual_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_reset"), callback_data=f"rn_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_clear"), callback_data=f"cd1_{profile_id}", style="danger")],
+        [InlineKeyboardButton("❌ Delete Profile", callback_data=f"delprof_{profile_id}", style="danger"),
+         InlineKeyboardButton(msg("btn_back"), callback_data="profiles_list", style="primary")],
     ])
 
 def sources_kb(profile_id):
@@ -1712,8 +1790,10 @@ def sponsors_kb(profile_id):
         for row in rows:
             sid, name, url, btn_text, color, enabled = row
             st = "✅" if enabled else "❌"
+            style_map = {"blue": "primary", "green": "success", "red": "danger", "yellow": "primary", "purple": "primary"}
+            style = style_map.get(color, "primary")
             btns.append([
-                InlineKeyboardButton(f"{st} {name[:25]}", callback_data=f"spt_{profile_id}_{sid}", style="primary"),
+                InlineKeyboardButton(f"{st} {name[:25]}", callback_data=f"spt_{profile_id}_{sid}", style=style),
                 InlineKeyboardButton("🗑", callback_data=f"spd_{profile_id}_{sid}", style="danger"),
             ])
     btns.append([InlineKeyboardButton("➕ add sponsor", callback_data=f"sp_add_{profile_id}", style="success")])
@@ -1730,7 +1810,9 @@ def source_list_kb(profile_id):
     btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")])
     return InlineKeyboardMarkup(btns)
 
-# ------------------ دستورات ------------------
+# ======================================================================
+# دستورات
+# ======================================================================
 async def cmd_start(u, ctx):
     if PRIVATE_MODE and u.effective_user.id != ADMIN_ID:
         return await u.message.reply_text(msg("private"))
@@ -1815,7 +1897,7 @@ async def cmd_sendtest(u, ctx):
     for prof in profiles:
         dest = prof["dest_name"]
         try:
-            await u.get_bot().send_message(dest, f"Test {datetime.now().strftime('%H:%M:%S')}")
+            await u.get_bot().send_message(dest, f"Test {get_tehran_time()}")
         except Exception as e:
             await u.message.reply_text(f"❌ Failed for {dest}: {e}")
     await u.message.reply_text(f"✅ Test sent to {len(profiles)} destinations")
@@ -1841,7 +1923,9 @@ async def cmd_diag(update: Update, context):
     msg_lines.append("")
     await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
 
-# ------------------ کالبک هندلر (با استایل) ------------------
+# ======================================================================
+# کالبک هندلر
+# ======================================================================
 async def on_callback(u, ctx):
     q = u.callback_query
     try:
@@ -1894,8 +1978,39 @@ async def on_callback(u, ctx):
             return
 
         if d.startswith("sp_add_"):
-            ctx.user_data["action"] = f"sp_add_{profile_id}"
-            await q.edit_message_text(msg("sp_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"sp_menu_{profile_id}", style="primary")]]))
+            ctx.user_data["sponsor_step"] = "name"
+            ctx.user_data["sponsor_profile_id"] = profile_id
+            await q.edit_message_text(
+                "📝 **نام اسپانسر را وارد کنید:**",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}", style="primary")]
+                ])
+            )
+            return
+
+        if d.startswith("sp_color_"):
+            parts = d.split("_")
+            color = parts[3]
+            name = ctx.user_data.get("sponsor_name")
+            url = ctx.user_data.get("sponsor_url")
+            btn_text = ctx.user_data.get("sponsor_button_text")
+            if name and url and btn_text:
+                add_sponsor(profile_id, name, url, btn_text, color)
+                await q.answer("✅ اسپانسر اضافه شد.")
+                await q.edit_message_text(
+                    f"✅ اسپانسر **{name}** با موفقیت اضافه شد.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 بازگشت به اسپانسرها", callback_data=f"sp_menu_{profile_id}", style="primary")]
+                    ])
+                )
+                del ctx.user_data["sponsor_step"]
+                del ctx.user_data["sponsor_name"]
+                del ctx.user_data["sponsor_url"]
+                del ctx.user_data["sponsor_button_text"]
+            else:
+                await q.answer("❌ اطلاعات ناقص است.")
             return
 
         if d.startswith("spt_"):
@@ -2108,7 +2223,7 @@ async def on_callback(u, ctx):
                 await q.answer("❌ No destination set!", show_alert=True)
                 return
             try:
-                await u.get_bot().send_message(dest, f"Test {datetime.now().strftime('%H:%M:%S')}")
+                await u.get_bot().send_message(dest, f"Test {get_tehran_time()}")
                 await q.answer("✅ Test sent")
             except Exception as e:
                 await q.answer(f"❌ {str(e)[:80]}", show_alert=True)
@@ -2153,6 +2268,29 @@ async def on_callback(u, ctx):
             new_val = not current
             set_profile_show_numbers(profile_id, new_val)
             await q.answer(msg("toggle_numbers_ok", status=new_val))
+            await show_profile_admin(q.message, profile_id)
+            return
+
+        if d.startswith("tgl_date_cfg_"):
+            profile_id = int(d.split("_")[3])
+            current = get_profile_show_date_config(profile_id)
+            set_profile_show_date_config(profile_id, not current)
+            await q.answer(msg("date_cfg_toggle", status=not current))
+            await show_profile_admin(q.message, profile_id)
+            return
+
+        if d.startswith("tgl_date_prx_"):
+            profile_id = int(d.split("_")[3])
+            current = get_profile_show_date_proxy(profile_id)
+            set_profile_show_date_proxy(profile_id, not current)
+            await q.answer(msg("date_prx_toggle", status=not current))
+            await show_profile_admin(q.message, profile_id)
+            return
+
+        if d.startswith("clearquery_"):
+            profile_id = int(d.split("_")[1])
+            set_profile_custom_query(profile_id, "")
+            await q.answer("✅ کوئری سفارشی پاک شد.")
             await show_profile_admin(q.message, profile_id)
             return
 
@@ -2218,6 +2356,8 @@ async def show_profile_admin(msg_or_q, profile_id):
     display_name = prof["display_name"] or "تنظیم نشده"
     show_num = prof["show_numbers"] == 1
     custom_query = prof["custom_query"] or "خالی"
+    show_date_cfg = prof["show_date_config"] == 1
+    show_date_prx = prof["show_date_proxy"] == 1
     n_sp = c.execute("SELECT COUNT(*) FROM sponsors WHERE profile_id=? AND enabled=1", (profile_id,)).fetchone()[0]
     sponsor_st = f"{n_sp}✓" if n_sp else "OFF"
     ping_mode = prof["ping_mode"]
@@ -2227,6 +2367,9 @@ async def show_profile_admin(msg_or_q, profile_id):
     cfg_status = "✅" if post_cfg else "❌"
     prx_status = "✅" if post_prx else "❌"
     num_status = "✅" if show_num else "❌"
+    date_cfg_status = "✅" if show_date_cfg else "❌"
+    date_prx_status = "✅" if show_date_prx else "❌"
+
     txt = msg(
         "admin_panel",
         srcs=len(srcs), dest=dest,
@@ -2239,6 +2382,8 @@ async def show_profile_admin(msg_or_q, profile_id):
         display_name=display_name,
         numbers_status=num_status,
         custom_query=custom_query,
+        date_cfg=date_cfg_status,
+        date_prx=date_prx_status,
     )
     kb = profile_admin_kb(profile_id)
     try:
@@ -2252,10 +2397,62 @@ async def show_profile_admin(msg_or_q, profile_id):
         else:
             raise
 
-# ------------------ هندلرهای متنی و سند ------------------
+# ======================================================================
+# هندلرهای متنی و سند
+# ======================================================================
 async def on_text(u, ctx):
     if PRIVATE_MODE and u.effective_user.id != ADMIN_ID:
         return
+
+    # پردازش مراحل اسپانسر
+    if ctx.user_data.get("sponsor_step"):
+        profile_id = ctx.user_data.get("sponsor_profile_id")
+        if not profile_id:
+            del ctx.user_data["sponsor_step"]
+            return
+        step = ctx.user_data["sponsor_step"]
+
+        if step == "name":
+            ctx.user_data["sponsor_name"] = u.message.text.strip()
+            ctx.user_data["sponsor_step"] = "url"
+            await u.message.reply_text(
+                "🔗 **لینک اسپانسر را وارد کنید (با http یا https):**",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}", style="primary")]
+                ])
+            )
+            return
+
+        if step == "url":
+            ctx.user_data["sponsor_url"] = u.message.text.strip()
+            ctx.user_data["sponsor_step"] = "button_text"
+            await u.message.reply_text(
+                "📝 **متن دکمه را وارد کنید (مثلاً «بازدید»):**",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}", style="primary")]
+                ])
+            )
+            return
+
+        if step == "button_text":
+            ctx.user_data["sponsor_button_text"] = u.message.text.strip()
+            ctx.user_data["sponsor_step"] = "color"
+            await u.message.reply_text(
+                "🎨 **رنگ دکمه را انتخاب کنید:**",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔵 آبی", callback_data=f"sp_color_{profile_id}_blue", style="primary")],
+                    [InlineKeyboardButton("🟢 سبز", callback_data=f"sp_color_{profile_id}_green", style="success")],
+                    [InlineKeyboardButton("🔴 قرمز", callback_data=f"sp_color_{profile_id}_red", style="danger")],
+                    [InlineKeyboardButton("🟡 زرد", callback_data=f"sp_color_{profile_id}_yellow", style="primary")],
+                    [InlineKeyboardButton("🟣 بنفش", callback_data=f"sp_color_{profile_id}_purple", style="primary")],
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}", style="primary")]
+                ])
+            )
+            return
+
     a = ctx.user_data.get("action")
     if not a:
         return
@@ -2387,24 +2584,6 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    if a.startswith("sp_add_"):
-        profile_id = int(a.split("_")[2])
-        parts = [p.strip() for p in t.split("|")]
-        if len(parts) < 2:
-            return await u.message.reply_text(msg("sp_err"))
-        name, url = parts[0], parts[1]
-        btntxt = parts[2] if len(parts) > 2 else "Advertisement"
-        color = parts[3].lower() if len(parts) > 3 else "blue"
-        if color not in ("blue", "green", "red", "yellow", "purple"):
-            color = "blue"
-        if not url.startswith(("http://", "https://", "tg://")):
-            url = "https://" + url
-        add_sponsor(profile_id, name, url, btntxt, color)
-        del ctx.user_data["action"]
-        await u.message.reply_text(msg("sp_added", name=name) + f"\n🔗 {url}")
-        await show_profile_admin(u.message, profile_id)
-        return
-
     if a.startswith("pa_"):
         parts = a.split("_")
         if len(parts) < 3:
@@ -2462,7 +2641,9 @@ async def on_document(u, ctx):
         del ctx.user_data["action"]
         return
 
+# ======================================================================
 # پردازش تغییر نام سرور
+# ======================================================================
 async def process_rename(u, message, profile_id, is_document=False):
     p = await message.reply_text("⏳ در حال پردازش برای تغییر نام...")
     try:
@@ -2526,7 +2707,9 @@ async def process_rename(u, message, profile_id, is_document=False):
         log.error(f"rename error: {e}")
         await p.edit_text(f"❌ {str(e)[:200]}")
 
-# پردازش ارسال دستی
+# ======================================================================
+# پردازش ارسال دستی (با تقسیم)
+# ======================================================================
 async def process_manual_text(u, message, profile_id, is_document=False):
     p = await message.reply_text(msg("manual_send_processing"))
     try:
@@ -2575,6 +2758,7 @@ async def process_manual_text(u, message, profile_id, is_document=False):
 
         await p.edit_text(f"⏳ آماده‌سازی {len(new_configs)} کانفیگ و {len(new_proxies)} پروکسی...")
 
+        # ساخت لیست working با پینگ 0
         working = [(url, 0, 0) for url in new_configs[:30]]
         proxy_with_ping = []
         for proxy_url in new_proxies[:10]:
@@ -2595,7 +2779,9 @@ async def process_manual_text(u, message, profile_id, is_document=False):
         log.error(f"manual send error: {e}")
         await p.edit_text(f"❌ {str(e)[:200]}")
 
-# ------------------ راه‌اندازی ------------------
+# ======================================================================
+# راه‌اندازی
+# ======================================================================
 ENABLE_AUTO = True
 PRIVATE_MODE = True
 

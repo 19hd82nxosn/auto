@@ -816,7 +816,7 @@ async def ping_from_iran_only(host, port=None):
     log.info(f"🔍 Ping target: {target} (host: {host}, port: {port})")
 
     try:
-        async with httpx.AsyncClient(timeout=5) as cl:  # reduced timeout to 5
+        async with httpx.AsyncClient(timeout=5) as cl:
             r = await cl.get(
                 f"https://check-host.net/check-ping?host={target}&json=1",
                 headers={"User-Agent": "Mozilla/5.0"},
@@ -993,7 +993,7 @@ _USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
 ]
 
-async def scrape_channel_with_retry(profile_id, channel, only_new=True, max_retries=1):
+async def scrape_channel_with_retry(profile_id, channel, only_new=True, max_retries=2):
     try:
         return await _scrape_channel_internal(profile_id, channel, only_new)
     except Exception as e:
@@ -1353,9 +1353,9 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
 
     working = []
     if new_configs:
-        to_test = new_configs[:10]
+        to_test = new_configs[:15]
         log.info(f"📊 Testing {len(to_test)} configs...")
-        sem = asyncio.Semaphore(20)  # increased concurrency
+        sem = asyncio.Semaphore(20)
         async def _check(u):
             async with sem:
                 try:
@@ -1422,13 +1422,13 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
 # حلقه خودکار (دقیق بر اساس فاصله زمانی)
 # ======================================================================
 async def profile_loop(bot, profile_id):
-    # Calculate next run time based on interval
+    # Calculate first run time immediately
     profile = get_profile(profile_id)
     if not profile:
         log.error(f"❌ Profile {profile_id} not found, stopping loop.")
         return
     interval = profile["interval_min"]
-    # Use a fixed next run time
+    # Set next_run to now + interval (so first run happens after interval)
     next_run = datetime.now(TEHRAN_TZ) + timedelta(minutes=interval)
     while True:
         try:
@@ -1437,7 +1437,7 @@ async def profile_loop(bot, profile_id):
             if sleep_seconds > 0:
                 await asyncio.sleep(sleep_seconds)
             else:
-                # If we missed the scheduled time, run immediately and set next run to now + interval
+                # If we missed the scheduled time, run immediately and set next_run to now + interval
                 log.warning(f"Missed schedule for profile {profile_id}, running now.")
                 next_run = now + timedelta(minutes=interval)
                 continue
@@ -1980,7 +1980,6 @@ async def on_callback(u, ctx):
 
         # ===== حذف پروفایل با دو مرحله تایید =====
         if d.startswith("delprof_"):
-            # extract profile id from d like "delprof_5"
             parts = d.split("_")
             if len(parts) >= 2:
                 try:
@@ -2943,8 +2942,6 @@ async def on_callback(u, ctx):
             return
 
         # fallback: show profile admin
-        # try to extract profile id from any callback that might have it
-        # but we already handled specific ones; if nothing matched, ignore
         await show_profiles_list(q.message)
 
     except Exception as e:

@@ -35,14 +35,14 @@ if not ADMIN_ID:
     raise ValueError("ADMIN_ID environment variable not set")
 
 # ======================================================================
-# مسیر پایدار (برای ریلیو)
+# مسیر پایدار
 # ======================================================================
 DATA_DIR = os.getenv("DATA_DIR", ".")
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "bot.db")
 
 # ======================================================================
-# تنظیم لاگ
+# لاگ
 # ======================================================================
 logging.basicConfig(
     level=logging.INFO,
@@ -66,16 +66,13 @@ def get_tehran_date() -> str:
     return datetime.now(TEHRAN_TZ).strftime('%Y-%m-%d')
 
 # ======================================================================
-# اتصال به دیتابیس
+# دیتابیس
 # ======================================================================
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 conn.execute("PRAGMA journal_mode=WAL")
 conn.execute("PRAGMA synchronous=NORMAL")
 c = conn.cursor()
 
-# ======================================================================
-# توابع کمکی برای اطمینان از وجود ستون
-# ======================================================================
 def ensure_column(table, column, col_type, default=None):
     try:
         c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
@@ -86,9 +83,7 @@ def ensure_column(table, column, col_type, default=None):
     except sqlite3.OperationalError:
         pass
 
-# ======================================================================
-# ایجاد جداول
-# ======================================================================
+# ---------- ایجاد جداول ----------
 c.execute("""CREATE TABLE IF NOT EXISTS seen (
     uuid TEXT,
     address TEXT,
@@ -96,17 +91,12 @@ c.execute("""CREATE TABLE IF NOT EXISTS seen (
     first_seen TEXT,
     last_posted TEXT,
     UNIQUE(uuid, address))""")
-
-c.execute("""CREATE TABLE IF NOT EXISTS cfg (
-    k TEXT PRIMARY KEY,
-    v TEXT)""")
-
+c.execute("""CREATE TABLE IF NOT EXISTS cfg (k TEXT PRIMARY KEY, v TEXT)""")
 c.execute("""CREATE TABLE IF NOT EXISTS posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content TEXT,
     count INTEGER,
     created_at TEXT)""")
-
 ensure_column("seen", "source", "TEXT DEFAULT ''")
 ensure_column("seen", "profile_id", "INTEGER DEFAULT 1", 1)
 
@@ -114,7 +104,6 @@ c.execute("""CREATE TABLE IF NOT EXISTS country_cache (
     ip TEXT PRIMARY KEY,
     country TEXT,
     flag TEXT)""")
-
 c.execute("""CREATE TABLE IF NOT EXISTS source_passwords (
     source TEXT,
     password TEXT,
@@ -150,7 +139,6 @@ c.execute("""CREATE TABLE IF NOT EXISTS proxies_seen (
     last_posted TEXT)""")
 ensure_column("proxies_seen", "profile_id", "INTEGER DEFAULT 1", 1)
 
-# ---------- جدول profiles با ستون‌های جدید ----------
 c.execute("""CREATE TABLE IF NOT EXISTS profiles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     dest_name TEXT UNIQUE NOT NULL,
@@ -171,14 +159,13 @@ c.execute("""CREATE TABLE IF NOT EXISTS profiles (
     show_date_config INTEGER DEFAULT 1,
     show_date_proxy INTEGER DEFAULT 1)""")
 conn.commit()
-
 ensure_column("profiles", "show_numbers", "INTEGER DEFAULT 1", 1)
 ensure_column("profiles", "custom_query", "TEXT DEFAULT ''", "")
 ensure_column("profiles", "show_date_config", "INTEGER DEFAULT 1", 1)
 ensure_column("profiles", "show_date_proxy", "INTEGER DEFAULT 1", 1)
 
 # ======================================================================
-# مهاجرت از تنظیمات قدیمی
+# مهاجرت
 # ======================================================================
 def migrate_old_config():
     existing = c.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
@@ -419,7 +406,7 @@ def set_profile_show_date_proxy(profile_id, enabled):
     update_profile(profile_id, show_date_proxy=1 if enabled else 0)
 
 # ======================================================================
-# رمزهای اشتراک
+# رمزها
 # ======================================================================
 def get_pw(profile_id, source):
     return [r[0] for r in c.execute(
@@ -950,7 +937,7 @@ def get_v2ray_links_from_text(text):
 async def fetch_files_from_channel(bot, profile_id, channel, source):
     try:
         chat_id = channel if channel.startswith('@') else '@' + channel
-        messages = await bot.get_chat_history(chat_id, limit=10)
+        messages = await bot.get_chat_history(chat_id, limit=10)  # کمتر برای سرعت
         new_links = []
         for msg in messages:
             if is_message_processed(profile_id, source, msg.message_id):
@@ -995,6 +982,7 @@ _USER_AGENTS = [
 ]
 
 async def scrape_channel_with_retry(profile_id, channel, only_new=True, max_retries=1):
+    # only_new = True همیشه برای جلوگیری از تکراری
     try:
         return await _scrape_channel_internal(profile_id, channel, only_new)
     except Exception as e:
@@ -1032,6 +1020,7 @@ async def _scrape_channel_internal(profile_id, channel, only_new=True):
         log.info(f"📊 {channel}: found {len(config_links)} configs, {len(proxy_links)} proxies")
         update_last_scrape_time(profile_id, channel, get_tehran_time())
 
+        # همیشه فقط جدیدها را برگردان
         cached = _scrape_cache.get((profile_id, channel), (0, [], []))
         old_configs = cached[1] if len(cached) > 1 else []
         old_proxies = cached[2] if len(cached) > 2 else []
@@ -1209,6 +1198,7 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
     total_proxies = 0
     results = []
 
+    # کانفیگ
     if post_configs_enabled and working:
         max_post = get_profile_max_post(profile_id)
         unique_working = []
@@ -1237,6 +1227,7 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
                             total_configs += config_count
                             results.append(f"{config_count} configs (plain)")
 
+    # پروکسی
     if post_proxies_enabled and proxies_with_ping:
         valid_proxies = [p for p in proxies_with_ping if "t.me/proxy" in p[0].lower()]
         if valid_proxies:
@@ -1331,12 +1322,14 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
                     seen_configs.add(link)
                     all_configs.append((link, src))
 
+    # فقط کانفیگ‌هایی که قبلاً پست نشده‌اند
     new_configs = [u for u, src in all_configs if not is_already_posted(profile_id, u)]
     log.info(f"📊 New configs: {len(new_configs)}, New proxies: {len(all_proxies)}")
 
+    # تست پینگ روی حداکثر ۱۰ کانفیگ
     working = []
     if new_configs:
-        to_test = new_configs[:10]
+        to_test = new_configs[:10]  # فقط ۱۰ تا برای سرعت
         log.info(f"📊 Testing {len(to_test)} configs...")
         sem = asyncio.Semaphore(10)
         async def _check(u):
@@ -1363,6 +1356,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
     else:
         log.info("ℹ️ No new configs to test")
 
+    # پروکسی
     proxy_with_ping = []
     if all_proxies:
         valid_proxies = [p for p in all_proxies if "t.me/proxy" in p.lower()]
@@ -1402,7 +1396,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
     return result
 
 # ======================================================================
-# حلقه خودکار (دقیق بر اساس فاصله زمانی)
+# حلقه خودکار (دقیق و بر اساس فاصله)
 # ======================================================================
 async def profile_loop(bot, profile_id):
     while True:
@@ -1412,7 +1406,7 @@ async def profile_loop(bot, profile_id):
                 log.error(f"❌ Profile {profile_id} not found, stopping loop.")
                 break
             interval = profile["interval_min"]
-            # محاسبه زمان بعدی بر اساس زمان فعلی + فاصله
+            # منتظر می‌مانیم تا دقیقه‌ی بعد
             now = datetime.now()
             next_run = now + timedelta(minutes=interval)
             sleep_seconds = (next_run - now).total_seconds()
@@ -1433,7 +1427,7 @@ async def profile_loop(bot, profile_id):
             await asyncio.sleep(60)
 
 # ======================================================================
-# کیبوردها و پیام‌ها (با دکمه بازگشت و دکمه خالی)
+# کیبوردها و پیام‌ها (با دکمه بازگشت کامل)
 # ======================================================================
 BOT_REF = None
 BOT_LANG = "fa"
@@ -1484,7 +1478,6 @@ T = {
         "btn_manage_sources": "📡 مدیریت منابع",
         "btn_toggle_numbers": "🔢 شماره‌گذاری: {status}",
         "btn_set_custom_query": "🔗 تنظیم کوئری سفارشی",
-        "btn_empty": "🧹 خالی کردن",
         "send_prompt": "📝 نام کانال (با @ یا بدون):",
         "added": "✅ {item}",
         "removed": "✅ حذف شد",
@@ -1510,7 +1503,7 @@ T = {
         "src_none": "خالی",
         "reset_ok": "✅ ریست شد (#۱)",
         "lang_ok": "✅ فارسی شد",
-        "sp_prompt": "📢 اسپانسر:\nفرمت: نام|url|متن دکمه|رنگ\nرنگ‌ها: blue, green, red",
+        "sp_prompt": "📢 اسپانسر:\nفرمت: نام|url|متن دکمه|رنگ\nرنگ‌ها: blue, green, red, yellow, purple\nمثال:\nMySite|https://site.com|بازدید|blue",
         "sp_added": "✅ '{name}' اضافه شد",
         "sp_removed": "✅ حذف شد",
         "sp_title": "📢 اسپانسرها:",
@@ -1600,7 +1593,6 @@ T = {
         "btn_manage_sources": "📡 Manage Sources",
         "btn_toggle_numbers": "🔢 Numbering: {status}",
         "btn_set_custom_query": "🔗 Set Custom Query",
-        "btn_empty": "🧹 Empty",
         "send_prompt": "📝 Channel name (with/without @):",
         "added": "✅ {item}",
         "removed": "✅ Removed",
@@ -1626,7 +1618,7 @@ T = {
         "src_none": "none",
         "reset_ok": "✅ Reset (#1)",
         "lang_ok": "✅ Switched to English",
-        "sp_prompt": "📢 Sponsor:\nFormat: name|url|button_text|color\nColors: blue, green, red",
+        "sp_prompt": "📢 Sponsor:\nFormat: name|url|button_text|color\nColors: blue, green, red\nExample:\nMySite|https://site.com|Visit|blue",
         "sp_added": "✅ '{name}' added",
         "sp_removed": "✅ Removed",
         "sp_title": "📢 Sponsors:",
@@ -1735,7 +1727,7 @@ def profile_admin_kb(profile_id):
         [InlineKeyboardButton(f"📅 تاریخ کانفیگ: {date_cfg_status}", callback_data=f"tgl_date_cfg_{profile_id}", style="primary"),
          InlineKeyboardButton(f"📅 تاریخ پروکسی: {date_prx_status}", callback_data=f"tgl_date_prx_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_set_custom_query"), callback_data=f"setquery_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_empty"), callback_data=f"clearquery_{profile_id}", style="danger")],
+         InlineKeyboardButton("🧹 پاک کردن کوئری", callback_data=f"clearquery_{profile_id}", style="danger")],
         [InlineKeyboardButton(msg("btn_stats"), callback_data=f"ast_{profile_id}", style="primary"),
          InlineKeyboardButton(msg("btn_test"), callback_data=f"sendtest_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_runnow"), callback_data=f"runnow_{profile_id}", style="success"),
@@ -1816,13 +1808,6 @@ def source_list_kb(profile_id):
     btns.append([InlineKeyboardButton(msg("btn_add_source"), callback_data=f"sa_{profile_id}", style="success")])
     btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")])
     return InlineKeyboardMarkup(btns)
-
-def empty_button_kb(profile_id, callback):
-    """دکمه خالی کردن برای بخش‌هایی که ورودی خالی می‌پذیرند"""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(msg("btn_empty"), callback_data=callback, style="danger")],
-        [InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]
-    ])
 
 # ======================================================================
 # دستورات
@@ -2028,6 +2013,7 @@ async def on_callback(u, ctx):
             return
 
         if d.startswith("sp_edit_"):
+            # ویرایش اسپانسر
             parts = d.split("_")
             sid = int(parts[2])
             sponsor = c.execute("SELECT id, name, url, button_text, color FROM sponsors WHERE id=?", (sid,)).fetchone()
@@ -2275,27 +2261,13 @@ async def on_callback(u, ctx):
         if d.startswith("ac_"):
             ctx.user_data["action"] = f"ac_{profile_id}"
             current_name = get_profile_dest(profile_id) or "نامشخص"
-            await q.edit_message_text(f"نام فعلی: {current_name}\nنام جدید را بفرست (یا دکمه خالی):", reply_markup=empty_button_kb(profile_id, f"empty_ac_{profile_id}"))
-            return
-
-        if d.startswith("empty_ac_"):
-            profile_id = int(d.split("_")[2])
-            set_profile_dest(profile_id, "")
-            await q.answer("✅ نام پاک شد.")
-            await show_profile_admin(q.message, profile_id)
+            await q.edit_message_text(f"نام فعلی: {current_name}\nنام جدید را بفرست (خالی برای حذف):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
             return
 
         if d.startswith("adn_"):
             ctx.user_data["action"] = f"adn_{profile_id}"
             current_display = get_profile_display_name(profile_id) or "تنظیم نشده"
-            await q.edit_message_text(f"نام نمایشی فعلی: {current_display}\nنام جدید را بفرست (یا دکمه خالی):", reply_markup=empty_button_kb(profile_id, f"empty_adn_{profile_id}"))
-            return
-
-        if d.startswith("empty_adn_"):
-            profile_id = int(d.split("_")[2])
-            set_profile_display_name(profile_id, "")
-            await q.answer("✅ نام نمایشی پاک شد.")
-            await show_profile_admin(q.message, profile_id)
+            await q.edit_message_text(f"نام نمایشی فعلی: {current_display}\nنام جدید را بفرست (خالی برای حذف):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
             return
 
         if d.startswith("rename_"):
@@ -2318,26 +2290,13 @@ async def on_callback(u, ctx):
         if d.startswith("ai_"):
             ctx.user_data["action"] = f"ai_{profile_id}"
             current = get_profile_interval(profile_id)
-            await q.edit_message_text(f"Now: {current}m\nSend 1-1440 (یا دکمه خالی):", reply_markup=empty_button_kb(profile_id, f"empty_ai_{profile_id}"))
-            return
-
-        if d.startswith("empty_ai_"):
-            profile_id = int(d.split("_")[2])
-            # بدون تغییر
-            await q.answer("✅ بدون تغییر.")
-            await show_profile_admin(q.message, profile_id)
+            await q.edit_message_text(f"Now: {current}m\nSend 1-1440 (خالی برای عدم تغییر):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
             return
 
         if d.startswith("setmax_"):
             ctx.user_data["action"] = f"setmax_{profile_id}"
             current = get_profile_max_post(profile_id)
-            await q.edit_message_text(f"Now: {current}\nSend 1-50 (یا دکمه خالی):", reply_markup=empty_button_kb(profile_id, f"empty_setmax_{profile_id}"))
-            return
-
-        if d.startswith("empty_setmax_"):
-            profile_id = int(d.split("_")[2])
-            await q.answer("✅ بدون تغییر.")
-            await show_profile_admin(q.message, profile_id)
+            await q.edit_message_text(f"Now: {current}\nSend 1-50 (خالی برای عدم تغییر):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
             return
 
         if d.startswith("ast_"):
@@ -2430,14 +2389,7 @@ async def on_callback(u, ctx):
         if d.startswith("setquery_"):
             ctx.user_data["action"] = f"setquery_{profile_id}"
             current = get_profile_custom_query(profile_id) or "خالی"
-            await q.edit_message_text(f"کوئری فعلی: {current}\n" + msg("custom_query_prompt"), reply_markup=empty_button_kb(profile_id, f"empty_query_{profile_id}"))
-            return
-
-        if d.startswith("empty_query_"):
-            profile_id = int(d.split("_")[2])
-            set_profile_custom_query(profile_id, "")
-            await q.answer("✅ کوئری پاک شد.")
-            await show_profile_admin(q.message, profile_id)
+            await q.edit_message_text(f"کوئری فعلی: {current}\n" + msg("custom_query_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
             return
 
         if d.startswith("rn_"):
@@ -2994,7 +2946,7 @@ async def post_init(app):
         BOT_LANG = saved
     profiles = get_profiles()
     if not profiles:
-        create_profile("@VaslZone", sources="@Cfox_Server")
+        create_profile("@VaslZone", sources="@Cfox_Server,@v2rayHub1200,@V2Ray_Protocol")
         log.info("✅ Created default profile.")
     log.info(f"✅ INIT done: {len(profiles)} profiles, AUTO={ENABLE_AUTO}, LANG={BOT_LANG}")
     if ENABLE_AUTO:

@@ -424,13 +424,11 @@ def get_profile_custom_query(profile_id):
 
 def set_profile_custom_query(profile_id, query):
     query = query.strip()
-    # مستقیم و با commit
     c.execute("UPDATE profiles SET custom_query=? WHERE id=?", (query, profile_id))
     conn.commit()
     saved = get_profile_custom_query(profile_id)
     if saved != query:
         log.error(f"custom_query not saved! expected '{query}', got '{saved}'")
-        # تلاش مجدد
         c.execute("UPDATE profiles SET custom_query=? WHERE id=?", (query, profile_id))
         conn.commit()
         saved = get_profile_custom_query(profile_id)
@@ -525,12 +523,13 @@ def get_sponsor(profile_id):
         }
     return None
 
-def set_sponsor(profile_id, name, url, button_text="Advertisement", color="primary"):
+# اصلاح: اضافه کردن پارامتر enabled
+def set_sponsor(profile_id, name, url, button_text="Advertisement", color="primary", enabled=1):
     now = get_tehran_time()
     c.execute("DELETE FROM sponsors WHERE profile_id=?", (profile_id,))
     c.execute(
-        "INSERT INTO sponsors (profile_id, name, url, button_text, enabled, color, created_at) VALUES (?,?,?,?,1,?,?)",
-        (profile_id, name, url, button_text, color, now)
+        "INSERT INTO sponsors (profile_id, name, url, button_text, enabled, color, created_at) VALUES (?,?,?,?,?,?,?)",
+        (profile_id, name, url, button_text, enabled, color, now)
     )
     conn.commit()
 
@@ -1433,7 +1432,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
     seen_urls = set()
 
     if is_instant:
-        scrape_limit = 3  # در حالت لحظه‌ای، چند منبع را اسکرپ کن
+        scrape_limit = 3
         test_limit = 0
         ping_timeout = 3
         max_concurrent = 50
@@ -1447,7 +1446,6 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
         config_links, proxy_links = await scrape_channel_with_retry(profile_id, src, only_new=True)
         return src, config_links, proxy_links
 
-    # در حالت instant چند منبع اول را اسکرپ کن
     if is_instant:
         sources_to_scrape = sources[:scrape_limit]
     else:
@@ -1587,7 +1585,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
     return result
 
 # ======================================================================
-# حلقه خودکار (با لاگ‌های بیشتر)
+# حلقه خودکار (با لاگ‌های بیشتر و پایداری)
 # ======================================================================
 async def profile_loop(bot, profile_id):
     profile = get_profile(profile_id)
@@ -1599,17 +1597,24 @@ async def profile_loop(bot, profile_id):
     log.info(f"🔄 Starting auto loop for profile {profile_id} with interval {interval} min")
     while True:
         try:
+            # اگر interval == 0 یعنی حالت لحظه‌ای
             if interval == 0:
+                # با کمی تاخیر برای جلوگیری از بار زیاد
                 await asyncio.sleep(3)
                 log.info(f"⚡ INSTANT UPDATE for profile {profile_id}")
                 n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=True)
                 log.info(f"[instant profile {profile_id}] result: {n} - {m}")
             else:
+                # محاسبه زمان تا اجرای بعدی
                 now = datetime.now(TEHRAN_TZ)
                 next_run = now + timedelta(minutes=interval)
                 sleep_seconds = (next_run - now).total_seconds()
                 if sleep_seconds > 0:
+                    log.info(f"⏳ Profile {profile_id} sleeping for {sleep_seconds:.0f} seconds until {next_run.strftime('%H:%M:%S')}")
                     await asyncio.sleep(sleep_seconds)
+                else:
+                    # اگر تاخیر منفی شد (به دلیل اشکال) یک ثانیه صبر کن
+                    await asyncio.sleep(1)
                 log.info(f"⏰ AUTO TICK for profile {profile_id} ({profile['dest_name']})")
                 n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=False)
                 log.info(f"[auto profile {profile_id}] result: {n} - {m}")
@@ -1654,7 +1659,7 @@ async def send_daily_report(app):
         log.error(f"❌ Failed to send daily report: {e}")
 
 # ======================================================================
-# بک‌آپ کانفیگ/پروکسی (اصلاح شده)
+# بک‌آپ کانفیگ/پروکسی
 # ======================================================================
 async def export_backup(update, context, profile_id, backup_type, count=None):
     try:
@@ -2573,29 +2578,36 @@ async def on_callback(u, ctx):
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
                 sponsor = get_sponsor(profile_id)
+                # اگر اسپانسر وجود ندارد و مرحله اضافه کردن است، نام و لینک و متن باید قبلاً در user_data ذخیره شده باشند.
                 if not sponsor:
-                    await q.answer("اسپانسری وجود ندارد.")
-                    return
-                update_sponsor_color(profile_id, color)
-                await q.answer(f"✅ رنگ به {color} تغییر کرد.")
-                if ctx.user_data.get("sponsor_step") == "color_wait":
-                    name = ctx.user_data.get("sponsor_name")
-                    url = ctx.user_data.get("sponsor_url")
-                    btn_text = ctx.user_data.get("sponsor_button_text", "Advertisement")
-                    if name and url:
-                        set_sponsor(profile_id, name, url, btn_text, color)
-                        await q.message.reply_text(msg("sp_added", name=name), parse_mode="HTML")
-                        del ctx.user_data["sponsor_step"]
-                        del ctx.user_data["sponsor_name"]
-                        del ctx.user_data["sponsor_url"]
-                        del ctx.user_data["sponsor_button_text"]
-                sponsor = get_sponsor(profile_id)
-                txt = f"📢 **اسپانسر پروفایل {profile_id}**\n\n"
-                if sponsor:
-                    txt += f"نام: {sponsor['name']}\nلینک: {sponsor['url']}\nمتن دکمه: {sponsor['button_text']}\nرنگ: {sponsor['color']}\nوضعیت: {'فعال' if sponsor['enabled'] else 'غیرفعال'}"
+                    # برای افزودن جدید (مرحله color_wait)
+                    if ctx.user_data.get("sponsor_step") == "color_wait":
+                        name = ctx.user_data.get("sponsor_name")
+                        url = ctx.user_data.get("sponsor_url")
+                        btn_text = ctx.user_data.get("sponsor_button_text", "Advertisement")
+                        if name and url:
+                            set_sponsor(profile_id, name, url, btn_text, color, enabled=1)
+                            await q.message.reply_text(msg("sp_added", name=name), parse_mode="HTML")
+                            del ctx.user_data["sponsor_step"]
+                            del ctx.user_data["sponsor_name"]
+                            del ctx.user_data["sponsor_url"]
+                            del ctx.user_data["sponsor_button_text"]
+                            await show_profile_admin(q.message, profile_id)
+                        else:
+                            await q.answer("⚠️ اطلاعات اسپانسر کامل نیست.")
+                        return
+                    else:
+                        await q.answer("اسپانسری وجود ندارد.")
+                        return
                 else:
-                    txt += "هیچ اسپانسری تنظیم نشده است."
-                await q.edit_message_text(txt, parse_mode="HTML", reply_markup=sponsor_kb(profile_id))
+                    # ویرایش رنگ
+                    update_sponsor_color(profile_id, color)
+                    await q.answer(f"✅ رنگ به {color} تغییر کرد.")
+                    # اگر از مرحله ویرایش آمده، فقط رنگ را تغییر بده
+                    # پاک کردن state های اضافی
+                    if ctx.user_data.get("sponsor_edit_field"):
+                        del ctx.user_data["sponsor_edit_field"]
+                    await show_profile_admin(q.message, profile_id)
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -3212,9 +3224,11 @@ async def on_text(u, ctx):
             await u.message.reply_text("فیلد نامعتبر.")
             del ctx.user_data["sponsor_edit_field"]
             return
-        set_sponsor(profile_id, name, url, btn_text, color)
+        # حفظ وضعیت فعال/غیرفعال
+        set_sponsor(profile_id, name, url, btn_text, color, enabled=int(enabled))
         await u.message.reply_text(msg("sp_updated"), parse_mode="HTML")
         del ctx.user_data["sponsor_edit_field"]
+        del ctx.user_data["sponsor_edit_profile_id"]
         await show_profile_admin(u.message, profile_id)
         return
 
@@ -3503,7 +3517,7 @@ async def on_document(u, ctx):
         return
 
 # ======================================================================
-# ارسال دستی (اصلاح شده: همه کانفیگ‌ها را پست کن)
+# ارسال دستی
 # ======================================================================
 async def process_manual_text(u, message, profile_id, is_document=False):
     p = await message.reply_text(msg("manual_send_processing"))

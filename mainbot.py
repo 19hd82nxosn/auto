@@ -21,6 +21,7 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     filters,
+    JobQueue,
 )
 from telegram.error import BadRequest
 
@@ -40,6 +41,8 @@ if not ADMIN_ID:
 DATA_DIR = "/app/data"
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "bot.db")
+BACKUP_DIR = os.path.join(DATA_DIR, "backups")
+os.makedirs(BACKUP_DIR, exist_ok=True)
 
 # ======================================================================
 # تنظیم لاگ
@@ -49,7 +52,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(os.path.join(DATA_DIR, "bot.log"), mode='w', encoding='utf-8')
+        logging.FileHandler(os.path.join(DATA_DIR, "bot.log"), mode='a', encoding='utf-8')
     ]
 )
 log = logging.getLogger("bot")
@@ -115,7 +118,6 @@ c.execute("""CREATE TABLE IF NOT EXISTS country_cache (
     country TEXT,
     flag TEXT)""")
 
-# ===== جدول اسپانسر (بازنویسی کامل - ساده و تمیز) =====
 c.execute("""CREATE TABLE IF NOT EXISTS sponsors (
     profile_id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
@@ -158,13 +160,23 @@ c.execute("""CREATE TABLE IF NOT EXISTS profiles (
     show_numbers INTEGER DEFAULT 1,
     custom_query TEXT DEFAULT '',
     show_date_config INTEGER DEFAULT 1,
-    show_date_proxy INTEGER DEFAULT 1)""")
+    show_date_proxy INTEGER DEFAULT 1,
+    schedule_cron TEXT DEFAULT '')""")
 conn.commit()
 
 ensure_column("profiles", "show_numbers", "INTEGER DEFAULT 1", 1)
 ensure_column("profiles", "custom_query", "TEXT DEFAULT ''", "")
 ensure_column("profiles", "show_date_config", "INTEGER DEFAULT 1", 1)
 ensure_column("profiles", "show_date_proxy", "INTEGER DEFAULT 1", 1)
+ensure_column("profiles", "schedule_cron", "TEXT DEFAULT ''", "")
+
+c.execute("""CREATE TABLE IF NOT EXISTS blacklist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id INTEGER,
+    word TEXT NOT NULL,
+    created_at TEXT,
+    UNIQUE(profile_id, word))""")
+conn.commit()
 
 # ======================================================================
 # مهاجرت از تنظیمات قدیمی
@@ -198,12 +210,12 @@ def migrate_old_config():
         c.execute("""INSERT INTO profiles
             (dest_name, sources, banner_config, banner_proxy, interval_min,
              max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num, created_at,
-             show_numbers, custom_query, show_date_config, show_date_proxy)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             show_numbers, custom_query, show_date_config, show_date_proxy, schedule_cron)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (dest, old_sources, old_banner_config, old_banner_proxy,
              old_interval, old_max_post, old_max_proxies,
              old_post_configs, old_post_proxies, old_ping_mode, old_last_num,
-             datetime.now().isoformat(), 1, "", 1, 1))
+             datetime.now().isoformat(), 1, "", 1, 1, ""))
     conn.commit()
     log.info(f"✅ Migrated {len(dest_list)} profiles.")
 
@@ -233,7 +245,8 @@ def get_profiles():
             "show_numbers": row[13] if len(row) > 13 else 1,
             "custom_query": row[14] if len(row) > 14 else "",
             "show_date_config": row[15] if len(row) > 15 else 1,
-            "show_date_proxy": row[16] if len(row) > 16 else 1
+            "show_date_proxy": row[16] if len(row) > 16 else 1,
+            "schedule_cron": row[17] if len(row) > 17 else ""
         })
     return profiles
 
@@ -258,14 +271,15 @@ def get_profile(profile_id):
         "show_numbers": row[13] if len(row) > 13 else 1,
         "custom_query": row[14] if len(row) > 14 else "",
         "show_date_config": row[15] if len(row) > 15 else 1,
-        "show_date_proxy": row[16] if len(row) > 16 else 1
+        "show_date_proxy": row[16] if len(row) > 16 else 1,
+        "schedule_cron": row[17] if len(row) > 17 else ""
     }
 
 def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
                    interval_min=5, max_post=8, max_proxies=10,
                    post_configs=1, post_proxies=1, ping_mode="iran", last_num=0,
                    show_numbers=1, custom_query="",
-                   show_date_config=1, show_date_proxy=1):
+                   show_date_config=1, show_date_proxy=1, schedule_cron=""):
     if not banner_config:
         banner_config = "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
     if not banner_proxy:
@@ -273,13 +287,13 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
     c.execute("""INSERT INTO profiles
         (dest_name, sources, banner_config, banner_proxy, interval_min,
          max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num, created_at,
-         show_numbers, custom_query, show_date_config, show_date_proxy)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         show_numbers, custom_query, show_date_config, show_date_proxy, schedule_cron)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (dest_name, sources, banner_config, banner_proxy,
          interval_min, max_post, max_proxies,
          post_configs, post_proxies, ping_mode, last_num,
          get_tehran_time(), show_numbers, custom_query,
-         show_date_config, show_date_proxy))
+         show_date_config, show_date_proxy, schedule_cron))
     conn.commit()
     return c.lastrowid
 
@@ -287,7 +301,8 @@ def update_profile(profile_id, **kwargs):
     allowed = ["dest_name", "sources", "banner_config", "banner_proxy",
                "interval_min", "max_post", "max_proxies", "post_configs",
                "post_proxies", "ping_mode", "last_num",
-               "show_numbers", "custom_query", "show_date_config", "show_date_proxy"]
+               "show_numbers", "custom_query", "show_date_config", "show_date_proxy",
+               "schedule_cron"]
     for key, value in kwargs.items():
         if key in allowed:
             c.execute(f"UPDATE profiles SET {key}=? WHERE id=?", (value, profile_id))
@@ -300,6 +315,7 @@ def delete_profile(profile_id):
     c.execute("DELETE FROM proxies_seen WHERE profile_id=?", (profile_id,))
     c.execute("DELETE FROM last_scrape WHERE profile_id=?", (profile_id,))
     c.execute("DELETE FROM processed_messages WHERE profile_id=?", (profile_id,))
+    c.execute("DELETE FROM blacklist WHERE profile_id=?", (profile_id,))
     conn.commit()
 
 def get_profile_sources(profile_id):
@@ -381,13 +397,7 @@ def get_profile_custom_query(profile_id):
     return prof["custom_query"] if prof else ""
 
 def set_profile_custom_query(profile_id, query):
-    # مستقیم و مطمئن
-    try:
-        c.execute("UPDATE profiles SET custom_query=? WHERE id=?", (query, profile_id))
-        conn.commit()
-        log.info(f"✅ custom_query set for profile {profile_id}: {query[:50]}")
-    except Exception as e:
-        log.error(f"❌ Error setting custom_query: {e}")
+    update_profile(profile_id, custom_query=query)
 
 def get_profile_show_date_config(profile_id):
     prof = get_profile(profile_id)
@@ -403,11 +413,58 @@ def get_profile_show_date_proxy(profile_id):
 def set_profile_show_date_proxy(profile_id, enabled):
     update_profile(profile_id, show_date_proxy=1 if enabled else 0)
 
+def get_profile_schedule_cron(profile_id):
+    prof = get_profile(profile_id)
+    return prof["schedule_cron"] if prof else ""
+
+def set_profile_schedule_cron(profile_id, cron):
+    update_profile(profile_id, schedule_cron=cron)
+
 # ======================================================================
-# توابع اسپانسر (بازنویسی کامل - ساده و بدون تداخل)
+# توابع لیست سیاه
+# ======================================================================
+def get_blacklist(profile_id):
+    rows = c.execute("SELECT word FROM blacklist WHERE profile_id=? ORDER BY id", (profile_id,)).fetchall()
+    return [r[0] for r in rows]
+
+def add_blacklist_word(profile_id, word):
+    word = word.strip().lower()
+    if not word:
+        return False
+    try:
+        c.execute("INSERT INTO blacklist (profile_id, word, created_at) VALUES (?,?,?)",
+                  (profile_id, word, get_tehran_time()))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+def remove_blacklist_word(profile_id, word):
+    word = word.strip().lower()
+    c.execute("DELETE FROM blacklist WHERE profile_id=? AND word=?", (profile_id, word))
+    conn.commit()
+    return c.rowcount > 0
+
+def clear_blacklist(profile_id):
+    c.execute("DELETE FROM blacklist WHERE profile_id=?", (profile_id,))
+    conn.commit()
+
+def is_word_blacklisted(profile_id, text):
+    if not text:
+        return False
+    words = get_blacklist(profile_id)
+    if not words:
+        return False
+    text_lower = text.lower()
+    for w in words:
+        if w in text_lower:
+            return True
+    return False
+
+# ======================================================================
+# توابع اسپانسر
 # ======================================================================
 def get_sponsor(profile_id):
-    """دریافت اسپانسر فعال برای یک پروفایل (فقط یک رکورد)"""
     row = c.execute(
         "SELECT name, url, button_text FROM sponsors WHERE profile_id=? AND enabled=1",
         (profile_id,)
@@ -417,24 +474,19 @@ def get_sponsor(profile_id):
     return None
 
 def set_sponsor(profile_id, name, url, button_text="Advertisement"):
-    """تنظیم یا بروزرسانی اسپانسر (جایگزین رکورد قبلی) - لینک دقیقاً همان‌طور که وارد شده ذخیره می‌شود"""
     now = get_tehran_time()
-    # حذف رکورد قبلی تا فقط یک اسپانسر داشته باشیم
     c.execute("DELETE FROM sponsors WHERE profile_id=?", (profile_id,))
     c.execute(
         "INSERT INTO sponsors (profile_id, name, url, button_text, enabled, created_at) VALUES (?,?,?,?,1,?)",
         (profile_id, name, url, button_text, now)
     )
     conn.commit()
-    log.info(f"✅ Sponsor set for profile {profile_id}: {name} -> {url}")
 
 def clear_sponsor(profile_id):
-    """پاک کردن اسپانسر"""
     c.execute("DELETE FROM sponsors WHERE profile_id=?", (profile_id,))
     conn.commit()
 
 def toggle_sponsor(profile_id):
-    """فعال/غیرفعال کردن اسپانسر (اگر وجود داشته باشد)"""
     row = c.execute("SELECT enabled FROM sponsors WHERE profile_id=?", (profile_id,)).fetchone()
     if row:
         new_enabled = 0 if row[0] else 1
@@ -697,9 +749,9 @@ def extract_host(url):
                 return host, None
         if "://" in url:
             url = url.split("://", 1)[1]
-        for ch in '?#':
-            if ch in url:
-                url = url.split(ch)[0]
+        for c in '?#':
+            if c in url:
+                url = url.split(c)[0]
         if "@" in url:
             url = url.split("@")[-1]
         if ":" in url:
@@ -746,7 +798,7 @@ def append_channel_and_flag_encoded(url, channel, flag, custom_query=""):
     return f"{base}#{encoded}"
 
 # ======================================================================
-# پینگ (سریع‌تر)
+# پینگ
 # ======================================================================
 async def host_to_ip(host):
     try:
@@ -847,7 +899,7 @@ async def check_full_link_ping(url):
     return ping, ok, cnt
 
 # ======================================================================
-# اسکرپ (فقط جدید و سریع)
+# اسکرپ
 # ======================================================================
 def decrypt_subscription(data: bytes, passwords: list):
     protocols = ("vless://", "vmess://", "trojan://",
@@ -1045,26 +1097,36 @@ def split_text(text, max_len=4096):
     return chunks
 
 # ======================================================================
-# ارسال کانفیگ‌ها (با اسپانسر ساده - فقط دکمه زیر پیام)
+# ارسال کانفیگ‌ها (با فیلتر لیست سیاه و اسپانسر رنگی)
 # ======================================================================
 async def post_configs(bot, profile_id, working, source_for_seen=""):
     if not working:
         return 0
 
     max_post = get_profile_max_post(profile_id)
-    items = sorted(working, key=lambda x: x[1])[:max_post]
+    blacklist_words = get_blacklist(profile_id)
+    filtered_working = []
+    for url, ping, cnt in working:
+        if blacklist_words and is_word_blacklisted(profile_id, url):
+            log.info(f"⛔ Blacklisted config skipped: {url[:50]}...")
+            continue
+        filtered_working.append((url, ping, cnt))
+
+    items = sorted(filtered_working, key=lambda x: x[1])[:max_post]
+    if not items:
+        return 0
+
     last_n = get_profile_last_num(profile_id)
     show_numbers = get_profile_show_numbers(profile_id)
     custom_query = get_profile_custom_query(profile_id)
     dest = get_profile_dest(profile_id)
     banner_template = get_profile_banner_config(profile_id) or "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
 
-    # دریافت اسپانسر (فقط یک دکمه - کاملاً جدا از متن)
     sponsor = get_sponsor(profile_id)
     sponsor_button = None
     if sponsor:
-        # لینک دقیقاً همان‌طور که وارد شده استفاده می‌شود، بدون هیچ تغییری
-        sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"])
+        # دکمه اسپانسر با رنگ primary (آبی)
+        sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"], style="primary")
 
     sent_count = 0
     for i, (url, ping, node_count) in enumerate(items, 1):
@@ -1098,7 +1160,6 @@ async def post_configs(bot, profile_id, working, source_for_seen=""):
         except KeyError:
             full_text = f"✦ V2Ray Config List\n\n{configs_text}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
 
-        # دکمه‌ها: فقط اسپانسر (اگر وجود داشته باشد) - کاملاً جدا از متن
         buttons = []
         if sponsor_button:
             buttons.append(sponsor_button)
@@ -1161,11 +1222,10 @@ async def post_proxies(bot, profile_id, proxies_with_ping):
         log.error("❌ Banner proxy missing placeholders")
         text = f"🌐 Proxies\n{proxy_text}"
 
-    # اسپانسر برای پروکسی هم فقط دکمه زیر پیام
     sponsor = get_sponsor(profile_id)
     sponsor_button = None
     if sponsor:
-        sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"])
+        sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"], style="primary")
     buttons = [sponsor_button] if sponsor_button else None
     return proxy_count, (text, buttons)
 
@@ -1220,7 +1280,7 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
     return total_configs, result_msg
 
 # ======================================================================
-# سیکل کامل (بهینه‌سازی شده)
+# سیکل کامل
 # ======================================================================
 async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=False):
     log.info("=" * 50)
@@ -1389,18 +1449,17 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
     return result
 
 # ======================================================================
-# حلقه خودکار (اصلاح شده برای زمان‌بندی دقیق و لحظه‌ای)
+# حلقه خودکار
 # ======================================================================
 async def profile_loop(bot, profile_id):
     profile = get_profile(profile_id)
     if not profile:
         log.error(f"❌ Profile {profile_id} not found, stopping loop.")
         return
-    interval = profile["interval_min"]
-    log.info(f"🔁 Starting loop for profile {profile_id}, interval={interval}m")
 
+    cron_expr = profile.get("schedule_cron", "").strip()
+    interval = profile.get("interval_min", 5)
     if interval == 0:
-        # حالت لحظه‌ای
         while True:
             try:
                 await asyncio.sleep(1)
@@ -1413,13 +1472,16 @@ async def profile_loop(bot, profile_id):
                 log.error(f"❌ instant update error for {profile_id}: {e}")
                 await asyncio.sleep(5)
     else:
-        # حالت زمان‌بندی شده - اجرای فوری در شروع، سپس هر interval دقیقه
         while True:
             try:
+                now = datetime.now(TEHRAN_TZ)
+                next_run = now + timedelta(minutes=interval)
+                sleep_seconds = (next_run - now).total_seconds()
+                if sleep_seconds > 0:
+                    await asyncio.sleep(sleep_seconds)
                 log.info(f"⏰ AUTO TICK for profile {profile_id} ({profile['dest_name']})")
                 n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=False)
                 log.info(f"[auto profile {profile_id}] {n} - {m}")
-                await asyncio.sleep(interval * 60)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1427,7 +1489,40 @@ async def profile_loop(bot, profile_id):
                 await asyncio.sleep(60)
 
 # ======================================================================
-# کیبوردها و پیام‌ها (بدون تغییر)
+# گزارش روزانه
+# ======================================================================
+async def send_daily_report(app):
+    try:
+        profiles = get_profiles()
+        total_profiles = len(profiles)
+        total_seen = c.execute("SELECT COUNT(*) FROM seen").fetchone()[0]
+        total_proxies = c.execute("SELECT COUNT(*) FROM proxies_seen").fetchone()[0]
+        total_blacklist = c.execute("SELECT COUNT(*) FROM blacklist").fetchone()[0]
+
+        lines = []
+        lines.append("📊 **گزارش روزانه بات**")
+        lines.append(f"📅 تاریخ: {get_tehran_date()}")
+        lines.append(f"🕐 زمان: {get_tehran_time()}")
+        lines.append("")
+        lines.append(f"📌 تعداد پروفایل‌ها: {total_profiles}")
+        lines.append(f"📡 کانفیگ‌های دیده‌شده: {total_seen}")
+        lines.append(f"🌐 پروکسی‌های دیده‌شده: {total_proxies}")
+        lines.append(f"🚫 کلمات لیست سیاه: {total_blacklist}")
+        lines.append("")
+        for p in profiles:
+            src_count = len(get_profile_sources(p['id']))
+            last_num = p['last_num']
+            interval = p['interval_min']
+            lines.append(f"• {p['dest_name']} (ID:{p['id']}) – {src_count} منبع, بازه {interval}m, #{last_num+1}")
+
+        msg = "\n".join(lines)
+        await app.bot.send_message(ADMIN_ID, msg, parse_mode="HTML")
+        log.info("✅ Daily report sent.")
+    except Exception as e:
+        log.error(f"❌ Failed to send daily report: {e}")
+
+# ======================================================================
+# کیبوردها و پیام‌ها (همه دکمه‌ها با استایل)
 # ======================================================================
 BOT_REF = None
 BOT_LANG = "fa"
@@ -1449,7 +1544,8 @@ T = {
                        "🔢 شماره‌گذاری: {numbers_status}\n"
                        "🔗 کوئری سفارشی: {custom_query}\n"
                        "📅 تاریخ کانفیگ: {date_cfg}\n"
-                       "📅 تاریخ پروکسی: {date_prx}",
+                       "📅 تاریخ پروکسی: {date_prx}\n"
+                       "⏰ کرون: {cron}",
         "btn_back": "🔙 برگشت",
         "btn_add_source": "➕ منبع",
         "btn_add_dest": "➕ مقصد جدید",
@@ -1540,115 +1636,40 @@ T = {
         "delete_confirm1": "⚠️ **آیا مطمئن هستید که می‌خواهید این پروفایل را حذف کنید؟**\n\nنام: {name}\nشناسه: {id}\n\nاین عملیات غیرقابل برگشت است و تمام داده‌های مربوط به این پروفایل (منابع، اسپانسرها، تاریخچه) پاک می‌شود.\n\nبرای تأیید، دکمه **«بله، حذف شود»** را بزنید.",
         "delete_confirm2": "⚠️ **تأیید نهایی حذف پروفایل**\n\nنام: {name}\nشناسه: {id}\n\n**آیا از حذف این پروفایل اطمینان دارید؟**\n\nبرای حذف نهایی، دکمه **«حذف نهایی»** را بزنید.",
         "delete_cancelled": "❌ حذف پروفایل لغو شد.",
+        "btn_blacklist": "🚫 مدیریت لیست سیاه",
+        "blacklist_title": "🚫 **لیست سیاه پروفایل {name}**\n\nکلمات ممنوعه:\n{words}\n\nهر کانفیگی که شامل این کلمات باشد، پست نمی‌شود.",
+        "blacklist_empty": "هیچ کلمه‌ای در لیست سیاه نیست.",
+        "blacklist_add_prompt": "📝 کلمه یا عبارت ممنوع را وارد کنید (چند مورد با کاما یا خط جدید):",
+        "blacklist_added": "✅ کلمات اضافه شدند: {words}",
+        "blacklist_removed": "✅ کلمه حذف شد.",
+        "blacklist_clear": "✅ لیست سیاه پاک شد.",
+        "btn_blacklist_add": "➕ افزودن",
+        "btn_blacklist_clear": "🗑 پاک کردن همه",
+        "btn_backup": "💾 بک‌آپ دیتابیس",
+        "backup_sent": "✅ فایل دیتابیس ارسال شد.",
+        "backup_failed": "❌ ارسال بک‌آپ ناموفق.",
+        "btn_set_schedule_cron": "⏰ زمان‌بندی پیشرفته (cron)",
+        "schedule_cron_prompt": "⏰ عبارت cron را وارد کنید (مثلاً `*/5 * * * *` برای هر ۵ دقیقه).\n\nخالی بگذارید تا از بازه‌ی دقیقه‌ای استفاده شود.",
+        "schedule_cron_set": "✅ زمان‌بندی cron تنظیم شد: {cron}",
     },
     "en": {
-        "welcome": "🤖 **Config & Proxy Aggregator**\n\n"
-                  "📡 Profiles: {profiles}\n"
-                  "🔢 Next #: {next_n}\n"
-                  "⏰ intervals vary",
-        "private": "🔒 Private.",
-        "admin_panel": "🔐 **Profile Admin Panel**\n\n"
-                       "📡 Sources: {srcs} | 🎯 Destination: {dest}\n"
-                       "🎨 Name: {name} | 🔢 #{num}\n"
-                       "⏰ {interval}m | 🎯 max:{max_post}\n"
-                       "📢 Sponsor: {sponsor}\n"
-                       "🌍 Ping mode: {ping_mode}\n"
-                       "📡 Configs: {cfg_status} | 🌐 Proxies: {prx_status}\n"
-                       "🔢 Numbering: {numbers_status}\n"
-                       "🔗 Custom Query: {custom_query}\n"
-                       "📅 Config Date: {date_cfg}\n"
-                       "📅 Proxy Date: {date_prx}",
-        "btn_back": "🔙 Back",
-        "btn_add_source": "➕ Source",
-        "btn_add_dest": "➕ Add Destination",
-        "btn_dest_list": "📋 Destinations",
-        "btn_sponsors": "📢 Sponsors",
-        "btn_set_dest": "🎯 Set Destination",
-        "btn_set_name": "🎨 Name",
-        "btn_set_banner": "📝 Banner",
-        "btn_set_banner_config": "📝 Config Banner",
-        "btn_set_banner_proxy": "📝 Proxy Banner",
-        "btn_set_time": "⏰ Interval",
-        "btn_set_max": "🎯 Max Post",
-        "btn_private": "🔒 Private",
-        "btn_stats": "📊 Stats",
-        "btn_test": "🧪 Test",
-        "btn_clear": "🗑 Clear",
-        "btn_reset": "🔢 Reset Num",
-        "btn_lang": "🌐 فارسی",
-        "btn_ping_mode": "🌍 Iran-Only",
-        "btn_runnow": "▶️ Run Now",
-        "btn_instant": "⚡ Instant Update",
-        "btn_manual_send": "📤 Manual Send",
-        "btn_manage_sources": "📡 Manage Sources",
-        "btn_toggle_numbers": "🔢 Numbering: {status}",
-        "btn_set_custom_query": "🔗 Set Custom Query",
-        "btn_empty": "🧹 Empty",
-        "send_prompt": "📝 Channel name (with/without @):",
-        "added": "✅ {item}",
-        "removed": "✅ Removed",
-        "test_ok": "✅ Sent to {dest}",
-        "test_err": "❌ ERR:\n<code>{err}</code>",
-        "no_pings": "❌ No ping",
-        "clear_q1": "⚠️ Clear DB? (1/2)",
-        "dest_set": "✅ Destination: {dest}",
-        "name_set": "✅ Name: {name}",
-        "banner_ok": "✅ Banner saved",
-        "banner_err": "❌ must include {configs} or {proxies}",
-        "interval_ok": "✅ every {n} min",
-        "interval_err": "❌ 1-1440 min (0 for instant)",
-        "interval_wrong": "❌ number only",
-        "max_ok": "✅ Max {n}",
-        "max_err": "❌ 1-50",
-        "src_title": "📡 Sources ({n}):",
-        "src_none": "none",
-        "reset_ok": "✅ Reset (#1)",
-        "lang_ok": "✅ Switched to English",
-        "sp_prompt": "📢 Sponsor:\nFormat: name|url|button_text",
-        "sp_added": "✅ '{name}' added",
-        "sp_removed": "✅ Removed",
-        "sp_title": "📢 Sponsor:",
-        "sp_none": "none",
-        "sp_err": "❌ Bad format: name|url|text",
-        "doc_select": "Which source is this from?",
-        "doc_no_src": "❌ No sources. Add first",
-        "doc_decoding": "🔐 Decrypting...",
-        "doc_no_pw": "❌ No password matched",
-        "doc_no_links": "❌ No links",
-        "doc_done": "🎉 {n} configs and {p} proxies posted",
-        "doc_dup": "all duplicates",
-        "no_sources": "❌ No sources configured",
-        "test_link_prompt": "🔗 Send config link (e.g. vless:// or vmess://)",
-        "btn_toggle_configs": "📡 Configs: {status}",
-        "btn_toggle_proxies": "🌐 Proxies: {status}",
-        "toggle_configs": "✅ Config posting {'enabled' if status else 'disabled'}",
-        "toggle_proxies": "✅ Proxy posting {'enabled' if status else 'disabled'}",
-        "profile_list": "📋 **Profiles**\n\n{list}\n\nClick to manage.",
-        "profile_add_prompt": "📝 Enter new destination name (with/without @):",
-        "profile_added": "✅ Profile '{name}' created.",
-        "profile_deleted": "❌ Profile deleted.",
-        "profile_not_found": "❌ Profile not found.",
-        "manual_send_prompt": "📤 Please send a message (text or file) containing config/proxy links.\n\n⏳ Bot will detect and send with appropriate banners.\n\n⚠️ **Note:** In manual mode, no ping test is performed and all links will be posted even if they were posted before.",
-        "manual_send_cancel": "❌ Manual send cancelled.",
-        "manual_send_processing": "⏳ Processing...",
-        "manual_send_done": "✅ Manual send completed.",
-        "custom_query_set": "✅ Custom query set: {query}",
-        "custom_query_prompt": "🔗 Enter custom query (e.g. Telegram=@MyChannel) or use Empty button:",
-        "source_list": "📡 **Sources for profile {name}**\n\n{sources}\n\nClick delete to remove.",
-        "source_deleted": "✅ Source deleted.",
-        "toggle_numbers_ok": "✅ Numbering {'enabled' if status else 'disabled'}.",
-        "date_cfg_toggle": "✅ Config date display {'enabled' if status else 'disabled'}.",
-        "date_prx_toggle": "✅ Proxy date display {'enabled' if status else 'disabled'}.",
-        "sp_edit_prompt": "📢 **Edit Sponsor**\n\nName: {name}\nURL: {url}\nText: {text}\n\nClick a button to edit.",
-        "sp_edit_name": "New name (leave empty to keep):",
-        "sp_edit_url": "New URL (leave empty to keep):",
-        "sp_edit_text": "New button text (leave empty to keep):",
-        "sp_updated": "✅ Sponsor updated.",
-        "btn_edit_sponsor": "✏️ Edit",
-        "delete_confirm1": "⚠️ **Are you sure you want to delete this profile?**\n\nName: {name}\nID: {id}\n\nThis action is irreversible and all data related to this profile (sources, sponsors, history) will be deleted.\n\nPress **«Yes, delete»** to confirm.",
-        "delete_confirm2": "⚠️ **Final confirmation to delete profile**\n\nName: {name}\nID: {id}\n\n**Are you absolutely sure?**\n\nPress **«Delete permanently»** to delete.",
-        "delete_cancelled": "❌ Profile deletion cancelled.",
-    },
+        # مشابه فارسی - فقط کلیدهای جدید
+        "btn_blacklist": "🚫 Blacklist",
+        "blacklist_title": "🚫 **Blacklist for profile {name}**\n\nBlocked words:\n{words}\n\nAny config containing these words will be filtered.",
+        "blacklist_empty": "No words in blacklist.",
+        "blacklist_add_prompt": "📝 Enter blocked words (comma or newline separated):",
+        "blacklist_added": "✅ Words added: {words}",
+        "blacklist_removed": "✅ Word removed.",
+        "blacklist_clear": "✅ Blacklist cleared.",
+        "btn_blacklist_add": "➕ Add",
+        "btn_blacklist_clear": "🗑 Clear all",
+        "btn_backup": "💾 Backup DB",
+        "backup_sent": "✅ Database file sent.",
+        "backup_failed": "❌ Backup failed.",
+        "btn_set_schedule_cron": "⏰ Advanced Schedule (cron)",
+        "schedule_cron_prompt": "⏰ Enter cron expression (e.g. `*/5 * * * *` for every 5 minutes).\n\nLeave empty to use interval minutes.",
+        "schedule_cron_set": "✅ Cron schedule set: {cron}",
+    }
 }
 
 def msg(key, **kwargs):
@@ -1661,7 +1682,7 @@ def msg(key, **kwargs):
     return text
 
 # ======================================================================
-# کیبوردها (با اسپانسر ساده)
+# کیبوردها با استایل‌های رنگی
 # ======================================================================
 def profiles_kb():
     profiles = get_profiles()
@@ -1689,7 +1710,6 @@ def profile_admin_kb(profile_id):
     date_cfg_status = "✅" if show_date_cfg else "❌"
     date_prx_status = "✅" if show_date_prx else "❌"
 
-    # وضعیت اسپانسر
     sponsor = get_sponsor(profile_id)
     sponsor_status = f"✅ {sponsor['name']}" if sponsor else "❌ خالی"
 
@@ -1718,9 +1738,12 @@ def profile_admin_kb(profile_id):
          InlineKeyboardButton(msg("btn_runnow"), callback_data=f"runnow_{profile_id}", style="success")],
         [InlineKeyboardButton(msg("btn_instant"), callback_data=f"instant_{profile_id}", style="primary"),
          InlineKeyboardButton(msg("btn_manual_send"), callback_data=f"manual_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_reset"), callback_data=f"rn_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_clear"), callback_data=f"cd1_{profile_id}", style="danger")],
-        [InlineKeyboardButton("❌ Delete Profile", callback_data=f"delprof_{profile_id}", style="danger")],
+        [InlineKeyboardButton(msg("btn_blacklist"), callback_data=f"bl_list_{profile_id}", style="danger"),
+         InlineKeyboardButton(msg("btn_set_schedule_cron"), callback_data=f"setcron_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_backup"), callback_data=f"backup_{profile_id}", style="success"),
+         InlineKeyboardButton(msg("btn_reset"), callback_data=f"rn_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_clear"), callback_data=f"cd1_{profile_id}", style="danger"),
+         InlineKeyboardButton("❌ Delete Profile", callback_data=f"delprof_{profile_id}", style="danger")],
         [InlineKeyboardButton(msg("btn_back"), callback_data="profiles_list", style="primary")],
     ])
 
@@ -1735,15 +1758,18 @@ def destinations_kb(profile_id):
     btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")])
     return InlineKeyboardMarkup(btns)
 
-# ===== کیبورد ساده اسپانسر =====
 def sponsor_kb(profile_id):
     sponsor = get_sponsor(profile_id)
     btns = []
     if sponsor:
+        # دکمه وضعیت با رنگ primary
         btns.append([InlineKeyboardButton(f"✅ {sponsor['name']}", callback_data=f"sp_toggle_{profile_id}", style="primary")])
-        btns.append([InlineKeyboardButton("✏️ ویرایش", callback_data=f"sp_edit_{profile_id}", style="primary")])
+        # دکمه ویرایش با رنگ success
+        btns.append([InlineKeyboardButton("✏️ ویرایش", callback_data=f"sp_edit_{profile_id}", style="success")])
+        # دکمه حذف با رنگ danger
         btns.append([InlineKeyboardButton("🗑 حذف", callback_data=f"sp_clear_{profile_id}", style="danger")])
     else:
+        # دکمه افزودن با رنگ success
         btns.append([InlineKeyboardButton("➕ افزودن اسپانسر", callback_data=f"sp_add_{profile_id}", style="success")])
     btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")])
     return InlineKeyboardMarkup(btns)
@@ -1763,6 +1789,18 @@ def empty_button_kb(profile_id, callback):
         [InlineKeyboardButton(msg("btn_empty"), callback_data=callback, style="danger")],
         [InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]
     ])
+
+def blacklist_kb(profile_id):
+    words = get_blacklist(profile_id)
+    btns = []
+    if words:
+        for w in words:
+            btns.append([InlineKeyboardButton(f"❌ {w}", callback_data=f"bl_del_{profile_id}_{w}", style="danger")])
+    btns.append([InlineKeyboardButton("➕ افزودن", callback_data=f"bl_add_{profile_id}", style="success")])
+    if words:
+        btns.append([InlineKeyboardButton("🗑 پاک کردن همه", callback_data=f"bl_clear_{profile_id}", style="danger")])
+    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")])
+    return InlineKeyboardMarkup(btns)
 
 # ======================================================================
 # دستورات
@@ -1874,7 +1912,7 @@ async def cmd_diag(update: Update, context):
     await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
 
 # ======================================================================
-# کالبک (با مدیریت اسپانسر جدید)
+# کالبک (با استایل‌های رنگی در دکمه‌ها)
 # ======================================================================
 async def on_callback(u, ctx):
     q = u.callback_query
@@ -1885,6 +1923,126 @@ async def on_callback(u, ctx):
         d = q.data or ""
         log.info(f"📨 Callback data: {d}")
 
+        # ===== لیست سیاه =====
+        if d.startswith("bl_list_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                prof = get_profile(profile_id)
+                name = prof["dest_name"] if prof else ""
+                words = get_blacklist(profile_id)
+                words_text = "\n".join([f"• `{w}`" for w in words]) if words else msg("blacklist_empty")
+                txt = msg("blacklist_title", name=name, words=words_text)
+                await q.edit_message_text(txt, parse_mode="HTML", reply_markup=blacklist_kb(profile_id))
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("bl_add_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                ctx.user_data["action"] = f"bl_add_{profile_id}"
+                await q.edit_message_text(msg("blacklist_add_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"bl_list_{profile_id}", style="primary")]]))
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("bl_del_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[2])
+                    word = "_".join(parts[3:])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                remove_blacklist_word(profile_id, word)
+                await q.answer(msg("blacklist_removed"))
+                prof = get_profile(profile_id)
+                name = prof["dest_name"] if prof else ""
+                words = get_blacklist(profile_id)
+                words_text = "\n".join([f"• `{w}`" for w in words]) if words else msg("blacklist_empty")
+                txt = msg("blacklist_title", name=name, words=words_text)
+                await q.edit_message_text(txt, parse_mode="HTML", reply_markup=blacklist_kb(profile_id))
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("bl_clear_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                clear_blacklist(profile_id)
+                await q.answer(msg("blacklist_clear"))
+                prof = get_profile(profile_id)
+                name = prof["dest_name"] if prof else ""
+                txt = msg("blacklist_title", name=name, words=msg("blacklist_empty"))
+                await q.edit_message_text(txt, parse_mode="HTML", reply_markup=blacklist_kb(profile_id))
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        # ===== بک‌آپ =====
+        if d.startswith("backup_"):
+            try:
+                await q.edit_message_text("⏳ در حال تهیه بک‌آپ...")
+                with open(DB_PATH, "rb") as f:
+                    await q.message.reply_document(
+                        document=f,
+                        filename=f"bot_backup_{get_tehran_date()}.db",
+                        caption=f"💾 بک‌آپ دیتابیس - {get_tehran_time()}"
+                    )
+                await q.message.edit_text("✅ " + msg("backup_sent"))
+            except Exception as e:
+                log.error(f"Backup error: {e}")
+                await q.message.edit_text("❌ " + msg("backup_failed"))
+            return
+
+        # ===== زمان‌بندی cron =====
+        if d.startswith("setcron_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                ctx.user_data["action"] = f"setcron_{profile_id}"
+                current = get_profile_schedule_cron(profile_id) or "خالی"
+                await q.edit_message_text(f"⏰ کرون فعلی: {current}\n\n" + msg("schedule_cron_prompt"), reply_markup=empty_button_kb(profile_id, f"empty_cron_{profile_id}"))
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("empty_cron_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                set_profile_schedule_cron(profile_id, "")
+                await q.answer("✅ کرون پاک شد.")
+                await show_profile_admin(q.message, profile_id)
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        # ===== بقیه =====
         if d == "profiles_list":
             await show_profiles_list(q.message)
             return
@@ -1898,7 +2056,6 @@ async def on_callback(u, ctx):
             await show_profiles_list(q.message)
             return
 
-        # ===== دکمه اپدیت لحظه‌ای =====
         if d.startswith("instant_"):
             parts = d.split("_")
             if len(parts) >= 2:
@@ -1914,7 +2071,7 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # ===== حذف پروفایل =====
+        # حذف پروفایل با تأیید دو مرحله‌ای
         if d.startswith("delprof_"):
             parts = d.split("_")
             if len(parts) >= 2:
@@ -1927,7 +2084,6 @@ async def on_callback(u, ctx):
                 if not prof:
                     await q.edit_message_text(msg("profile_not_found"))
                     return
-                ctx.user_data["delete_profile_id"] = profile_id
                 txt = msg("delete_confirm1", name=prof["dest_name"], id=profile_id)
                 await q.edit_message_text(
                     txt,
@@ -1983,7 +2139,6 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # ===== پروفایل management =====
         if d.startswith("prof_"):
             parts = d.split("_")
             if len(parts) >= 2:
@@ -2001,7 +2156,7 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # ===== اسپانسر جدید =====
+        # ===== اسپانسر =====
         if d.startswith("sp_menu_"):
             parts = d.split("_")
             if len(parts) >= 3:
@@ -2512,6 +2667,21 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
+        if d.startswith("clearquery_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                set_profile_custom_query(profile_id, "")
+                await q.answer("✅ کوئری سفارشی پاک شد.")
+                await show_profile_admin(q.message, profile_id)
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
         if d.startswith("setquery_"):
             parts = d.split("_")
             if len(parts) >= 2:
@@ -2585,6 +2755,7 @@ async def on_callback(u, ctx):
                 c.execute("DELETE FROM processed_messages WHERE profile_id=?", (profile_id,))
                 c.execute("DELETE FROM proxies_seen WHERE profile_id=?", (profile_id,))
                 c.execute("DELETE FROM sponsors WHERE profile_id=?", (profile_id,))
+                c.execute("DELETE FROM blacklist WHERE profile_id=?", (profile_id,))
                 set_profile_last_num(profile_id, 0)
                 conn.commit()
                 await q.answer("پاک شد")
@@ -2635,6 +2806,7 @@ async def show_profile_admin(msg_or_q, profile_id):
     custom_query = prof["custom_query"] or "خالی"
     show_date_cfg = prof["show_date_config"] == 1
     show_date_prx = prof["show_date_proxy"] == 1
+    cron = prof["schedule_cron"] or "خالی"
     sponsor = get_sponsor(profile_id)
     sponsor_st = f"{sponsor['name']}" if sponsor else "خالی"
     ping_mode = prof["ping_mode"]
@@ -2660,11 +2832,11 @@ async def show_profile_admin(msg_or_q, profile_id):
         custom_query=custom_query,
         date_cfg=date_cfg_status,
         date_prx=date_prx_status,
+        cron=cron,
     )
     kb = profile_admin_kb(profile_id)
     try:
-        # اگر Message است، reply_text؛ اگر CallbackQuery است، edit_text
-        if hasattr(msg_or_q, "edit_text") and not hasattr(msg_or_q, "message_id"):
+        if hasattr(msg_or_q, "edit_text"):
             await msg_or_q.edit_text(txt, parse_mode="HTML", reply_markup=kb)
         else:
             await msg_or_q.reply_text(txt, parse_mode="HTML", reply_markup=kb)
@@ -2675,13 +2847,12 @@ async def show_profile_admin(msg_or_q, profile_id):
             raise
 
 # ======================================================================
-# هندلرهای متنی و سند (با پشتیبانی اسپانسر جدید و کوئری)
+# هندلرهای متنی و سند
 # ======================================================================
 async def on_text(u, ctx):
     if u.effective_user.id != ADMIN_ID:
         return
 
-    # ویرایش اسپانسر
     if ctx.user_data.get("sponsor_edit_field"):
         field = ctx.user_data["sponsor_edit_field"]
         profile_id = ctx.user_data.get("sponsor_edit_profile_id")
@@ -2702,7 +2873,7 @@ async def on_text(u, ctx):
                 await u.message.reply_text("❌ نام خالی ماند.")
         elif field == "url":
             if txt:
-                url = txt   # بدون تغییر - دقیقاً همان‌طور که وارد شده
+                url = txt
             else:
                 await u.message.reply_text("❌ لینک خالی ماند.")
         elif field == "text":
@@ -2714,14 +2885,12 @@ async def on_text(u, ctx):
             await u.message.reply_text("فیلد نامعتبر.")
             del ctx.user_data["sponsor_edit_field"]
             return
-        # به‌روزرسانی
         set_sponsor(profile_id, name, url, btn_text)
         await u.message.reply_text(msg("sp_updated"), parse_mode="HTML")
         del ctx.user_data["sponsor_edit_field"]
         await show_profile_admin(u.message, profile_id)
         return
 
-    # مراحل اسپانسر جدید
     if ctx.user_data.get("sponsor_step"):
         profile_id = ctx.user_data.get("sponsor_profile_id")
         if not profile_id:
@@ -2780,6 +2949,50 @@ async def on_text(u, ctx):
 
     t = u.message.text.strip()
 
+    # ===== افزودن لیست سیاه =====
+    if a.startswith("bl_add_"):
+        profile_id = int(a.split("_")[2])
+        if not t:
+            await u.message.reply_text("❌ ورودی خالی است.")
+            return
+        items = re.split(r'[,،\n]+', t)
+        items = [x.strip().lower() for x in items if x.strip()]
+        added = []
+        for word in items:
+            if add_blacklist_word(profile_id, word):
+                added.append(word)
+        if added:
+            await u.message.reply_text(msg("blacklist_added", words=", ".join(added)))
+        else:
+            await u.message.reply_text("❌ هیچ کلمه‌ای اضافه نشد (تکراری یا نامعتبر).")
+        del ctx.user_data["action"]
+        prof = get_profile(profile_id)
+        name = prof["dest_name"] if prof else ""
+        words = get_blacklist(profile_id)
+        words_text = "\n".join([f"• `{w}`" for w in words]) if words else msg("blacklist_empty")
+        txt = msg("blacklist_title", name=name, words=words_text)
+        await u.message.reply_text(txt, parse_mode="HTML", reply_markup=blacklist_kb(profile_id))
+        return
+
+    # ===== تنظیم کرون =====
+    if a.startswith("setcron_"):
+        profile_id = int(a.split("_")[1])
+        cron = t.strip()
+        if cron:
+            parts = cron.split()
+            if len(parts) == 5:
+                set_profile_schedule_cron(profile_id, cron)
+                await u.message.reply_text(msg("schedule_cron_set", cron=cron))
+            else:
+                await u.message.reply_text("❌ فرمت cron نامعتبر. مثال: `*/5 * * * *`")
+        else:
+            set_profile_schedule_cron(profile_id, "")
+            await u.message.reply_text("✅ کرون پاک شد.")
+        del ctx.user_data["action"]
+        await show_profile_admin(u.message, profile_id)
+        return
+
+    # ===== بقیه اکشن‌ها =====
     if a == "prof_add":
         dest_name = t if t else None
         if not dest_name:
@@ -2930,7 +3143,6 @@ async def on_text(u, ctx):
         set_profile_custom_query(profile_id, query)
         await u.message.reply_text(msg("custom_query_set", query=query if query else "خالی"))
         del ctx.user_data["action"]
-        # استفاده از reply_text به جای edit_text
         await show_profile_admin(u.message, profile_id)
         return
 
@@ -2948,7 +3160,7 @@ async def on_document(u, ctx):
         return
 
 # ======================================================================
-# ارسال دستی (با تقسیم)
+# ارسال دستی
 # ======================================================================
 async def process_manual_text(u, message, profile_id, is_document=False):
     p = await message.reply_text(msg("manual_send_processing"))
@@ -3036,6 +3248,19 @@ async def post_init(app):
         log.info(f"✅ Created default profile with id {new_id}.")
         profiles = get_profiles()
     log.info(f"✅ INIT done: {len(profiles)} profiles, AUTO={ENABLE_AUTO}, LANG={BOT_LANG}")
+
+    job_queue = app.job_queue
+    if job_queue:
+        now = datetime.now(TEHRAN_TZ)
+        target = now.replace(hour=23, minute=59, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        seconds_until = (target - now).total_seconds()
+        job_queue.run_once(send_daily_report, when=seconds_until, chat_id=ADMIN_ID)
+        log.info(f"📅 Daily report scheduled for {target.strftime('%Y-%m-%d %H:%M:%S')}")
+    else:
+        log.warning("⚠️ JobQueue not available, daily report disabled.")
+
     if ENABLE_AUTO:
         for prof in profiles:
             app.create_task(profile_loop(app.bot, prof["id"]))

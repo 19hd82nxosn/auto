@@ -1100,6 +1100,11 @@ def split_text(text, max_len=4096):
         chunks.append('\n'.join(current))
     return chunks
 
+# ======================================================================
+# کش موقت برای کپی کانفیگ
+# ======================================================================
+_copy_cache = {}
+
 async def post_configs(bot, profile_id, working, source_for_seen=""):
     if not working:
         return 0, None
@@ -1109,11 +1114,18 @@ async def post_configs(bot, profile_id, working, source_for_seen=""):
     last_n = get_profile_last_num(profile_id)
     show_numbers = get_profile_show_numbers(profile_id)
     custom_query = get_profile_custom_query(profile_id)
-    show_date = get_profile_show_date_config(profile_id)
     dest = get_profile_dest(profile_id)
-    configs_text = ""
-    all_buttons = []
 
+    sponsors = get_enabled_sponsors(profile_id)
+    sponsor_button = None
+    if sponsors:
+        sid, sname, surl, stxt, scolor = sponsors[0]
+        clean_txt = stxt.replace('★', '').replace('☆', '').strip()
+        style_map = {"blue": "primary", "green": "success", "red": "danger", "yellow": "primary", "purple": "primary"}
+        style = style_map.get(scolor, "primary")
+        sponsor_button = InlineKeyboardButton(clean_txt, url=surl, style=style)
+
+    sent_count = 0
     for i, (url, ping, node_count) in enumerate(items, 1):
         n = last_n + i
         host, _ = extract_host(url)
@@ -1138,33 +1150,38 @@ async def post_configs(bot, profile_id, working, source_for_seen=""):
                 header = f"{channel_display} {flag}"
 
         block = f"<pre>{modified_url}</pre>"
-        configs_text += header + "\n" + block + "\n"
+        msg_text = header + "\n" + block
+
+        # دکمه کپی
+        copy_key = f"{profile_id}_{i}"
+        _copy_cache[copy_key] = modified_url
+        buttons = [InlineKeyboardButton("📋 COPY CODE", callback_data=f"copy_{copy_key}")]
+
+        # اسپانسر فقط در اولین پیام
+        if i == 1 and sponsor_button:
+            buttons.append(sponsor_button)
+
+        reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
+
+        try:
+            await bot.send_message(
+                dest,
+                msg_text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+                disable_web_page_preview=True
+            )
+            sent_count += 1
+        except Exception as e:
+            log.error(f"Failed to send config {i}: {e}")
+
         mark_as_posted(profile_id, modified_url, source_for_seen)
 
-    if items:
-        set_profile_last_num(profile_id, last_n + len(items))
-        config_count = len(items)
+    if sent_count > 0:
+        set_profile_last_num(profile_id, last_n + sent_count)
+        return sent_count, None
     else:
         return 0, None
-
-    sponsors = get_enabled_sponsors(profile_id)
-    if sponsors:
-        sid, sname, surl, stxt, scolor = sponsors[0]
-        clean_txt = stxt.replace('★', '').replace('☆', '').strip()
-        style_map = {"blue": "primary", "green": "success", "red": "danger", "yellow": "primary", "purple": "primary"}
-        style = style_map.get(scolor, "primary")
-        all_buttons.append([InlineKeyboardButton(clean_txt, url=surl, style=style)])
-
-    banner_config = get_profile_banner_config(profile_id)
-    configs_text = configs_text.rstrip()
-    try:
-        text = banner_config.format(configs=configs_text)
-    except KeyError:
-        log.error("❌ Banner config missing {configs} placeholder, using default")
-        default_banner = "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
-        text = default_banner.format(configs=configs_text)
-
-    return config_count, (text, all_buttons if all_buttons else None)
 
 async def post_proxies(bot, profile_id, proxies_with_ping):
     if not proxies_with_ping:
@@ -1209,7 +1226,6 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
     results = []
 
     if post_configs_enabled and working:
-        max_post = get_profile_max_post(profile_id)
         unique_working = []
         seen_urls = set()
         for url, ping, cnt in working:
@@ -1220,21 +1236,10 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
         if not unique_working:
             log.info("ℹ️ No new configs to post (all duplicates).")
         else:
-            for i in range(0, len(unique_working), max_post):
-                chunk = unique_working[i:i+max_post]
-                config_count, config_payload = await post_configs(bot, profile_id, chunk, source_for_seen)
-                if config_count > 0 and config_payload:
-                    text, buttons = config_payload
-                    sent = await send_to_destination(bot, profile_id, text, buttons)
-                    if sent:
-                        total_configs += config_count
-                        results.append(f"{config_count} configs")
-                    else:
-                        plain_text = re.sub(r'<[^>]+>', '', text)
-                        sent = await send_to_destination(bot, profile_id, plain_text, None)
-                        if sent:
-                            total_configs += config_count
-                            results.append(f"{config_count} configs (plain)")
+            config_count, _ = await post_configs(bot, profile_id, unique_working, source_for_seen)
+            if config_count > 0:
+                total_configs += config_count
+                results.append(f"{config_count} configs")
 
     if post_proxies_enabled and proxies_with_ping:
         valid_proxies = [p for p in proxies_with_ping if "t.me/proxy" in p[0].lower()]
@@ -1258,9 +1263,6 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
     result_msg = "posted " + " and ".join(results)
     return total_configs, result_msg
 
-# ======================================================================
-# سیکل کامل (فقط جدید و تست محدود)
-# ======================================================================
 async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
     log.info("=" * 50)
     log.info(f"🔄 run_full_cycle for profile {profile_id} STARTED")
@@ -1965,6 +1967,18 @@ async def on_callback(u, ctx):
         d = q.data or ""
         log.info(f"📨 Callback data: {d}")
 
+        # ===== دکمه کپی کانفیگ =====
+        if d.startswith("copy_"):
+            key = d[5:]  # حذف "copy_"
+            url = _copy_cache.get(key)
+            if url:
+                await q.answer("✅ کپی شد!")
+                await q.message.reply_text(f"<code>{url}</code>", parse_mode="HTML")
+                _copy_cache.pop(key, None)
+            else:
+                await q.answer("❌ لینک یافت نشد")
+            return
+
         if d == "profiles_list":
             await show_profiles_list(q.message)
             return
@@ -2175,6 +2189,10 @@ async def on_callback(u, ctx):
                 except ValueError:
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
+                profile_id = ctx.user_data.get("sponsor_edit_profile_id")
+                if not profile_id:
+                    await q.answer("❌ خطا در پروفایل")
+                    return
                 ctx.user_data["sponsor_edit_field"] = "name"
                 await q.edit_message_text(
                     msg("sp_edit_name"),
@@ -2194,6 +2212,10 @@ async def on_callback(u, ctx):
                     sid = int(parts[3])
                 except ValueError:
                     await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                profile_id = ctx.user_data.get("sponsor_edit_profile_id")
+                if not profile_id:
+                    await q.answer("❌ خطا در پروفایل")
                     return
                 ctx.user_data["sponsor_edit_field"] = "url"
                 await q.edit_message_text(
@@ -2215,6 +2237,10 @@ async def on_callback(u, ctx):
                 except ValueError:
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
+                profile_id = ctx.user_data.get("sponsor_edit_profile_id")
+                if not profile_id:
+                    await q.answer("❌ خطا در پروفایل")
+                    return
                 ctx.user_data["sponsor_edit_field"] = "text"
                 await q.edit_message_text(
                     msg("sp_edit_text"),
@@ -2234,6 +2260,10 @@ async def on_callback(u, ctx):
                     sid = int(parts[3])
                 except ValueError:
                     await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                profile_id = ctx.user_data.get("sponsor_edit_profile_id")
+                if not profile_id:
+                    await q.answer("❌ خطا در پروفایل")
                     return
                 ctx.user_data["sponsor_edit_field"] = "color"
                 await q.edit_message_text(
@@ -2259,6 +2289,10 @@ async def on_callback(u, ctx):
                 except ValueError:
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
+                profile_id = ctx.user_data.get("sponsor_edit_profile_id")
+                if not profile_id:
+                    await q.answer("❌ خطا در پروفایل")
+                    return
                 if color in ("blue", "green", "red"):
                     update_sponsor(sid, color=color)
                     await q.answer("✅ رنگ به‌روزرسانی شد.")
@@ -2281,6 +2315,7 @@ async def on_callback(u, ctx):
                     return
                 toggle_sponsor(sid)
                 await q.answer("تغییر وضعیت داده شد")
+                profile_id = ctx.user_data.get("sponsor_edit_profile_id") or 1  # fallback
                 await q.edit_message_text(msg("sp_title"), reply_markup=sponsors_kb(profile_id))
             else:
                 await q.answer("⚠️ خطا در داده")
@@ -2296,6 +2331,7 @@ async def on_callback(u, ctx):
                     return
                 remove_sponsor(sid)
                 await q.answer(msg("sp_removed"))
+                profile_id = ctx.user_data.get("sponsor_edit_profile_id") or 1
                 await q.edit_message_text(msg("sp_title"), reply_markup=sponsors_kb(profile_id))
             else:
                 await q.answer("⚠️ خطا در داده")

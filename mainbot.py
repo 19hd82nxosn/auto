@@ -1041,7 +1041,12 @@ async def _scrape_channel_internal(profile_id, channel, only_new=True):
         return new_configs, new_proxies
 
 # ======================================================================
-# ارسال
+# کش موقت برای کپی کانفیگ
+# ======================================================================
+_copy_cache = {}
+
+# ======================================================================
+# ارسال به مقصد (با دکمه‌ها)
 # ======================================================================
 def split_text(text, max_len=4096):
     if len(text) <= max_len:
@@ -1070,132 +1075,79 @@ def split_text(text, max_len=4096):
         chunks.append('\n'.join(current))
     return chunks
 
-# ======================================================================
-# کش موقت برای کپی کانفیگ
-# ======================================================================
-_copy_cache = {}
+async def send_to_destination(bot, profile_id, text, buttons=None):
+    dest = get_profile_dest(profile_id)
+    if not dest:
+        log.error(f"❌ Profile {profile_id} has no destination!")
+        return False
+
+    log.info(f"📤 Sending to {dest} (profile {profile_id})")
+    chunks = split_text(text, 4096)
+    success = True
+    for idx, chunk in enumerate(chunks):
+        try:
+            reply_markup = InlineKeyboardMarkup(buttons) if buttons and idx == 0 else None
+            await bot.send_message(
+                dest, chunk,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+                disable_web_page_preview=True
+            )
+            log.info(f"✅ Sent chunk {idx+1}/{len(chunks)} to {dest} with HTML")
+        except Exception as e:
+            log.error(f"❌ HTML failed for {dest} chunk {idx+1}: {e}")
+            try:
+                plain = re.sub(r'<[^>]+>', '', chunk)
+                await bot.send_message(dest, plain[:4096], disable_web_page_preview=True)
+                log.info(f"✅ Sent chunk {idx+1}/{len(chunks)} to {dest} (plain)")
+            except Exception as e3:
+                log.error(f"❌ Even plain failed for {dest} chunk {idx+1}: {e3}")
+                success = False
+    return success
 
 # ======================================================================
-# ارسال کانفیگ‌ها (با بنر و اسپانسر و دکمه کپی)
+# ارسال کانفیگ به صورت تکی با بنر و دکمه کپی و اسپانسر
 # ======================================================================
-async def post_configs(bot, profile_id, working, source_for_seen=""):
+async def post_single_config(bot, profile_id, url, ping, node_count, source_for_seen, is_first=False):
     """
-    ارسال یک گروه از کانفیگ‌ها (تعداد حداکثر max_post) در یک پیام با بنر و دکمه‌ها.
-    اگر working بیش از max_post باشد، باید قبل از صدا زدن این تابع تقسیم شود.
+    ارسال یک کانفیگ به صورت یک پیام مجزا با بنر، دکمه کپی و در صورت اولین بودن، اسپانسر.
     """
-    if not working:
-        return 0, None, None
-
-    max_post = get_profile_max_post(profile_id)
-    # فقط به اندازه max_post بگیر (امنیت)
-    items = sorted(working, key=lambda x: x[1])[:max_post]
     last_n = get_profile_last_num(profile_id)
     show_numbers = get_profile_show_numbers(profile_id)
     custom_query = get_profile_custom_query(profile_id)
     dest = get_profile_dest(profile_id)
 
-    configs_text = ""
-    for i, (url, ping, node_count) in enumerate(items, 1):
-        n = last_n + i
-        host, _ = extract_host(url)
-        flag = "🌐"
-        if host:
-            ip = await host_to_ip(host)
-            if ip:
-                flag = await get_flag_for_ip(ip)
+    # شماره‌گذاری
+    n = last_n + 1
+    set_profile_last_num(profile_id, n)
 
-        channel_display = dest if dest else "@VaslZone"
-        modified_url = append_channel_and_flag_encoded(url, channel_display, flag, custom_query)
+    host, _ = extract_host(url)
+    flag = "🌐"
+    if host:
+        ip = await host_to_ip(host)
+        if ip:
+            flag = await get_flag_for_ip(ip)
 
-        if show_numbers:
-            if ping > 0:
-                header = f"<b>#{n}</b> {channel_display} {flag} {ping}ms"
-            else:
-                header = f"<b>#{n}</b> {channel_display} {flag}"
+    channel_display = dest if dest else "@VaslZone"
+    modified_url = append_channel_and_flag_encoded(url, channel_display, flag, custom_query)
+
+    if show_numbers:
+        if ping > 0:
+            header = f"<b>#{n}</b> {channel_display} {flag} {ping}ms"
         else:
-            if ping > 0:
-                header = f"{channel_display} {flag} {ping}ms"
-            else:
-                header = f"{channel_display} {flag}"
-
-        # استفاده از بک‌تیک برای نمایش کد
-        block = f"```\n{modified_url}\n```"
-        configs_text += header + "\n" + block + "\n\n"
-
-        # مارک به عنوان پست شده
-        mark_as_posted(profile_id, modified_url, source_for_seen)
-
-    if items:
-        set_profile_last_num(profile_id, last_n + len(items))
-        config_count = len(items)
+            header = f"<b>#{n}</b> {channel_display} {flag}"
     else:
-        return 0, None, None
+        if ping > 0:
+            header = f"{channel_display} {flag} {ping}ms"
+        else:
+            header = f"{channel_display} {flag}"
 
-    # دکمه کپی برای اولین کانفیگ (یا همه؟ برای سادگی فقط یک دکمه کلی)
-    # ولی بهتر است هر کانفیگ دکمه جدا داشته باشد. اما در یک پیام چند کانفیگ، یک دکمه کپی برای کل پیام کافی است.
-    # برای کپی تک تک، باید هر کانفیگ را جداگانه ارسال کنیم که قبلاً انجام شد.
-    # در اینجا یک دکمه کپی برای کل محتوا می‌سازیم (یا می‌توانیم دکمه‌ای برای کپی لینک اول بسازیم)
-    # اما با توجه به درخواست کاربر که هر کانفیگ قابل کپی باشد، بهتر است هر کانفیگ را جداگانه ارسال کنیم.
-    # بنابراین ما این تابع را فقط برای یک کانفیگ صدا می‌زنیم؟ نه، برای گروه.
-    # راه حل: در اینجا یک دکمه کپی برای کل محتوا می‌سازیم که تمام لینک‌ها را کپی کند.
-    # یا اینکه هر کانفیگ را با دکمه کپی خودش ارسال کنیم که در حالت قبل این کار را کردیم.
-    # با توجه به اینکه کاربر خواسته هر کانفیگ جدا باشد و دکمه کپی داشته باشد، بهتر است هر کانفیگ را جداگانه ارسال کنیم.
-    # بنابراین این تابع را فقط برای یک کانفیگ استفاده می‌کنیم و در سطح بالاتر حلقه می‌زنیم.
-    # اما برای سادگی، فعلاً یک دکمه کپی برای کل پیام می‌سازیم.
-    # ولی کاربر گفت "هر کانفیگ جدا باشه" پس ما هر کانفیگ را جداگانه ارسال می‌کنیم.
-    # بنابراین این تابع را برای یک کانفیگ بازنویسی می‌کنیم.
-    # اما برای جلوگیری از پیچیدگی، من یک تابع جدید می‌سازم که هر کانفیگ را جداگانه ارسال کند.
-
-    # این تابع فقط برای گروه استفاده می‌شود و یک دکمه کپی برای کل پیام دارد.
-    # اما ما ترجیح می‌دهیم هر کانفیگ جدا باشد، پس از این تابع استفاده نمی‌کنیم و به جای آن از تابع زیر استفاده می‌کنیم.
-
-    # من این تابع را برای گروه نگه می‌دارم ولی در عمل از آن استفاده نمی‌کنم.
-    # در عوض از تابع post_single_config استفاده می‌کنیم.
-
-    # اما برای حفظ سازگاری، این تابع را به‌روز می‌کنم تا یک پیام با چند کانفیگ ارسال کند و یک دکمه کپی برای کل محتوا داشته باشد.
-    # ولی اگر کاربر خواستار کپی تک تک باشد، باید هر کانفیگ را جداگانه ارسال کنیم.
-
-    # با توجه به درخواست، من هر کانفیگ را جداگانه با بنر ارسال می‌کنم. بنابراین این تابع را حذف و به جای آن از تابع post_single_config استفاده می‌کنم.
-
-    # اما برای اینکه کد کامل باشد، این تابع را به‌روز می‌کنم تا یک پیام با چند کانفیگ ارسال کند و دکمه کپی برای کل محتوا.
-    # ولی کاربر گفته "هر کانفیگ جدا باشه" پس من این تابع را برای گروه نمی‌خواهم.
-
-    # بنابراین من یک تابع جدید به نام post_single_config اضافه می‌کنم که هر کانفیگ را جداگانه با بنر و دکمه کپی ارسال می‌کند.
-
-    # اما با توجه به اینکه کاربر گفته "هر پیامی کانفیگ میفرسته حتما با بنر باشه" پس اگر هر کانفیگ جدا باشد، هر کدام بنر خود را دارند.
-    # این کار باعث تکرار بنر می‌شود که شاید مطلوب نباشد. اما کاربر گفته "هر پیامی کانفیگ میفرسته حتما با بنر باشه" یعنی هر پیام حاوی کانفیگ باید بنر داشته باشد. اگر هر کانفیگ یک پیام جدا باشد، هر کدام بنر دارند.
-
-    # به نظر می‌رسد بهترین راه این است که هر max_post تا کانفیگ را در یک پیام با یک بنر ارسال کنیم و دکمه کپی برای کل محتوا داشته باشیم.
-    # اینطوری بنر تکرار نمی‌شود و کاربر می‌تواند کل محتوا را کپی کند.
-
-    # پس من همین روش را ادامه می‌دهم: گروه‌بندی بر اساس max_post و ارسال هر گروه با یک بنر و یک دکمه کپی برای کل محتوا.
-
-    # ولی کاربر گفت "کانفیگ ها هم قابل کپی نیستند اون طوری" یعنی روش قبلی که با pre بود کار نمی‌کرد. با بک‌تیک و دکمه کپی درست می‌شود.
-
-    # بنابراین من یک دکمه کپی به پیام اضافه می‌کنم که با کلیک، کانفیگ‌ها را کپی کند.
-
-    # برای این کار از کالبک copy استفاده می‌کنم.
-
-    # حالا این تابع را کامل می‌کنم:
-
-    # ساخت دکمه کپی برای کل محتوا
-    copy_key = f"{profile_id}_{datetime.now().timestamp()}"
-    _copy_cache[copy_key] = configs_text  # ذخیره متن کامل برای کپی
-
-    buttons = [[InlineKeyboardButton("📋 COPY ALL", callback_data=f"copy_{copy_key}")]]
-
-    # افزودن اسپانسر در صورت وجود
-    sponsors = get_enabled_sponsors(profile_id)
-    if sponsors:
-        sid, sname, surl, stxt, scolor = sponsors[0]
-        clean_txt = stxt.replace('★', '').replace('☆', '').strip()
-        style_map = {"blue": "primary", "green": "success", "red": "danger", "yellow": "primary", "purple": "primary"}
-        style = style_map.get(scolor, "primary")
-        buttons.append([InlineKeyboardButton(clean_txt, url=surl, style=style)])
+    # فرمت با بک‌تیک
+    config_block = f"```\n{modified_url}\n```"
+    configs_text = header + "\n" + config_block
 
     # اعمال بنر
     banner_config = get_profile_banner_config(profile_id)
-    configs_text = configs_text.rstrip()
     try:
         text = banner_config.format(configs=configs_text)
     except KeyError:
@@ -1203,10 +1155,31 @@ async def post_configs(bot, profile_id, working, source_for_seen=""):
         default_banner = "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
         text = default_banner.format(configs=configs_text)
 
-    return len(items), text, buttons
+    # دکمه کپی برای همین کانفیگ
+    copy_key = f"{profile_id}_{n}_{int(datetime.now().timestamp())}"
+    _copy_cache[copy_key] = modified_url
+    buttons = [[InlineKeyboardButton("📋 COPY", callback_data=f"copy_{copy_key}")]]
+
+    # اسپانسر فقط برای اولین کانفیگ
+    if is_first:
+        sponsors = get_enabled_sponsors(profile_id)
+        if sponsors:
+            sid, sname, surl, stxt, scolor = sponsors[0]
+            clean_txt = stxt.replace('★', '').replace('☆', '').strip()
+            style_map = {"blue": "primary", "green": "success", "red": "danger", "yellow": "primary", "purple": "primary"}
+            style = style_map.get(scolor, "primary")
+            buttons.append([InlineKeyboardButton(clean_txt, url=surl, style=style)])
+
+    # ارسال
+    sent = await send_to_destination(bot, profile_id, text, buttons)
+    if sent:
+        mark_as_posted(profile_id, modified_url, source_for_seen)
+        return 1
+    else:
+        return 0
 
 # ======================================================================
-# ارسال پروکسی‌ها
+# ارسال پروکسی‌ها (گروهی)
 # ======================================================================
 async def post_proxies(bot, profile_id, proxies_with_ping):
     if not proxies_with_ping:
@@ -1239,40 +1212,7 @@ async def post_proxies(bot, profile_id, proxies_with_ping):
     return proxy_count, (text, None)
 
 # ======================================================================
-# ارسال به مقصد با دکمه‌ها
-# ======================================================================
-async def send_to_destination(bot, profile_id, text, buttons=None):
-    dest = get_profile_dest(profile_id)
-    if not dest:
-        log.error(f"❌ Profile {profile_id} has no destination!")
-        return False
-
-    log.info(f"📤 Sending to {dest} (profile {profile_id})")
-    chunks = split_text(text, 4096)
-    success = True
-    for idx, chunk in enumerate(chunks):
-        try:
-            reply_markup = InlineKeyboardMarkup(buttons) if buttons and idx == 0 else None
-            await bot.send_message(
-                dest, chunk,
-                parse_mode="HTML",
-                reply_markup=reply_markup,
-                disable_web_page_preview=True
-            )
-            log.info(f"✅ Sent chunk {idx+1}/{len(chunks)} to {dest} with HTML")
-        except Exception as e:
-            log.error(f"❌ HTML failed for {dest} chunk {idx+1}: {e}")
-            try:
-                plain = re.sub(r'<[^>]+>', '', chunk)
-                await bot.send_message(dest, plain[:4096], disable_web_page_preview=True)
-                log.info(f"✅ Sent chunk {idx+1}/{len(chunks)} to {dest} (plain)")
-            except Exception as e3:
-                log.error(f"❌ Even plain failed for {dest} chunk {idx+1}: {e3}")
-                success = False
-    return success
-
-# ======================================================================
-# ارسال کانفیگ‌ها (با تقسیم بر اساس max_post و بنر)
+# ارسال تمام کانفیگ‌ها به صورت تکی (با رعایت max_post)
 # ======================================================================
 async def post_working_configs(bot, profile_id, working, proxies_with_ping, source_for_seen="", force=False):
     dest = get_profile_dest(profile_id)
@@ -1295,26 +1235,20 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
                 unique_working.append((url, ping, cnt))
             else:
                 log.info(f"⏭️ Skipping duplicate: {url[:50]}...")
+
         if not unique_working:
             log.info("ℹ️ No new configs to post (all duplicates).")
         else:
             max_post = get_profile_max_post(profile_id)
-            # تقسیم به گروه‌های max_post تایی
-            for i in range(0, len(unique_working), max_post):
-                chunk = unique_working[i:i+max_post]
-                config_count, text, buttons = await post_configs(bot, profile_id, chunk, source_for_seen)
-                if config_count > 0 and text:
-                    sent = await send_to_destination(bot, profile_id, text, buttons)
-                    if sent:
-                        total_configs += config_count
-                        results.append(f"{config_count} configs")
-                    else:
-                        # fallback plain
-                        plain = re.sub(r'<[^>]+>', '', text)
-                        sent = await send_to_destination(bot, profile_id, plain, None)
-                        if sent:
-                            total_configs += config_count
-                            results.append(f"{config_count} configs (plain)")
+            # فقط به اندازه max_post تا ارسال کن
+            to_send = unique_working[:max_post]
+            total_configs = 0
+            for idx, (url, ping, cnt) in enumerate(to_send):
+                is_first = (idx == 0)
+                sent = await post_single_config(bot, profile_id, url, ping, cnt, source_for_seen, is_first)
+                total_configs += sent
+            if total_configs > 0:
+                results.append(f"{total_configs} configs")
 
     if post_proxies_enabled and proxies_with_ping:
         valid_proxies = [p for p in proxies_with_ping if "t.me/proxy" in p[0].lower()]
@@ -1499,23 +1433,22 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
     return result
 
 # ======================================================================
-# حلقه خودکار (دقیق بر اساس فاصله زمانی)
+# حلقه خودکار (با پشتیبانی از حالت لحظه‌ای)
 # ======================================================================
 async def profile_loop(bot, profile_id):
-    # Calculate first run time immediately
     profile = get_profile(profile_id)
     if not profile:
         log.error(f"❌ Profile {profile_id} not found, stopping loop.")
         return
     interval = profile["interval_min"]
-    # اگر interval=0 باشد، حالت Real-time فعال است
+    
+    # حالت لحظه‌ای
     if interval == 0:
         log.info(f"⚡ Real-time mode enabled for profile {profile_id}")
         while True:
             try:
                 await run_full_cycle_for_profile(bot, profile_id, only_new=True)
-                # برای جلوگیری از overload، 2 ثانیه صبر کن
-                await asyncio.sleep(2)
+                await asyncio.sleep(2)  # کمی تاخیر برای جلوگیری از overload
             except asyncio.CancelledError:
                 log.info(f"🛑 Profile loop {profile_id} cancelled.")
                 break
@@ -1608,7 +1541,7 @@ T = {
         "btn_set_custom_query": "🔗 تنظیم کوئری سفارشی",
         "btn_empty": "🧹 خالی کردن",
         "btn_real_time": "⚡ اپدیت لحظه‌ای",
-        "btn_normal_mode": "⏰ حالت عادی",
+        "btn_normal_mode": "⏰ حالت عادی ({n}m)",
         "send_prompt": "📝 نام کانال (با @ یا بدون):",
         "added": "✅ {item}",
         "removed": "✅ حذف شد",
@@ -1732,7 +1665,7 @@ T = {
         "btn_set_custom_query": "🔗 Set Custom Query",
         "btn_empty": "🧹 Empty",
         "btn_real_time": "⚡ Real-time Update",
-        "btn_normal_mode": "⏰ Normal Mode",
+        "btn_normal_mode": "⏰ Normal Mode ({n}m)",
         "send_prompt": "📝 Channel name (with/without @):",
         "added": "✅ {item}",
         "removed": "✅ Removed",
@@ -1853,8 +1786,12 @@ def profile_admin_kb(profile_id):
     num_btn = msg("btn_toggle_numbers", status=num_status)
 
     interval = prof["interval_min"]
-    mode_btn = msg("btn_normal_mode", n=interval) if interval > 0 else msg("btn_real_time")
-    mode_callback = "mode_normal" if interval > 0 else "mode_realtime"
+    if interval == 0:
+        mode_btn = msg("btn_real_time") + " ✅"
+        mode_callback = "mode_normal"
+    else:
+        mode_btn = msg("btn_normal_mode", n=interval)
+        mode_callback = "mode_realtime"
 
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(msg("btn_manage_sources"), callback_data=f"src_list_{profile_id}", style="primary"),
@@ -2109,7 +2046,6 @@ async def on_callback(u, ctx):
                 except ValueError:
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
-                # تنظیم به 5 دقیقه پیش‌فرض
                 update_profile(profile_id, interval_min=5)
                 await q.answer(msg("normal_mode_enabled", n=5))
                 await show_profile_admin(q.message, profile_id)
@@ -2454,7 +2390,7 @@ async def on_callback(u, ctx):
                     return
                 toggle_sponsor(sid)
                 await q.answer("تغییر وضعیت داده شد")
-                profile_id = ctx.user_data.get("sponsor_edit_profile_id") or 1  # fallback
+                profile_id = ctx.user_data.get("sponsor_edit_profile_id") or 1
                 await q.edit_message_text(msg("sp_title"), reply_markup=sponsors_kb(profile_id))
             else:
                 await q.answer("⚠️ خطا در داده")

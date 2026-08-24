@@ -401,16 +401,20 @@ def set_profile_show_date_proxy(profile_id, enabled):
     update_profile(profile_id, show_date_proxy=1 if enabled else 0)
 
 # ======================================================================
-# اسپانسرها (بازنویسی کامل)
+# اسپانسرها (بازنویسی کامل با منطق ساده و قابل اطمینان)
 # ======================================================================
 def add_sponsor(profile_id, name, url, button_text="Advertisement", color="blue"):
     """افزودن اسپانسر جدید"""
-    c.execute("""INSERT INTO sponsors
-        (profile_id, name, url, button_text, color, enabled, created_at)
-        VALUES (?, ?, ?, ?, ?, 1, ?)""",
-        (profile_id, name, url, button_text, color, get_tehran_time()))
-    conn.commit()
-    return c.lastrowid
+    try:
+        c.execute("""INSERT INTO sponsors
+            (profile_id, name, url, button_text, color, enabled, created_at)
+            VALUES (?, ?, ?, ?, ?, 1, ?)""",
+            (profile_id, name, url, button_text, color, get_tehran_time()))
+        conn.commit()
+        return c.lastrowid
+    except Exception as e:
+        log.error(f"add_sponsor error: {e}")
+        return None
 
 def remove_sponsor(sid):
     c.execute("DELETE FROM sponsors WHERE id=?", (sid,))
@@ -746,15 +750,6 @@ def add_custom_query_to_url(url, custom_query, protocol):
         new_base += '#' + fragment
     return new_base
 
-def change_link_display_name(url, new_name, flag, custom_query=""):
-    protocol = url.split('://')[0].lower() if '://' in url else ''
-    if custom_query and protocol != 'vmess':
-        url = add_custom_query_to_url(url, custom_query, protocol)
-    base = strip_url_fragment(url)
-    fragment = f"{new_name} {flag}"
-    encoded = quote(fragment, safe='')
-    return f"{base}#{encoded}"
-
 def append_channel_and_flag_encoded(url, channel, flag, custom_query=""):
     protocol = url.split('://')[0].lower() if '://' in url else ''
     if custom_query and protocol != 'vmess':
@@ -869,7 +864,6 @@ async def check_full_link_ping(url):
 # اسکرپ (فقط جدید و سریع) – بهینه‌سازی برای حالت لحظه‌ای
 # ======================================================================
 def decrypt_subscription(data: bytes, passwords: list):
-    # دیگر از رمزها استفاده نمی‌شود، اما برای سازگاری نگه داشته شده
     protocols = ("vless://", "vmess://", "trojan://",
                   "hy2://", "tuic://")
     try:
@@ -914,7 +908,7 @@ def get_v2ray_links_from_text(text):
 async def fetch_files_from_channel(bot, profile_id, channel, source):
     try:
         chat_id = channel if channel.startswith('@') else '@' + channel
-        messages = await bot.get_chat_history(chat_id, limit=5)  # کاهش برای سرعت
+        messages = await bot.get_chat_history(chat_id, limit=5)
         new_links = []
         for msg in messages:
             if is_message_processed(profile_id, source, msg.message_id):
@@ -1079,12 +1073,12 @@ async def post_configs(bot, profile_id, working, source_for_seen=""):
     dest = get_profile_dest(profile_id)
     banner_template = get_profile_banner_config(profile_id) or "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
 
-    # دریافت اسپانسر فعال (فقط یک اسپانسر فعال می‌تواند وجود داشته باشد)
+    # دریافت اسپانسر فعال (فقط اولین اسپانسر فعال)
     sponsors = get_enabled_sponsors(profile_id)
     sponsor_button = None
     if sponsors:
         sid, sname, surl, stxt, scolor = sponsors[0]
-        clean_txt = stxt.replace('★', '').replace('☆', '').strip()
+        clean_txt = stxt.strip()
         style_map = {"blue": "primary", "green": "success", "red": "danger", "yellow": "primary", "purple": "primary"}
         style = style_map.get(scolor, "primary")
         sponsor_button = InlineKeyboardButton(clean_txt, url=surl, style=style)
@@ -1114,7 +1108,7 @@ async def post_configs(bot, profile_id, working, source_for_seen=""):
             else:
                 header = f"{channel_display} {flag}"
 
-        # ساخت بلاک کانفیگ با تگ pre برای نمایش کد
+        # ساخت بلاک کانفیگ با تگ pre
         block = f"<pre>{modified_url}</pre>"
         configs_text = header + "\n" + block
 
@@ -1124,7 +1118,7 @@ async def post_configs(bot, profile_id, working, source_for_seen=""):
         except KeyError:
             full_text = f"✦ V2Ray Config List\n\n{configs_text}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
 
-        # دکمه‌ها: فقط اسپانسر
+        # دکمه‌ها: فقط اسپانسر (در انتهای پیام)
         buttons = []
         if sponsor_button:
             buttons.append(sponsor_button)
@@ -1271,11 +1265,10 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
     seen_proxies = set()
     seen_urls = set()
 
-    # محدودیت‌ها برای حالت لحظه‌ای (برای سرعت بیشتر)
     if is_instant:
-        scrape_limit = 3   # فقط چند پیام آخر
-        test_limit = 5     # فقط چند کانفیگ تست
-        ping_timeout = 8   # کاهش تایم‌اوت
+        scrape_limit = 3
+        test_limit = 5
+        ping_timeout = 8
         max_concurrent = 30
     else:
         scrape_limit = 10
@@ -1283,7 +1276,6 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
         ping_timeout = 10
         max_concurrent = 20
 
-    # Scrape sources in parallel
     async def scrape_one(src):
         config_links, proxy_links = await scrape_channel_with_retry(profile_id, src, only_new=True)
         return src, config_links, proxy_links
@@ -1317,7 +1309,6 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
                 seen_proxies.add(norm)
                 all_proxies.append(norm)
 
-    # Fetch files from channels (parallel) – محدود به scrape_limit برای سرعت
     file_tasks = [fetch_files_from_channel(bot, profile_id, src, src) for src in sources]
     file_results = await asyncio.gather(*file_tasks, return_exceptions=True)
     for i, res in enumerate(file_results):
@@ -1424,7 +1415,7 @@ async def profile_loop(bot, profile_id):
         log.info(f"⚡ Instant update mode for profile {profile_id} (every 1 sec)")
         while True:
             try:
-                await asyncio.sleep(1)  # هر ۱ ثانیه برای پاسخ سریع
+                await asyncio.sleep(1)
                 log.info(f"⚡ INSTANT UPDATE for profile {profile_id}")
                 n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=True)
                 log.info(f"[instant profile {profile_id}] {n} - {m}")
@@ -1463,7 +1454,7 @@ async def profile_loop(bot, profile_id):
                 next_run = now + timedelta(minutes=interval)
 
 # ======================================================================
-# کیبوردها و پیام‌ها (با حذف بخش‌های رمز و نام نمایشی)
+# کیبوردها و پیام‌ها
 # ======================================================================
 BOT_REF = None
 BOT_LANG = "fa"
@@ -2857,7 +2848,7 @@ async def show_profile_admin(msg_or_q, profile_id):
             raise
 
 # ======================================================================
-# هندلرهای متنی و سند (بدون رمز و نام نمایشی)
+# هندلرهای متنی و سند
 # ======================================================================
 async def on_text(u, ctx):
     if u.effective_user.id != ADMIN_ID:

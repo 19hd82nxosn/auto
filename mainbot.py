@@ -1241,7 +1241,6 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
     sponsor = get_sponsor(profile_id)
     sponsor_button = None
     if sponsor:
-        # استفاده از استایل: سبز برای فعال، قرمز برای غیرفعال
         btn_style = "success" if sponsor["enabled"] else "danger"
         sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"], style=btn_style)
 
@@ -1402,7 +1401,7 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
     return total_configs, result_msg
 
 # ======================================================================
-# سیکل کامل
+# سیکل کامل (با بهبود برای ارسال خودکار)
 # ======================================================================
 async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=False):
     log.info("=" * 50)
@@ -1434,7 +1433,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
     seen_urls = set()
 
     if is_instant:
-        scrape_limit = 1
+        scrape_limit = 3  # در حالت لحظه‌ای، چند منبع را اسکرپ کن
         test_limit = 0
         ping_timeout = 3
         max_concurrent = 50
@@ -1448,8 +1447,9 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
         config_links, proxy_links = await scrape_channel_with_retry(profile_id, src, only_new=True)
         return src, config_links, proxy_links
 
-    if is_instant and sources:
-        sources_to_scrape = sources[:1]
+    # در حالت instant چند منبع اول را اسکرپ کن
+    if is_instant:
+        sources_to_scrape = sources[:scrape_limit]
     else:
         sources_to_scrape = sources
 
@@ -1587,7 +1587,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
     return result
 
 # ======================================================================
-# حلقه خودکار
+# حلقه خودکار (با لاگ‌های بیشتر)
 # ======================================================================
 async def profile_loop(bot, profile_id):
     profile = get_profile(profile_id)
@@ -1603,7 +1603,7 @@ async def profile_loop(bot, profile_id):
                 await asyncio.sleep(3)
                 log.info(f"⚡ INSTANT UPDATE for profile {profile_id}")
                 n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=True)
-                log.info(f"[instant profile {profile_id}] {n} - {m}")
+                log.info(f"[instant profile {profile_id}] result: {n} - {m}")
             else:
                 now = datetime.now(TEHRAN_TZ)
                 next_run = now + timedelta(minutes=interval)
@@ -1612,7 +1612,7 @@ async def profile_loop(bot, profile_id):
                     await asyncio.sleep(sleep_seconds)
                 log.info(f"⏰ AUTO TICK for profile {profile_id} ({profile['dest_name']})")
                 n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=False)
-                log.info(f"[auto profile {profile_id}] {n} - {m}")
+                log.info(f"[auto profile {profile_id}] result: {n} - {m}")
         except asyncio.CancelledError:
             log.info(f"🛑 Auto loop for profile {profile_id} cancelled.")
             break
@@ -3571,7 +3571,6 @@ async def process_manual_text(u, message, profile_id, is_document=False):
         if not dest:
             return await p.edit_text("❌ مقصد تنظیم نشده است.")
 
-        # تنظیم موقت max_post به تعداد کانفیگ‌ها تا همه ارسال شوند
         old_max = get_profile_max_post(profile_id)
         if len(working) > 0:
             update_profile(profile_id, max_post=len(working))

@@ -115,12 +115,6 @@ c.execute("""CREATE TABLE IF NOT EXISTS country_cache (
     country TEXT,
     flag TEXT)""")
 
-c.execute("""CREATE TABLE IF NOT EXISTS source_passwords (
-    source TEXT,
-    password TEXT,
-    UNIQUE(source, password))""")
-ensure_column("source_passwords", "profile_id", "INTEGER DEFAULT 1", 1)
-
 c.execute("""CREATE TABLE IF NOT EXISTS sponsors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     profile_id INTEGER,
@@ -164,7 +158,6 @@ c.execute("""CREATE TABLE IF NOT EXISTS profiles (
     ping_mode TEXT DEFAULT 'iran',
     last_num INTEGER DEFAULT 0,
     created_at TEXT,
-    display_name TEXT DEFAULT '',
     show_numbers INTEGER DEFAULT 1,
     custom_query TEXT DEFAULT '',
     show_date_config INTEGER DEFAULT 1,
@@ -207,13 +200,13 @@ def migrate_old_config():
     for dest in dest_list:
         c.execute("""INSERT INTO profiles
             (dest_name, sources, banner_config, banner_proxy, interval_min,
-             max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num, created_at, display_name,
+             max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num, created_at,
              show_numbers, custom_query, show_date_config, show_date_proxy)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (dest, old_sources, old_banner_config, old_banner_proxy,
              old_interval, old_max_post, old_max_proxies,
              old_post_configs, old_post_proxies, old_ping_mode, old_last_num,
-             datetime.now().isoformat(), "", 1, "", 1, 1))
+             datetime.now().isoformat(), 1, "", 1, 1))
     conn.commit()
     log.info(f"✅ Migrated {len(dest_list)} profiles.")
 
@@ -240,11 +233,10 @@ def get_profiles():
             "ping_mode": row[10],
             "last_num": row[11],
             "created_at": row[12],
-            "display_name": row[13] if len(row) > 13 else "",
-            "show_numbers": row[14] if len(row) > 14 else 1,
-            "custom_query": row[15] if len(row) > 15 else "",
-            "show_date_config": row[16] if len(row) > 16 else 1,
-            "show_date_proxy": row[17] if len(row) > 17 else 1
+            "show_numbers": row[13] if len(row) > 13 else 1,
+            "custom_query": row[14] if len(row) > 14 else "",
+            "show_date_config": row[15] if len(row) > 15 else 1,
+            "show_date_proxy": row[16] if len(row) > 16 else 1
         })
     return profiles
 
@@ -266,17 +258,16 @@ def get_profile(profile_id):
         "ping_mode": row[10],
         "last_num": row[11],
         "created_at": row[12],
-        "display_name": row[13] if len(row) > 13 else "",
-        "show_numbers": row[14] if len(row) > 14 else 1,
-        "custom_query": row[15] if len(row) > 15 else "",
-        "show_date_config": row[16] if len(row) > 16 else 1,
-        "show_date_proxy": row[17] if len(row) > 17 else 1
+        "show_numbers": row[13] if len(row) > 13 else 1,
+        "custom_query": row[14] if len(row) > 14 else "",
+        "show_date_config": row[15] if len(row) > 15 else 1,
+        "show_date_proxy": row[16] if len(row) > 16 else 1
     }
 
 def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
                    interval_min=5, max_post=8, max_proxies=10,
                    post_configs=1, post_proxies=1, ping_mode="iran", last_num=0,
-                   display_name="", show_numbers=1, custom_query="",
+                   show_numbers=1, custom_query="",
                    show_date_config=1, show_date_proxy=1):
     if not banner_config:
         banner_config = "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
@@ -284,13 +275,13 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
         banner_proxy = "🌐 <b>Proxies</b>\n━━━━━━━━━━━━━━━━━━\n📅 {date}\n✅ {count} proxies\n━━━━━━━━━━━━━━━━━━\n\n{proxies}\n━━━━━━━━━━━━━━━━━━"
     c.execute("""INSERT INTO profiles
         (dest_name, sources, banner_config, banner_proxy, interval_min,
-         max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num, created_at, display_name,
+         max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num, created_at,
          show_numbers, custom_query, show_date_config, show_date_proxy)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (dest_name, sources, banner_config, banner_proxy,
          interval_min, max_post, max_proxies,
          post_configs, post_proxies, ping_mode, last_num,
-         get_tehran_time(), display_name, show_numbers, custom_query,
+         get_tehran_time(), show_numbers, custom_query,
          show_date_config, show_date_proxy))
     conn.commit()
     return c.lastrowid
@@ -298,7 +289,7 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
 def update_profile(profile_id, **kwargs):
     allowed = ["dest_name", "sources", "banner_config", "banner_proxy",
                "interval_min", "max_post", "max_proxies", "post_configs",
-               "post_proxies", "ping_mode", "last_num", "display_name",
+               "post_proxies", "ping_mode", "last_num",
                "show_numbers", "custom_query", "show_date_config", "show_date_proxy"]
     for key, value in kwargs.items():
         if key in allowed:
@@ -310,7 +301,6 @@ def delete_profile(profile_id):
     c.execute("DELETE FROM sponsors WHERE profile_id=?", (profile_id,))
     c.execute("DELETE FROM seen WHERE profile_id=?", (profile_id,))
     c.execute("DELETE FROM proxies_seen WHERE profile_id=?", (profile_id,))
-    c.execute("DELETE FROM source_passwords WHERE profile_id=?", (profile_id,))
     c.execute("DELETE FROM last_scrape WHERE profile_id=?", (profile_id,))
     c.execute("DELETE FROM processed_messages WHERE profile_id=?", (profile_id,))
     conn.commit()
@@ -382,13 +372,6 @@ def get_profile_post_proxies(profile_id):
 def set_profile_post_proxies(profile_id, enabled):
     update_profile(profile_id, post_proxies=1 if enabled else 0)
 
-def get_profile_display_name(profile_id):
-    prof = get_profile(profile_id)
-    return prof["display_name"] if prof else ""
-
-def set_profile_display_name(profile_id, name):
-    update_profile(profile_id, display_name=name)
-
 def get_profile_show_numbers(profile_id):
     prof = get_profile(profile_id)
     return prof["show_numbers"] == 1 if prof else True
@@ -418,32 +401,16 @@ def set_profile_show_date_proxy(profile_id, enabled):
     update_profile(profile_id, show_date_proxy=1 if enabled else 0)
 
 # ======================================================================
-# رمزهای اشتراک
-# ======================================================================
-def get_pw(profile_id, source):
-    return [r[0] for r in c.execute(
-        "SELECT password FROM source_passwords WHERE source=? AND profile_id=?",
-        (source.lower(), profile_id)).fetchall()]
-
-def add_pw(profile_id, source, password):
-    c.execute("INSERT OR IGNORE INTO source_passwords (source, password, profile_id) VALUES (?,?,?)",
-              (source.lower(), password, profile_id))
-    conn.commit()
-
-def del_pw(profile_id, source, password):
-    c.execute("DELETE FROM source_passwords WHERE source=? AND password=? AND profile_id=?",
-              (source.lower(), password, profile_id))
-    conn.commit()
-
-# ======================================================================
-# اسپانسرها
+# اسپانسرها (بازنویسی کامل)
 # ======================================================================
 def add_sponsor(profile_id, name, url, button_text="Advertisement", color="blue"):
+    """افزودن اسپانسر جدید"""
     c.execute("""INSERT INTO sponsors
         (profile_id, name, url, button_text, color, enabled, created_at)
         VALUES (?, ?, ?, ?, ?, 1, ?)""",
         (profile_id, name, url, button_text, color, get_tehran_time()))
     conn.commit()
+    return c.lastrowid
 
 def remove_sponsor(sid):
     c.execute("DELETE FROM sponsors WHERE id=?", (sid,))
@@ -477,6 +444,20 @@ def get_all_sponsors(profile_id):
         "SELECT id, name, url, button_text, color, enabled FROM sponsors WHERE profile_id=? ORDER BY id DESC",
         (profile_id,)
     ).fetchall()
+
+def get_sponsor(sid):
+    row = c.execute("SELECT id, profile_id, name, url, button_text, color, enabled FROM sponsors WHERE id=?", (sid,)).fetchone()
+    if row:
+        return {
+            "id": row[0],
+            "profile_id": row[1],
+            "name": row[2],
+            "url": row[3],
+            "button_text": row[4],
+            "color": row[5],
+            "enabled": row[6]
+        }
+    return None
 
 # ======================================================================
 # توابع کمکی
@@ -885,9 +866,10 @@ async def check_full_link_ping(url):
     return ping, ok, cnt
 
 # ======================================================================
-# اسکرپ (فقط جدید و سریع)
+# اسکرپ (فقط جدید و سریع) – بهینه‌سازی برای حالت لحظه‌ای
 # ======================================================================
 def decrypt_subscription(data: bytes, passwords: list):
+    # دیگر از رمزها استفاده نمی‌شود، اما برای سازگاری نگه داشته شده
     protocols = ("vless://", "vmess://", "trojan://",
                   "hy2://", "tuic://")
     try:
@@ -911,23 +893,6 @@ def decrypt_subscription(data: bytes, passwords: list):
             return text
     except Exception:
         pass
-    for pw in passwords:
-        if not pw:
-            continue
-        try:
-            raw = base64.b64decode(data + b'=' * (-len(data) % 4))
-            kiv = hashlib.md5(pw.encode('utf-8')).digest()
-            try:
-                from Crypto.Cipher import AES
-                from Crypto.Util.Padding import unpad
-                text = unpad(AES.new(kiv, AES.MODE_CBC, kiv).decrypt(raw), 16) \
-                    .decode('utf-8', errors='ignore')
-                if text and any(p in text for p in protocols):
-                    return text
-            except ImportError:
-                pass
-        except Exception:
-            pass
     return None
 
 def get_v2ray_links_from_text(text):
@@ -949,7 +914,7 @@ def get_v2ray_links_from_text(text):
 async def fetch_files_from_channel(bot, profile_id, channel, source):
     try:
         chat_id = channel if channel.startswith('@') else '@' + channel
-        messages = await bot.get_chat_history(chat_id, limit=10)
+        messages = await bot.get_chat_history(chat_id, limit=5)  # کاهش برای سرعت
         new_links = []
         for msg in messages:
             if is_message_processed(profile_id, source, msg.message_id):
@@ -964,8 +929,7 @@ async def fetch_files_from_channel(bot, profile_id, channel, source):
                 log.warning(f"Download file from {source} failed: {e}")
                 continue
 
-            pws = get_pw(profile_id, source)
-            text = decrypt_subscription(bytes(data), pws)
+            text = decrypt_subscription(bytes(data), [])
             if not text:
                 text = bytes(data).decode('utf-8', errors='ignore')
 
@@ -1115,7 +1079,7 @@ async def post_configs(bot, profile_id, working, source_for_seen=""):
     dest = get_profile_dest(profile_id)
     banner_template = get_profile_banner_config(profile_id) or "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
 
-    # دریافت اسپانسر فعال
+    # دریافت اسپانسر فعال (فقط یک اسپانسر فعال می‌تواند وجود داشته باشد)
     sponsors = get_enabled_sponsors(profile_id)
     sponsor_button = None
     if sponsors:
@@ -1160,7 +1124,7 @@ async def post_configs(bot, profile_id, working, source_for_seen=""):
         except KeyError:
             full_text = f"✦ V2Ray Config List\n\n{configs_text}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
 
-        # دکمه‌ها: فقط اسپانسر (بدون دکمه کپی اضافه)
+        # دکمه‌ها: فقط اسپانسر
         buttons = []
         if sponsor_button:
             buttons.append(sponsor_button)
@@ -1276,11 +1240,11 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
     return total_configs, result_msg
 
 # ======================================================================
-# سیکل کامل (فقط جدید و تست محدود)
+# سیکل کامل (فقط جدید و تست محدود) – بهینه‌سازی برای سرعت
 # ======================================================================
-async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
+async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=False):
     log.info("=" * 50)
-    log.info(f"🔄 run_full_cycle for profile {profile_id} STARTED")
+    log.info(f"🔄 run_full_cycle for profile {profile_id} STARTED (instant={is_instant})")
 
     profile = get_profile(profile_id)
     if not profile:
@@ -1306,6 +1270,18 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
     seen_configs = set()
     seen_proxies = set()
     seen_urls = set()
+
+    # محدودیت‌ها برای حالت لحظه‌ای (برای سرعت بیشتر)
+    if is_instant:
+        scrape_limit = 3   # فقط چند پیام آخر
+        test_limit = 5     # فقط چند کانفیگ تست
+        ping_timeout = 8   # کاهش تایم‌اوت
+        max_concurrent = 30
+    else:
+        scrape_limit = 10
+        test_limit = 15
+        ping_timeout = 10
+        max_concurrent = 20
 
     # Scrape sources in parallel
     async def scrape_one(src):
@@ -1341,7 +1317,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
                 seen_proxies.add(norm)
                 all_proxies.append(norm)
 
-    # Fetch files from channels (parallel)
+    # Fetch files from channels (parallel) – محدود به scrape_limit برای سرعت
     file_tasks = [fetch_files_from_channel(bot, profile_id, src, src) for src in sources]
     file_results = await asyncio.gather(*file_tasks, return_exceptions=True)
     for i, res in enumerate(file_results):
@@ -1370,9 +1346,9 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
 
     working = []
     if new_configs:
-        to_test = new_configs[:15]
+        to_test = new_configs[:test_limit]
         log.info(f"📊 Testing {len(to_test)} configs...")
-        sem = asyncio.Semaphore(20)
+        sem = asyncio.Semaphore(max_concurrent)
         async def _check(u):
             async with sem:
                 try:
@@ -1402,7 +1378,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
         valid_proxies = [p for p in all_proxies if "t.me/proxy" in p.lower()]
         if valid_proxies:
             log.info(f"📊 Testing {len(valid_proxies)} proxies...")
-            sem = asyncio.Semaphore(20)
+            sem = asyncio.Semaphore(max_concurrent)
             async def check_proxy(proxy_url):
                 async with sem:
                     ping, ok, cnt = await check_full_link_ping(proxy_url)
@@ -1436,7 +1412,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
     return result
 
 # ======================================================================
-# حلقه خودکار (دقیق بر اساس فاصله زمانی) با پشتیبانی از حالت لحظه‌ای
+# حلقه خودکار (دقیق بر اساس فاصله زمانی) با پشتیبانی از حالت لحظه‌ای و سرعت بالا
 # ======================================================================
 async def profile_loop(bot, profile_id):
     profile = get_profile(profile_id)
@@ -1444,23 +1420,21 @@ async def profile_loop(bot, profile_id):
         log.error(f"❌ Profile {profile_id} not found, stopping loop.")
         return
     interval = profile["interval_min"]
-    # حالت لحظه‌ای: اگر interval صفر باشد، هر ۵ ثانیه یکبار اجرا می‌شود (برای اپدیت لحظه‌ای)
     if interval == 0:
-        log.info(f"⚡ Instant update mode for profile {profile_id}")
+        log.info(f"⚡ Instant update mode for profile {profile_id} (every 1 sec)")
         while True:
             try:
-                await asyncio.sleep(5)  # هر ۵ ثانیه
+                await asyncio.sleep(1)  # هر ۱ ثانیه برای پاسخ سریع
                 log.info(f"⚡ INSTANT UPDATE for profile {profile_id}")
-                n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True)
+                n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=True)
                 log.info(f"[instant profile {profile_id}] {n} - {m}")
             except asyncio.CancelledError:
                 log.info(f"🛑 Profile loop {profile_id} cancelled.")
                 break
             except Exception as e:
                 log.error(f"❌ instant update error for {profile_id}: {e}")
-                await asyncio.sleep(5)
+                await asyncio.sleep(1)
     else:
-        # حالت عادی با زمان‌بندی
         next_run = datetime.now(TEHRAN_TZ) + timedelta(minutes=interval)
         while True:
             try:
@@ -1474,7 +1448,7 @@ async def profile_loop(bot, profile_id):
                     continue
 
                 log.info(f"⏰ AUTO TICK for profile {profile_id} ({profile['dest_name']}) at {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
-                n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True)
+                n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=False)
                 log.info(f"[auto profile {profile_id}] {n} - {m}")
 
                 next_run = next_run + timedelta(minutes=interval)
@@ -1489,7 +1463,7 @@ async def profile_loop(bot, profile_id):
                 next_run = now + timedelta(minutes=interval)
 
 # ======================================================================
-# کیبوردها و پیام‌ها
+# کیبوردها و پیام‌ها (با حذف بخش‌های رمز و نام نمایشی)
 # ======================================================================
 BOT_REF = None
 BOT_LANG = "fa"
@@ -1508,7 +1482,6 @@ T = {
                        "📢 اسپانسر: {sponsor}\n"
                        "🌍 حالت پینگ: {ping_mode}\n"
                        "📡 کانفیگ: {cfg_status} | 🌐 پروکسی: {prx_status}\n"
-                       "📝 نام نمایشی: {display_name}\n"
                        "🔢 شماره‌گذاری: {numbers_status}\n"
                        "🔗 کوئری سفارشی: {custom_query}\n"
                        "📅 تاریخ کانفیگ: {date_cfg}\n"
@@ -1518,10 +1491,8 @@ T = {
         "btn_add_dest": "➕ مقصد جدید",
         "btn_dest_list": "📋 مقصدها",
         "btn_sponsors": "📢 اسپانسر",
-        "btn_pw": "🔑 رمزها",
         "btn_set_dest": "🎯 تنظیم مقصد",
         "btn_set_name": "🎨 نام",
-        "btn_set_display_name": "📝 نام نمایشی (تغییر نام سرور)",
         "btn_set_banner": "📝 بنر",
         "btn_set_banner_config": "📝 بنر کانفیگ",
         "btn_set_banner_proxy": "📝 بنر پروکسی",
@@ -1537,7 +1508,6 @@ T = {
         "btn_runnow": "▶️ اجرا کن",
         "btn_instant": "⚡ اپدیت لحظه‌ای",
         "btn_manual_send": "📤 ارسال دستی",
-        "btn_rename_server": "📝 تغییر نام سرور",
         "btn_manage_sources": "📡 مدیریت منابع",
         "btn_toggle_numbers": "🔢 شماره‌گذاری: {status}",
         "btn_set_custom_query": "🔗 تنظیم کوئری سفارشی",
@@ -1551,7 +1521,6 @@ T = {
         "clear_q1": "⚠️ پاک کنم؟ (۱/۲)\n⛔ غیرقابل برگشت",
         "dest_set": "✅ مقصد: {dest}",
         "name_set": "✅ نام: {name}",
-        "display_name_set": "✅ نام نمایشی: {name}",
         "banner_ok": "✅ بنر ذخیره شد",
         "banner_err": "❌ باید {configs} یا {proxies} داشته باشه",
         "interval_ok": "✅ هر {n} دقیقه",
@@ -1559,10 +1528,6 @@ T = {
         "interval_wrong": "❌ فقط عدد",
         "max_ok": "✅ حداکثر {n}",
         "max_err": "❌ ۱ تا ۵۰",
-        "pw_added": "✅ رمز برای {source}",
-        "pw_prompt": "🔐 رمز جدید رو بفرست (چند تا با کاما یا خط جدید):",
-        "pw_title": "🔐 رمزهای {source}:",
-        "pw_none": "(خالی)",
         "src_title": "📡 منابع ({n}):",
         "src_none": "خالی",
         "reset_ok": "✅ ریست شد (#۱)",
@@ -1573,7 +1538,6 @@ T = {
         "sp_title": "📢 اسپانسرها:",
         "sp_none": "خالی",
         "sp_err": "❌ فرمت: name|url|text|color (رنگ‌ها: blue, green, red)",
-        "pw_common_added": "✅ +۳ رمز رایج",
         "doc_select": "این فایل از کدوم منبعه؟",
         "doc_no_src": "❌ منبعی نیست، اول اضافه کن",
         "doc_decoding": "🔐 رمزگشایی...",
@@ -1596,7 +1560,6 @@ T = {
         "manual_send_cancel": "❌ ارسال دستی لغو شد.",
         "manual_send_processing": "⏳ در حال پردازش...",
         "manual_send_done": "✅ ارسال دستی کامل شد.",
-        "rename_prompt": "📝 پیام یا فایل حاوی لینک‌های کانفیگ را بفرستید.\n\nمن نام آن‌ها را با نام نمایشی تنظیم‌شده تغییر داده و فقط برای شما (ادمین) ارسال می‌کنم.",
         "custom_query_set": "✅ کوئری سفارشی تنظیم شد: {query}",
         "custom_query_prompt": "🔗 کوئری سفارشی را وارد کنید (مثلا Telegram=@MyChannel) یا دکمه خالی را بزنید:",
         "source_list": "📡 **منابع پروفایل {name}**\n\n{sources}\n\nبرای حذف هر کدام روی دکمه مربوطه کلیک کنید.",
@@ -1611,7 +1574,7 @@ T = {
         "sp_edit_color": "رنگ جدید (blue/green/red) - خالی برای عدم تغییر:",
         "sp_updated": "✅ اسپانسر به‌روزرسانی شد.",
         "btn_edit_sponsor": "✏️ ویرایش",
-        "delete_confirm1": "⚠️ **آیا مطمئن هستید که می‌خواهید این پروفایل را حذف کنید؟**\n\nنام: {name}\nشناسه: {id}\n\nاین عملیات غیرقابل برگشت است و تمام داده‌های مربوط به این پروفایل (منابع، اسپانسرها، رمزها، تاریخچه) پاک می‌شود.\n\nبرای تأیید، دکمه **«بله، حذف شود»** را بزنید.",
+        "delete_confirm1": "⚠️ **آیا مطمئن هستید که می‌خواهید این پروفایل را حذف کنید؟**\n\nنام: {name}\nشناسه: {id}\n\nاین عملیات غیرقابل برگشت است و تمام داده‌های مربوط به این پروفایل (منابع، اسپانسرها، تاریخچه) پاک می‌شود.\n\nبرای تأیید، دکمه **«بله، حذف شود»** را بزنید.",
         "delete_confirm2": "⚠️ **تأیید نهایی حذف پروفایل**\n\nنام: {name}\nشناسه: {id}\n\n**آیا از حذف این پروفایل اطمینان دارید؟**\n\nبرای حذف نهایی، دکمه **«حذف نهایی»** را بزنید.",
         "delete_cancelled": "❌ حذف پروفایل لغو شد.",
     },
@@ -1628,7 +1591,6 @@ T = {
                        "📢 Sponsor: {sponsor}\n"
                        "🌍 Ping mode: {ping_mode}\n"
                        "📡 Configs: {cfg_status} | 🌐 Proxies: {prx_status}\n"
-                       "📝 Display Name: {display_name}\n"
                        "🔢 Numbering: {numbers_status}\n"
                        "🔗 Custom Query: {custom_query}\n"
                        "📅 Config Date: {date_cfg}\n"
@@ -1638,10 +1600,8 @@ T = {
         "btn_add_dest": "➕ Add Destination",
         "btn_dest_list": "📋 Destinations",
         "btn_sponsors": "📢 Sponsors",
-        "btn_pw": "🔑 Passwords",
         "btn_set_dest": "🎯 Set Destination",
         "btn_set_name": "🎨 Name",
-        "btn_set_display_name": "📝 Display Name (Rename Server)",
         "btn_set_banner": "📝 Banner",
         "btn_set_banner_config": "📝 Config Banner",
         "btn_set_banner_proxy": "📝 Proxy Banner",
@@ -1657,7 +1617,6 @@ T = {
         "btn_runnow": "▶️ Run Now",
         "btn_instant": "⚡ Instant Update",
         "btn_manual_send": "📤 Manual Send",
-        "btn_rename_server": "📝 Rename Server",
         "btn_manage_sources": "📡 Manage Sources",
         "btn_toggle_numbers": "🔢 Numbering: {status}",
         "btn_set_custom_query": "🔗 Set Custom Query",
@@ -1671,7 +1630,6 @@ T = {
         "clear_q1": "⚠️ Clear DB? (1/2)",
         "dest_set": "✅ Destination: {dest}",
         "name_set": "✅ Name: {name}",
-        "display_name_set": "✅ Display name set to {name}",
         "banner_ok": "✅ Banner saved",
         "banner_err": "❌ must include {configs} or {proxies}",
         "interval_ok": "✅ every {n} min",
@@ -1679,10 +1637,6 @@ T = {
         "interval_wrong": "❌ number only",
         "max_ok": "✅ Max {n}",
         "max_err": "❌ 1-50",
-        "pw_added": "✅ PW for {source}",
-        "pw_prompt": "🔐 Send new password (multiple with comma or newline):",
-        "pw_title": "🔐 Passwords for {source}:",
-        "pw_none": "(none)",
         "src_title": "📡 Sources ({n}):",
         "src_none": "none",
         "reset_ok": "✅ Reset (#1)",
@@ -1693,7 +1647,6 @@ T = {
         "sp_title": "📢 Sponsors:",
         "sp_none": "none",
         "sp_err": "❌ Bad format: name|url|text|color (colors: blue, green, red)",
-        "pw_common_added": "✅ +3 common PW",
         "doc_select": "Which source is this from?",
         "doc_no_src": "❌ No sources. Add first",
         "doc_decoding": "🔐 Decrypting...",
@@ -1716,7 +1669,6 @@ T = {
         "manual_send_cancel": "❌ Manual send cancelled.",
         "manual_send_processing": "⏳ Processing...",
         "manual_send_done": "✅ Manual send completed.",
-        "rename_prompt": "📝 Send a message or file containing config links.\n\nI will rename them using the display name you set and send only to you (admin).",
         "custom_query_set": "✅ Custom query set: {query}",
         "custom_query_prompt": "🔗 Enter custom query (e.g. Telegram=@MyChannel) or use Empty button:",
         "source_list": "📡 **Sources for profile {name}**\n\n{sources}\n\nClick delete to remove.",
@@ -1731,7 +1683,7 @@ T = {
         "sp_edit_color": "New color (blue/green/red - leave empty to keep):",
         "sp_updated": "✅ Sponsor updated.",
         "btn_edit_sponsor": "✏️ Edit",
-        "delete_confirm1": "⚠️ **Are you sure you want to delete this profile?**\n\nName: {name}\nID: {id}\n\nThis action is irreversible and all data related to this profile (sources, sponsors, passwords, history) will be deleted.\n\nPress **«Yes, delete»** to confirm.",
+        "delete_confirm1": "⚠️ **Are you sure you want to delete this profile?**\n\nName: {name}\nID: {id}\n\nThis action is irreversible and all data related to this profile (sources, sponsors, history) will be deleted.\n\nPress **«Yes, delete»** to confirm.",
         "delete_confirm2": "⚠️ **Final confirmation to delete profile**\n\nName: {name}\nID: {id}\n\n**Are you absolutely sure?**\n\nPress **«Delete permanently»** to delete.",
         "delete_cancelled": "❌ Profile deletion cancelled.",
     },
@@ -1783,29 +1735,26 @@ def profile_admin_kb(profile_id):
         [InlineKeyboardButton(msg("btn_manage_sources"), callback_data=f"src_list_{profile_id}", style="primary"),
          InlineKeyboardButton(msg("btn_dest_list"), callback_data=f"dl_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_sponsors"), callback_data=f"sp_menu_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_pw"), callback_data=f"pw_list_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_set_name"), callback_data=f"ac_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_set_display_name"), callback_data=f"adn_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_rename_server"), callback_data=f"rename_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_set_banner_config"), callback_data=f"ab_config_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_set_banner_proxy"), callback_data=f"ab_proxy_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_set_time"), callback_data=f"ai_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_set_max"), callback_data=f"setmax_{profile_id}", style="primary"),
-         InlineKeyboardButton(ping_label, callback_data=f"tglping_{profile_id}", style="primary")],
-        [InlineKeyboardButton(cfg_btn, callback_data=f"tglcfg_{profile_id}", style="primary"),
-         InlineKeyboardButton(prx_btn, callback_data=f"tglproxy_{profile_id}", style="primary")],
-        [InlineKeyboardButton(num_btn, callback_data=f"togglenum_{profile_id}", style="primary"),
-         InlineKeyboardButton(f"📅 تاریخ کانفیگ: {date_cfg_status}", callback_data=f"tgl_date_cfg_{profile_id}", style="primary")],
-        [InlineKeyboardButton(f"📅 تاریخ پروکسی: {date_prx_status}", callback_data=f"tgl_date_prx_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_set_custom_query"), callback_data=f"setquery_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_stats"), callback_data=f"ast_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_test"), callback_data=f"sendtest_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_runnow"), callback_data=f"runnow_{profile_id}", style="success"),
-         InlineKeyboardButton(msg("btn_instant"), callback_data=f"instant_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_manual_send"), callback_data=f"manual_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_reset"), callback_data=f"rn_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_clear"), callback_data=f"cd1_{profile_id}", style="danger"),
-         InlineKeyboardButton("❌ Delete Profile", callback_data=f"delprof_{profile_id}", style="danger")],
+         InlineKeyboardButton(msg("btn_set_name"), callback_data=f"ac_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_set_banner_config"), callback_data=f"ab_config_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_set_banner_proxy"), callback_data=f"ab_proxy_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_set_time"), callback_data=f"ai_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_set_max"), callback_data=f"setmax_{profile_id}", style="primary")],
+        [InlineKeyboardButton(ping_label, callback_data=f"tglping_{profile_id}", style="primary"),
+         InlineKeyboardButton(cfg_btn, callback_data=f"tglcfg_{profile_id}", style="primary")],
+        [InlineKeyboardButton(prx_btn, callback_data=f"tglproxy_{profile_id}", style="primary"),
+         InlineKeyboardButton(num_btn, callback_data=f"togglenum_{profile_id}", style="primary")],
+        [InlineKeyboardButton(f"📅 تاریخ کانفیگ: {date_cfg_status}", callback_data=f"tgl_date_cfg_{profile_id}", style="primary"),
+         InlineKeyboardButton(f"📅 تاریخ پروکسی: {date_prx_status}", callback_data=f"tgl_date_prx_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_set_custom_query"), callback_data=f"setquery_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_stats"), callback_data=f"ast_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_test"), callback_data=f"sendtest_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_runnow"), callback_data=f"runnow_{profile_id}", style="success")],
+        [InlineKeyboardButton(msg("btn_instant"), callback_data=f"instant_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_manual_send"), callback_data=f"manual_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_reset"), callback_data=f"rn_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_clear"), callback_data=f"cd1_{profile_id}", style="danger")],
+        [InlineKeyboardButton("❌ Delete Profile", callback_data=f"delprof_{profile_id}", style="danger")],
         [InlineKeyboardButton(msg("btn_back"), callback_data="profiles_list", style="primary")],
     ])
 
@@ -1818,23 +1767,6 @@ def destinations_kb(profile_id):
         InlineKeyboardButton(msg("btn_add_dest"), callback_data=f"da_{profile_id}", style="success"),
     ])
     btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")])
-    return InlineKeyboardMarkup(btns)
-
-def source_passwords_kb(profile_id, idx):
-    sources = get_profile_sources(profile_id)
-    if idx >= len(sources):
-        return None
-    src = sources[idx]
-    btns = []
-    for p in get_pw(profile_id, src):
-        btns.append([
-            InlineKeyboardButton(f"❌ {p}", callback_data=f"pr_{profile_id}_{idx}|{p}", style="danger")
-        ])
-    btns.append([
-        InlineKeyboardButton(msg("btn_pw"), callback_data=f"pa_{profile_id}_{idx}", style="primary"),
-        InlineKeyboardButton("🎯 +3 common", callback_data=f"sauto_{profile_id}_{idx}", style="success"),
-    ])
-    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"pw_list_{profile_id}", style="primary")])
     return InlineKeyboardMarkup(btns)
 
 def sponsors_kb(profile_id):
@@ -1875,7 +1807,7 @@ def empty_button_kb(profile_id, callback):
 # دستورات
 # ======================================================================
 async def cmd_start(u, ctx):
-    if PRIVATE_MODE and u.effective_user.id != ADMIN_ID:
+    if u.effective_user.id != ADMIN_ID:
         return await u.message.reply_text(msg("private"))
     profiles = get_profiles()
     total = len(profiles)
@@ -1885,8 +1817,6 @@ async def cmd_start(u, ctx):
         next_n = last_num + 1
     txt = msg("welcome", profiles=total, next_n=next_n)
     btns = [[InlineKeyboardButton("📋 Manage Profiles", callback_data="profiles_list", style="primary")]]
-    if u.effective_user.id == ADMIN_ID:
-        btns.append([InlineKeyboardButton("🔐 Admin", callback_data="profiles_list", style="primary")])
     await u.message.reply_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(btns))
 
 async def cmd_admin(u, ctx):
@@ -1924,7 +1854,7 @@ async def cmd_runnow(u, ctx):
         results = []
         for prof in profiles:
             log.info(f"🚀 /runnow for profile {prof['id']}")
-            n, m = await run_full_cycle_for_profile(u.get_bot(), prof['id'], only_new=True)
+            n, m = await run_full_cycle_for_profile(u.get_bot(), prof['id'], only_new=True, is_instant=False)
             results.append(f"{prof['dest_name']}: {n} - {m}")
         await p.edit_text("✅ Done:\n" + "\n".join(results))
     except Exception as e:
@@ -1941,7 +1871,7 @@ async def cmd_runall(u, ctx):
         results = []
         for prof in profiles:
             log.info(f"🚀 /runall for profile {prof['id']}")
-            n, m = await run_full_cycle_for_profile(u.get_bot(), prof['id'], only_new=False)
+            n, m = await run_full_cycle_for_profile(u.get_bot(), prof['id'], only_new=False, is_instant=False)
             results.append(f"{prof['dest_name']}: {n} - {m}")
         await p.edit_text("✅ Done:\n" + "\n".join(results))
     except Exception as e:
@@ -1976,11 +1906,9 @@ async def cmd_diag(update: Update, context):
     msg_lines.append("")
     seen_cfg = c.execute("SELECT COUNT(*) FROM seen").fetchone()[0]
     seen_prx = c.execute("SELECT COUNT(*) FROM proxies_seen").fetchone()[0]
-    pw_count = c.execute("SELECT COUNT(*) FROM source_passwords").fetchone()[0]
     msg_lines.append("💾 **دیتابیس:**")
     msg_lines.append(f"• کانفیگ‌های دیده‌شده: {seen_cfg}")
     msg_lines.append(f"• پروکسی‌های دیده‌شده: {seen_prx}")
-    msg_lines.append(f"• رمزهای ذخیره‌شده: {pw_count}")
     msg_lines.append("")
     await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
 
@@ -2018,11 +1946,9 @@ async def on_callback(u, ctx):
                 except ValueError:
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
-                # تنظیم بازه به ۰ برای حالت لحظه‌ای
                 update_profile(profile_id, interval_min=0)
-                await q.answer("⚡ حالت اپدیت لحظه‌ای فعال شد")
+                await q.answer("⚡ حالت اپدیت لحظه‌ای فعال شد (هر ۱ ثانیه)")
                 await show_profile_admin(q.message, profile_id)
-                # ری‌استارت لوپ (با توجه به اینکه لوپ در حال اجراست، نیاز به ری‌استارت ندارد ولی برای اطمینان)
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -2190,17 +2116,17 @@ async def on_callback(u, ctx):
                 except ValueError:
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
-                sponsor = c.execute("SELECT id, name, url, button_text, color FROM sponsors WHERE id=?", (sid,)).fetchone()
+                sponsor = get_sponsor(sid)
                 if not sponsor:
                     await q.answer("❌ اسپانسر یافت نشد.")
                     return
                 ctx.user_data["sponsor_edit_id"] = sid
                 ctx.user_data["sponsor_edit_profile_id"] = profile_id
                 txt = msg("sp_edit_prompt",
-                          name=sponsor[1],
-                          url=sponsor[2],
-                          text=sponsor[3],
-                          color=sponsor[4])
+                          name=sponsor["name"],
+                          url=sponsor["url"],
+                          text=sponsor["button_text"],
+                          color=sponsor["color"])
                 await q.edit_message_text(
                     txt,
                     parse_mode="HTML",
@@ -2430,106 +2356,6 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # ===== رمزها =====
-        if d.startswith("pw_list_"):
-            parts = d.split("_")
-            if len(parts) >= 3:
-                try:
-                    profile_id = int(parts[2])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                sources = get_profile_sources(profile_id)
-                if not sources:
-                    await q.answer(msg("src_none"))
-                    return
-                btns = [[InlineKeyboardButton(f"{s} ({len(get_pw(profile_id, s))})", callback_data=f"sp_{profile_id}_{i}", style="primary")] for i, s in enumerate(sources)]
-                btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")])
-                await q.edit_message_text("🔑 از کدوم منبع؟", reply_markup=InlineKeyboardMarkup(btns))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("sp_"):
-            parts = d.split("_")
-            if len(parts) >= 3:
-                try:
-                    profile_id = int(parts[1])
-                    idx = int(parts[2])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                sources = get_profile_sources(profile_id)
-                if idx >= len(sources):
-                    return
-                src = sources[idx]
-                pws = get_pw(profile_id, src)
-                body = "\n".join(f"- {p}" for p in pws) if pws else msg("pw_none")
-                await q.edit_message_text(msg("pw_title", source=src) + "\n\n" + body, reply_markup=source_passwords_kb(profile_id, idx))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("pa_"):
-            parts = d.split("_")
-            if len(parts) >= 3:
-                try:
-                    profile_id = int(parts[1])
-                    idx = int(parts[2])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                ctx.user_data["action"] = f"pa_{profile_id}_{idx}"
-                await q.edit_message_text(msg("pw_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"sp_{profile_id}_{idx}", style="primary")]]))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("pr_"):
-            try:
-                prefix, pwd = d.split("|", 1)
-                parts = prefix.split("_")
-                if len(parts) >= 3:
-                    profile_id = int(parts[1])
-                    idx = int(parts[2])
-                    sources = get_profile_sources(profile_id)
-                    if idx >= len(sources):
-                        return
-                    del_pw(profile_id, sources[idx], pwd)
-                    await q.answer(msg("removed"))
-                    src = sources[idx]
-                    pws = get_pw(profile_id, src)
-                    body = "\n".join(f"- {p}" for p in pws) if pws else msg("pw_none")
-                    await q.edit_message_text(msg("pw_title", source=src) + "\n\n" + body, reply_markup=source_passwords_kb(profile_id, idx))
-                else:
-                    await q.answer("⚠️ خطا در داده")
-            except:
-                pass
-            return
-
-        if d.startswith("sauto_"):
-            parts = d.split("_")
-            if len(parts) >= 3:
-                try:
-                    profile_id = int(parts[1])
-                    idx = int(parts[2])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                sources = get_profile_sources(profile_id)
-                if idx >= len(sources):
-                    return
-                for pw in ["v2ray", "free", "1234"]:
-                    add_pw(profile_id, sources[idx], pw)
-                await q.answer(msg("pw_common_added"))
-                src = sources[idx]
-                pws = get_pw(profile_id, src)
-                body = "\n".join(f"- {p}" for p in pws) if pws else msg("pw_none")
-                await q.edit_message_text(msg("pw_title", source=src) + "\n\n" + body, reply_markup=source_passwords_kb(profile_id, idx))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
         # ===== مقصد =====
         if d.startswith("dl_"):
             parts = d.split("_")
@@ -2604,50 +2430,6 @@ async def on_callback(u, ctx):
                 set_profile_dest(profile_id, "")
                 await q.answer("✅ نام پاک شد.")
                 await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("adn_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                ctx.user_data["action"] = f"adn_{profile_id}"
-                current_display = get_profile_display_name(profile_id) or "تنظیم نشده"
-                await q.edit_message_text(f"نام نمایشی فعلی: {current_display}\nنام جدید را بفرست (یا دکمه خالی):", reply_markup=empty_button_kb(profile_id, f"empty_adn_{profile_id}"))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("empty_adn_"):
-            parts = d.split("_")
-            if len(parts) >= 3:
-                try:
-                    profile_id = int(parts[2])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                set_profile_display_name(profile_id, "")
-                await q.answer("✅ نام نمایشی پاک شد.")
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("rename_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                ctx.user_data["action"] = f"rename_{profile_id}"
-                await q.edit_message_text(msg("rename_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -2749,11 +2531,10 @@ async def on_callback(u, ctx):
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
                 n_seen = c.execute("SELECT COUNT(*) FROM seen WHERE profile_id=?", (profile_id,)).fetchone()[0]
-                n_pw = c.execute("SELECT COUNT(*) FROM source_passwords WHERE profile_id=?", (profile_id,)).fetchone()[0]
                 n_sp = c.execute("SELECT COUNT(*) FROM sponsors WHERE profile_id=?", (profile_id,)).fetchone()[0]
                 next_n = get_profile_last_num(profile_id) + 1
                 dest = get_profile_dest(profile_id)
-                txt = f"📊 مقصد: {dest}\nمنابع: {len(get_profile_sources(profile_id))}\nرمزها: {n_pw}\nاسپانسر: {n_sp}\nبعدی: #{next_n}\nحداکثر: {get_profile_max_post(profile_id)}"
+                txt = f"📊 مقصد: {dest}\nمنابع: {len(get_profile_sources(profile_id))}\nاسپانسر: {n_sp}\nبعدی: #{next_n}\nحداکثر: {get_profile_max_post(profile_id)}"
                 await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
@@ -2790,7 +2571,7 @@ async def on_callback(u, ctx):
                     return
                 p = await q.edit_message_text("⏳ در حال اجرا...")
                 try:
-                    n, m = await run_full_cycle_for_profile(u.get_bot(), profile_id, only_new=True)
+                    n, m = await run_full_cycle_for_profile(u.get_bot(), profile_id, only_new=True, is_instant=False)
                     await p.edit_text(f"✅ Done: {n} - {m}")
                 except Exception as e:
                     log.error(f"❌ runnow error: {e}")
@@ -2983,7 +2764,6 @@ async def on_callback(u, ctx):
                 c.execute("DELETE FROM seen WHERE profile_id=?", (profile_id,))
                 c.execute("DELETE FROM posts")
                 c.execute("DELETE FROM country_cache")
-                c.execute("DELETE FROM source_passwords WHERE profile_id=?", (profile_id,))
                 c.execute("DELETE FROM last_scrape WHERE profile_id=?", (profile_id,))
                 c.execute("DELETE FROM processed_messages WHERE profile_id=?", (profile_id,))
                 c.execute("DELETE FROM proxies_seen WHERE profile_id=?", (profile_id,))
@@ -3034,7 +2814,6 @@ async def show_profile_admin(msg_or_q, profile_id):
     last_num = prof["last_num"]
     interval = prof["interval_min"]
     max_post = prof["max_post"]
-    display_name = prof["display_name"] or "تنظیم نشده"
     show_num = prof["show_numbers"] == 1
     custom_query = prof["custom_query"] or "خالی"
     show_date_cfg = prof["show_date_config"] == 1
@@ -3060,7 +2839,6 @@ async def show_profile_admin(msg_or_q, profile_id):
         ping_mode=ping_display,
         cfg_status=cfg_status,
         prx_status=prx_status,
-        display_name=display_name,
         numbers_status=num_status,
         custom_query=custom_query,
         date_cfg=date_cfg_status,
@@ -3079,10 +2857,10 @@ async def show_profile_admin(msg_or_q, profile_id):
             raise
 
 # ======================================================================
-# هندلرهای متنی و سند
+# هندلرهای متنی و سند (بدون رمز و نام نمایشی)
 # ======================================================================
 async def on_text(u, ctx):
-    if PRIVATE_MODE and u.effective_user.id != ADMIN_ID:
+    if u.effective_user.id != ADMIN_ID:
         return
 
     # ویرایش اسپانسر
@@ -3248,21 +3026,6 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    if a.startswith("adn_"):
-        profile_id = int(a.split("_")[1])
-        new_name = t if t else ""
-        set_profile_display_name(profile_id, new_name)
-        await u.message.reply_text(msg("display_name_set", name=new_name if new_name else "پاک شد"))
-        del ctx.user_data["action"]
-        await show_profile_admin(u.message, profile_id)
-        return
-
-    if a.startswith("rename_"):
-        profile_id = int(a.split("_")[1])
-        await process_rename(u, u.message, profile_id, is_document=False)
-        del ctx.user_data["action"]
-        return
-
     if a.startswith("ab_config_"):
         profile_id = int(a.split("_")[2])
         if not t:
@@ -3331,29 +3094,6 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    if a.startswith("pa_"):
-        parts = a.split("_")
-        if len(parts) < 3:
-            return
-        profile_id = int(parts[1])
-        idx = int(parts[2])
-        sources = get_profile_sources(profile_id)
-        if idx >= len(sources):
-            return
-        source = sources[idx]
-        items = re.split(r'[,،\n]+', t)
-        items = [x.strip() for x in items if x.strip()]
-        added = []
-        for pw in items:
-            add_pw(profile_id, source, pw)
-            added.append(pw)
-        del ctx.user_data["action"]
-        await u.message.reply_text(msg("pw_added", source=source) + f"\nرمزهای اضافه شده: {', '.join(added)}")
-        pws = get_pw(profile_id, source)
-        body = "\n".join(f"- {p}" for p in pws) if pws else msg("pw_none")
-        await u.message.reply_text(msg("pw_title", source=source) + "\n\n" + body, reply_markup=source_passwords_kb(profile_id, idx))
-        return
-
     if a.startswith("manual_"):
         profile_id = int(a.split("_")[1])
         await process_manual_text(u, u.message, profile_id, is_document=False)
@@ -3370,16 +3110,10 @@ async def on_text(u, ctx):
         return
 
 async def on_document(u, ctx):
-    if PRIVATE_MODE and u.effective_user.id != ADMIN_ID:
+    if u.effective_user.id != ADMIN_ID:
         return
     a = ctx.user_data.get("action")
     if not a:
-        return
-
-    if a.startswith("rename_"):
-        profile_id = int(a.split("_")[1])
-        await process_rename(u, u.message, profile_id, is_document=True)
-        del ctx.user_data["action"]
         return
 
     if a.startswith("manual_"):
@@ -3387,72 +3121,6 @@ async def on_document(u, ctx):
         await process_manual_text(u, u.message, profile_id, is_document=True)
         del ctx.user_data["action"]
         return
-
-# ======================================================================
-# پردازش تغییر نام
-# ======================================================================
-async def process_rename(u, message, profile_id, is_document=False):
-    p = await message.reply_text("⏳ در حال پردازش برای تغییر نام...")
-    try:
-        if is_document:
-            doc = message.document
-            if doc.file_size and doc.file_size > 3 * 1024 * 1024:
-                return await p.edit_text("❌ فایل بزرگتر از ۳ مگابایت")
-            file = await doc.get_file()
-            data = await file.download_as_bytearray()
-            text = data.decode('utf-8', errors='ignore')
-            if re.match(r'^[A-Za-z0-9+/=\s]+$', text):
-                try:
-                    decoded = base64.b64decode(text.strip(), validate=True).decode('utf-8', errors='ignore')
-                    if decoded:
-                        text = decoded
-                except:
-                    pass
-        else:
-            text = message.text or ""
-
-        config_links = extract_links_from_text(text)
-        if not config_links:
-            for line in text.splitlines():
-                line = line.strip()
-                if line:
-                    config_links.extend(extract_links_from_text(line))
-            config_links = list(set(config_links))
-
-        if not config_links:
-            return await p.edit_text("❌ هیچ لینک کانفیگ معتبری یافت نشد.")
-
-        display_name = get_profile_display_name(profile_id)
-        if not display_name:
-            display_name = get_profile_dest(profile_id) or "Server"
-        custom_query = get_profile_custom_query(profile_id)
-
-        async def get_renamed_link(url):
-            host, _ = extract_host(url)
-            flag = "🌐"
-            if host:
-                ip = await host_to_ip(host)
-                if ip:
-                    flag = await get_flag_for_ip(ip)
-            return change_link_display_name(url, display_name, flag, custom_query)
-
-        tasks = [get_renamed_link(link) for link in config_links[:30]]
-        renamed_links = await asyncio.gather(*tasks)
-
-        msg_text = f"📝 **سرورهای با نام {display_name}**\n\n"
-        for link in renamed_links:
-            msg_text += f"<code>{link}</code>\n\n"
-
-        await u.get_bot().send_message(
-            ADMIN_ID,
-            msg_text,
-            parse_mode="HTML",
-            disable_web_page_preview=True
-        )
-        await p.edit_text(f"✅ {len(renamed_links)} لینک با نام '{display_name}' تغییر نام داده و برای شما ارسال شد.")
-    except Exception as e:
-        log.error(f"rename error: {e}")
-        await p.edit_text(f"❌ {str(e)[:200]}")
 
 # ======================================================================
 # ارسال دستی (با تقسیم)

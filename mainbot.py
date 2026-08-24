@@ -115,17 +115,16 @@ c.execute("""CREATE TABLE IF NOT EXISTS country_cache (
     country TEXT,
     flag TEXT)""")
 
+# ===== جدول اسپانسر جدید (ساده) =====
 c.execute("""CREATE TABLE IF NOT EXISTS sponsors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     profile_id INTEGER,
     name TEXT NOT NULL,
     url TEXT NOT NULL,
     button_text TEXT DEFAULT 'Advertisement',
-    color TEXT DEFAULT 'blue',
     enabled INTEGER DEFAULT 1,
     created_at TEXT,
     FOREIGN KEY(profile_id) REFERENCES profiles(id))""")
-ensure_column("sponsors", "profile_id", "INTEGER")
 
 c.execute("""CREATE TABLE IF NOT EXISTS last_scrape (
     source TEXT PRIMARY KEY,
@@ -401,14 +400,14 @@ def set_profile_show_date_proxy(profile_id, enabled):
     update_profile(profile_id, show_date_proxy=1 if enabled else 0)
 
 # ======================================================================
-# توابع اسپانسر (بازنویسی کامل)
+# توابع اسپانسر جدید (ساده و بدون رنگ)
 # ======================================================================
-def add_sponsor(profile_id, name, url, button_text="Advertisement", color="blue"):
+def add_sponsor(profile_id, name, url, button_text="Advertisement"):
     try:
         c.execute("""INSERT INTO sponsors
-            (profile_id, name, url, button_text, color, enabled, created_at)
-            VALUES (?, ?, ?, ?, ?, 1, ?)""",
-            (profile_id, name, url, button_text, color, get_tehran_time()))
+            (profile_id, name, url, button_text, enabled, created_at)
+            VALUES (?, ?, ?, ?, 1, ?)""",
+            (profile_id, name, url, button_text, get_tehran_time()))
         conn.commit()
         return c.lastrowid
     except Exception as e:
@@ -425,32 +424,29 @@ def toggle_sponsor(sid):
         (sid,))
     conn.commit()
 
-def update_sponsor(sid, name=None, url=None, button_text=None, color=None):
+def update_sponsor(sid, name=None, url=None, button_text=None):
     if name is not None:
         c.execute("UPDATE sponsors SET name=? WHERE id=?", (name, sid))
     if url is not None:
         c.execute("UPDATE sponsors SET url=? WHERE id=?", (url, sid))
     if button_text is not None:
         c.execute("UPDATE sponsors SET button_text=? WHERE id=?", (button_text, sid))
-    if color is not None:
-        c.execute("UPDATE sponsors SET color=? WHERE id=?", (color, sid))
     conn.commit()
 
 def get_enabled_sponsors(profile_id):
-    """بازگرداندن لیست اسپانسرهای فعال به صورت tuple (id, name, url, button_text, color)"""
     return c.execute(
-        "SELECT id, name, url, button_text, color FROM sponsors WHERE enabled=1 AND profile_id=?",
+        "SELECT id, name, url, button_text FROM sponsors WHERE enabled=1 AND profile_id=?",
         (profile_id,)
     ).fetchall()
 
 def get_all_sponsors(profile_id):
     return c.execute(
-        "SELECT id, name, url, button_text, color, enabled FROM sponsors WHERE profile_id=? ORDER BY id DESC",
+        "SELECT id, name, url, button_text, enabled FROM sponsors WHERE profile_id=? ORDER BY id DESC",
         (profile_id,)
     ).fetchall()
 
 def get_sponsor(sid):
-    row = c.execute("SELECT id, profile_id, name, url, button_text, color, enabled FROM sponsors WHERE id=?", (sid,)).fetchone()
+    row = c.execute("SELECT id, profile_id, name, url, button_text, enabled FROM sponsors WHERE id=?", (sid,)).fetchone()
     if row:
         return {
             "id": row[0],
@@ -458,8 +454,7 @@ def get_sponsor(sid):
             "name": row[2],
             "url": row[3],
             "button_text": row[4],
-            "color": row[5],
-            "enabled": row[6]
+            "enabled": row[5]
         }
     return None
 
@@ -1005,7 +1000,7 @@ async def _scrape_channel_internal(profile_id, channel, only_new=True):
         return new_configs, new_proxies
 
 # ======================================================================
-# ارسال
+# ارسال (با اصلاح اسپانسر)
 # ======================================================================
 async def send_to_destination(bot, profile_id, text, buttons=None):
     dest = get_profile_dest(profile_id)
@@ -1065,7 +1060,7 @@ def split_text(text, max_len=4096):
     return chunks
 
 # ======================================================================
-# ارسال کانفیگ‌ها (با بنر و اسپانسر) - هر کانفیگ جداگانه با بنر کامل
+# ارسال کانفیگ‌ها (با اسپانسر به صورت دکمه)
 # ======================================================================
 async def post_configs(bot, profile_id, working, source_for_seen=""):
     if not working:
@@ -1079,12 +1074,14 @@ async def post_configs(bot, profile_id, working, source_for_seen=""):
     dest = get_profile_dest(profile_id)
     banner_template = get_profile_banner_config(profile_id) or "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
 
-    # دریافت اسپانسرهای فعال (حداکثر یک عدد برای نمایش در انتها)
+    # دریافت اسپانسر فعال (فقط اولین اسپانسر فعال)
     sponsors = get_enabled_sponsors(profile_id)
-    sponsor_buttons = []
-    for sid, sname, surl, stxt, scolor in sponsors[:1]:  # فقط اولین
+    sponsor_button = None
+    if sponsors:
+        sid, sname, surl, stxt = sponsors[0]
         clean_txt = stxt.strip()
-        sponsor_buttons.append(InlineKeyboardButton(clean_txt, url=surl))
+        # ایجاد دکمه با لینک (بدون تغییر در URL)
+        sponsor_button = InlineKeyboardButton(clean_txt, url=surl)
 
     sent_count = 0
     for i, (url, ping, node_count) in enumerate(items, 1):
@@ -1121,10 +1118,10 @@ async def post_configs(bot, profile_id, working, source_for_seen=""):
         except KeyError:
             full_text = f"✦ V2Ray Config List\n\n{configs_text}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
 
-        # دکمه‌ها: اسپانسر (در انتهای پیام)
+        # دکمه‌ها: فقط اسپانسر (در انتهای پیام)
         buttons = []
-        if sponsor_buttons:
-            buttons = sponsor_buttons  # یک ردیف با یک یا چند دکمه
+        if sponsor_button:
+            buttons.append(sponsor_button)
 
         reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
 
@@ -1225,7 +1222,6 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
                 proxy_count, proxy_payload = await post_proxies(bot, profile_id, unique_proxies)
                 if proxy_count > 0 and proxy_payload:
                     text, _ = proxy_payload
-                    # برای پروکسی‌ها اسپانسر در نظر گرفته نمی‌شود (می‌توان اضافه کرد)
                     sent = await send_to_destination(bot, profile_id, text, None)
                     if sent:
                         total_proxies = proxy_count
@@ -1238,7 +1234,7 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
     return total_configs, result_msg
 
 # ======================================================================
-# سیکل کامل (فقط جدید و تست محدود) – بدون تغییر عمده
+# سیکل کامل (اصلاح زمان‌بندی)
 # ======================================================================
 async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=False):
     log.info("=" * 50)
@@ -1407,7 +1403,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
     return result
 
 # ======================================================================
-# حلقه خودکار (اصلاح شده برای زمان‌بندی دقیق)
+# حلقه خودکار (اصلاح شده)
 # ======================================================================
 async def profile_loop(bot, profile_id):
     profile = get_profile(profile_id)
@@ -1428,16 +1424,15 @@ async def profile_loop(bot, profile_id):
                 break
             except Exception as e:
                 log.error(f"❌ instant update error for {profile_id}: {e}")
-                await asyncio.sleep(5)  # جلوگیری از مصرف بی‌رویه CPU
+                await asyncio.sleep(5)  # جلوگیری از مصرف بی‌رویه
     else:
         while True:
             try:
-                # زمان اجرای بعدی را از الان محاسبه کن
                 next_run = datetime.now(TEHRAN_TZ) + timedelta(minutes=interval)
                 sleep_seconds = (next_run - datetime.now(TEHRAN_TZ)).total_seconds()
                 if sleep_seconds > 0:
                     await asyncio.sleep(sleep_seconds)
-                log.info(f"⏰ AUTO TICK for profile {profile_id} ({profile['dest_name']})")
+                log.info(f"⏰ AUTO TICK for profile {profile_id} ({profile['dest_name']}) at {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
                 n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=False)
                 log.info(f"[auto profile {profile_id}] {n} - {m}")
             except asyncio.CancelledError:
@@ -1445,10 +1440,11 @@ async def profile_loop(bot, profile_id):
                 break
             except Exception as e:
                 log.error(f"❌ profile_loop error for {profile_id}: {e}")
+                log.error(traceback.format_exc())
                 await asyncio.sleep(60)
 
 # ======================================================================
-# کیبوردها و پیام‌ها (بدون پارامتر style)
+# کیبوردها و پیام‌ها (بدون تغییر)
 # ======================================================================
 BOT_REF = None
 BOT_LANG = "fa"
@@ -1517,12 +1513,12 @@ T = {
         "src_none": "خالی",
         "reset_ok": "✅ ریست شد (#۱)",
         "lang_ok": "✅ فارسی شد",
-        "sp_prompt": "📢 اسپانسر:\nفرمت: نام|url|متن دکمه|رنگ\nرنگ‌ها: blue, green, red",
+        "sp_prompt": "📢 اسپانسر:\nفرمت: نام|url|متن دکمه",
         "sp_added": "✅ '{name}' اضافه شد",
         "sp_removed": "✅ حذف شد",
         "sp_title": "📢 اسپانسرها:",
         "sp_none": "خالی",
-        "sp_err": "❌ فرمت: name|url|text|color (رنگ‌ها: blue, green, red)",
+        "sp_err": "❌ فرمت: name|url|text",
         "doc_select": "این فایل از کدوم منبعه؟",
         "doc_no_src": "❌ منبعی نیست، اول اضافه کن",
         "doc_decoding": "🔐 رمزگشایی...",
@@ -1552,11 +1548,10 @@ T = {
         "toggle_numbers_ok": "✅ شماره‌گذاری {'فعال' if status else 'غیرفعال'} شد.",
         "date_cfg_toggle": "✅ نمایش تاریخ در بنر کانفیگ {'فعال' if status else 'غیرفعال'} شد.",
         "date_prx_toggle": "✅ نمایش تاریخ در بنر پروکسی {'فعال' if status else 'غیرفعال'} شد.",
-        "sp_edit_prompt": "📢 **ویرایش اسپانسر**\n\nنام: {name}\nلینک: {url}\nمتن: {text}\nرنگ: {color}\n\nبرای ویرایش هر بخش، دکمه مربوطه را بزنید.",
+        "sp_edit_prompt": "📢 **ویرایش اسپانسر**\n\nنام: {name}\nلینک: {url}\nمتن: {text}\n\nبرای ویرایش هر بخش، دکمه مربوطه را بزنید.",
         "sp_edit_name": "نام جدید (خالی برای عدم تغییر):",
         "sp_edit_url": "لینک جدید (خالی برای عدم تغییر):",
         "sp_edit_text": "متن جدید دکمه (خالی برای عدم تغییر):",
-        "sp_edit_color": "رنگ جدید (blue/green/red) - خالی برای عدم تغییر:",
         "sp_updated": "✅ اسپانسر به‌روزرسانی شد.",
         "btn_edit_sponsor": "✏️ ویرایش",
         "delete_confirm1": "⚠️ **آیا مطمئن هستید که می‌خواهید این پروفایل را حذف کنید؟**\n\nنام: {name}\nشناسه: {id}\n\nاین عملیات غیرقابل برگشت است و تمام داده‌های مربوط به این پروفایل (منابع، اسپانسرها، تاریخچه) پاک می‌شود.\n\nبرای تأیید، دکمه **«بله، حذف شود»** را بزنید.",
@@ -1626,12 +1621,12 @@ T = {
         "src_none": "none",
         "reset_ok": "✅ Reset (#1)",
         "lang_ok": "✅ Switched to English",
-        "sp_prompt": "📢 Sponsor:\nFormat: name|url|button_text|color\nColors: blue, green, red",
+        "sp_prompt": "📢 Sponsor:\nFormat: name|url|button_text",
         "sp_added": "✅ '{name}' added",
         "sp_removed": "✅ Removed",
         "sp_title": "📢 Sponsors:",
         "sp_none": "none",
-        "sp_err": "❌ Bad format: name|url|text|color (colors: blue, green, red)",
+        "sp_err": "❌ Bad format: name|url|text",
         "doc_select": "Which source is this from?",
         "doc_no_src": "❌ No sources. Add first",
         "doc_decoding": "🔐 Decrypting...",
@@ -1661,11 +1656,10 @@ T = {
         "toggle_numbers_ok": "✅ Numbering {'enabled' if status else 'disabled'}.",
         "date_cfg_toggle": "✅ Config date display {'enabled' if status else 'disabled'}.",
         "date_prx_toggle": "✅ Proxy date display {'enabled' if status else 'disabled'}.",
-        "sp_edit_prompt": "📢 **Edit Sponsor**\n\nName: {name}\nURL: {url}\nText: {text}\nColor: {color}\n\nClick a button to edit.",
+        "sp_edit_prompt": "📢 **Edit Sponsor**\n\nName: {name}\nURL: {url}\nText: {text}\n\nClick a button to edit.",
         "sp_edit_name": "New name (leave empty to keep):",
         "sp_edit_url": "New URL (leave empty to keep):",
         "sp_edit_text": "New button text (leave empty to keep):",
-        "sp_edit_color": "New color (blue/green/red - leave empty to keep):",
         "sp_updated": "✅ Sponsor updated.",
         "btn_edit_sponsor": "✏️ Edit",
         "delete_confirm1": "⚠️ **Are you sure you want to delete this profile?**\n\nName: {name}\nID: {id}\n\nThis action is irreversible and all data related to this profile (sources, sponsors, history) will be deleted.\n\nPress **«Yes, delete»** to confirm.",
@@ -1684,15 +1678,15 @@ def msg(key, **kwargs):
     return text
 
 # ======================================================================
-# کیبوردها (بدون پارامتر style)
+# کیبوردها (با اصلاح اسپانسر)
 # ======================================================================
 def profiles_kb():
     profiles = get_profiles()
     btns = []
     for p in profiles:
-        btns.append([InlineKeyboardButton(f"{p['dest_name']} (ID:{p['id']})", callback_data=f"prof_{p['id']}")])
-    btns.append([InlineKeyboardButton("➕ Add Profile", callback_data="prof_add")])
-    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data="back_home")])
+        btns.append([InlineKeyboardButton(f"{p['dest_name']} (ID:{p['id']})", callback_data=f"prof_{p['id']}", style="primary")])
+    btns.append([InlineKeyboardButton("➕ Add Profile", callback_data="prof_add", style="success")])
+    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data="back_home", style="primary")])
     return InlineKeyboardMarkup(btns)
 
 def profile_admin_kb(profile_id):
@@ -1717,41 +1711,41 @@ def profile_admin_kb(profile_id):
     num_btn = msg("btn_toggle_numbers", status=num_status)
 
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(msg("btn_manage_sources"), callback_data=f"src_list_{profile_id}"),
-         InlineKeyboardButton(msg("btn_dest_list"), callback_data=f"dl_{profile_id}")],
-        [InlineKeyboardButton(msg("btn_sponsors"), callback_data=f"sp_menu_{profile_id}"),
-         InlineKeyboardButton(msg("btn_set_name"), callback_data=f"ac_{profile_id}")],
-        [InlineKeyboardButton(msg("btn_set_banner_config"), callback_data=f"ab_config_{profile_id}"),
-         InlineKeyboardButton(msg("btn_set_banner_proxy"), callback_data=f"ab_proxy_{profile_id}")],
-        [InlineKeyboardButton(msg("btn_set_time"), callback_data=f"ai_{profile_id}"),
-         InlineKeyboardButton(msg("btn_set_max"), callback_data=f"setmax_{profile_id}")],
-        [InlineKeyboardButton(ping_label, callback_data=f"tglping_{profile_id}"),
-         InlineKeyboardButton(cfg_btn, callback_data=f"tglcfg_{profile_id}")],
-        [InlineKeyboardButton(prx_btn, callback_data=f"tglproxy_{profile_id}"),
-         InlineKeyboardButton(num_btn, callback_data=f"togglenum_{profile_id}")],
-        [InlineKeyboardButton(f"📅 تاریخ کانفیگ: {date_cfg_status}", callback_data=f"tgl_date_cfg_{profile_id}"),
-         InlineKeyboardButton(f"📅 تاریخ پروکسی: {date_prx_status}", callback_data=f"tgl_date_prx_{profile_id}")],
-        [InlineKeyboardButton(msg("btn_set_custom_query"), callback_data=f"setquery_{profile_id}"),
-         InlineKeyboardButton(msg("btn_stats"), callback_data=f"ast_{profile_id}")],
-        [InlineKeyboardButton(msg("btn_test"), callback_data=f"sendtest_{profile_id}"),
-         InlineKeyboardButton(msg("btn_runnow"), callback_data=f"runnow_{profile_id}")],
-        [InlineKeyboardButton(msg("btn_instant"), callback_data=f"instant_{profile_id}"),
-         InlineKeyboardButton(msg("btn_manual_send"), callback_data=f"manual_{profile_id}")],
-        [InlineKeyboardButton(msg("btn_reset"), callback_data=f"rn_{profile_id}"),
-         InlineKeyboardButton(msg("btn_clear"), callback_data=f"cd1_{profile_id}")],
-        [InlineKeyboardButton("❌ Delete Profile", callback_data=f"delprof_{profile_id}")],
-        [InlineKeyboardButton(msg("btn_back"), callback_data="profiles_list")],
+        [InlineKeyboardButton(msg("btn_manage_sources"), callback_data=f"src_list_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_dest_list"), callback_data=f"dl_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_sponsors"), callback_data=f"sp_menu_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_set_name"), callback_data=f"ac_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_set_banner_config"), callback_data=f"ab_config_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_set_banner_proxy"), callback_data=f"ab_proxy_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_set_time"), callback_data=f"ai_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_set_max"), callback_data=f"setmax_{profile_id}", style="primary")],
+        [InlineKeyboardButton(ping_label, callback_data=f"tglping_{profile_id}", style="primary"),
+         InlineKeyboardButton(cfg_btn, callback_data=f"tglcfg_{profile_id}", style="primary")],
+        [InlineKeyboardButton(prx_btn, callback_data=f"tglproxy_{profile_id}", style="primary"),
+         InlineKeyboardButton(num_btn, callback_data=f"togglenum_{profile_id}", style="primary")],
+        [InlineKeyboardButton(f"📅 تاریخ کانفیگ: {date_cfg_status}", callback_data=f"tgl_date_cfg_{profile_id}", style="primary"),
+         InlineKeyboardButton(f"📅 تاریخ پروکسی: {date_prx_status}", callback_data=f"tgl_date_prx_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_set_custom_query"), callback_data=f"setquery_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_stats"), callback_data=f"ast_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_test"), callback_data=f"sendtest_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_runnow"), callback_data=f"runnow_{profile_id}", style="success")],
+        [InlineKeyboardButton(msg("btn_instant"), callback_data=f"instant_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_manual_send"), callback_data=f"manual_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_reset"), callback_data=f"rn_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_clear"), callback_data=f"cd1_{profile_id}", style="danger")],
+        [InlineKeyboardButton("❌ Delete Profile", callback_data=f"delprof_{profile_id}", style="danger")],
+        [InlineKeyboardButton(msg("btn_back"), callback_data="profiles_list", style="primary")],
     ])
 
 def destinations_kb(profile_id):
     dest = get_profile_dest(profile_id)
     btns = []
     if dest:
-        btns.append([InlineKeyboardButton(f"❌ {dest}", callback_data=f"dd_{profile_id}")])
+        btns.append([InlineKeyboardButton(f"❌ {dest}", callback_data=f"dd_{profile_id}", style="danger")])
     btns.append([
-        InlineKeyboardButton(msg("btn_add_dest"), callback_data=f"da_{profile_id}"),
+        InlineKeyboardButton(msg("btn_add_dest"), callback_data=f"da_{profile_id}", style="success"),
     ])
-    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")])
+    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")])
     return InlineKeyboardMarkup(btns)
 
 def sponsors_kb(profile_id):
@@ -1759,15 +1753,15 @@ def sponsors_kb(profile_id):
     btns = []
     if rows:
         for row in rows:
-            sid, name, url, btn_text, color, enabled = row
+            sid, name, url, btn_text, enabled = row
             st = "✅" if enabled else "❌"
             btns.append([
-                InlineKeyboardButton(f"{st} {name[:25]}", callback_data=f"spt_{profile_id}_{sid}"),
-                InlineKeyboardButton("🗑", callback_data=f"spd_{profile_id}_{sid}"),
-                InlineKeyboardButton(msg("btn_edit_sponsor"), callback_data=f"sp_edit_{profile_id}_{sid}")
+                InlineKeyboardButton(f"{st} {name[:25]}", callback_data=f"spt_{profile_id}_{sid}", style="primary"),
+                InlineKeyboardButton("🗑", callback_data=f"spd_{profile_id}_{sid}", style="danger"),
+                InlineKeyboardButton(msg("btn_edit_sponsor"), callback_data=f"sp_edit_{profile_id}_{sid}", style="primary")
             ])
-    btns.append([InlineKeyboardButton("➕ add sponsor", callback_data=f"sp_add_{profile_id}")])
-    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")])
+    btns.append([InlineKeyboardButton("➕ add sponsor", callback_data=f"sp_add_{profile_id}", style="success")])
+    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")])
     return InlineKeyboardMarkup(btns)
 
 def source_list_kb(profile_id):
@@ -1775,19 +1769,19 @@ def source_list_kb(profile_id):
     btns = []
     if sources:
         for i, src in enumerate(sources):
-            btns.append([InlineKeyboardButton(f"❌ {src}", callback_data=f"src_del_{profile_id}_{i}")])
-    btns.append([InlineKeyboardButton(msg("btn_add_source"), callback_data=f"sa_{profile_id}")])
-    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")])
+            btns.append([InlineKeyboardButton(f"❌ {src}", callback_data=f"src_del_{profile_id}_{i}", style="danger")])
+    btns.append([InlineKeyboardButton(msg("btn_add_source"), callback_data=f"sa_{profile_id}", style="success")])
+    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")])
     return InlineKeyboardMarkup(btns)
 
 def empty_button_kb(profile_id, callback):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(msg("btn_empty"), callback_data=callback)],
-        [InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")]
+        [InlineKeyboardButton(msg("btn_empty"), callback_data=callback, style="danger")],
+        [InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]
     ])
 
 # ======================================================================
-# دستورات
+# دستورات (بدون تغییر)
 # ======================================================================
 async def cmd_start(u, ctx):
     if u.effective_user.id != ADMIN_ID:
@@ -1799,7 +1793,7 @@ async def cmd_start(u, ctx):
         last_num = max(p["last_num"] for p in profiles)
         next_n = last_num + 1
     txt = msg("welcome", profiles=total, next_n=next_n)
-    btns = [[InlineKeyboardButton("📋 Manage Profiles", callback_data="profiles_list")]]
+    btns = [[InlineKeyboardButton("📋 Manage Profiles", callback_data="profiles_list", style="primary")]]
     await u.message.reply_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(btns))
 
 async def cmd_admin(u, ctx):
@@ -1896,7 +1890,7 @@ async def cmd_diag(update: Update, context):
     await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
 
 # ======================================================================
-# کالبک (با حذف تمام style)
+# کالبک (با اصلاح اسپانسر و کوئری)
 # ======================================================================
 async def on_callback(u, ctx):
     q = u.callback_query
@@ -1913,7 +1907,7 @@ async def on_callback(u, ctx):
 
         if d == "prof_add":
             ctx.user_data["action"] = "prof_add"
-            await q.edit_message_text(msg("profile_add_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="profiles_list")]]))
+            await q.edit_message_text(msg("profile_add_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="profiles_list", style="primary")]]))
             return
 
         if d == "back_home":
@@ -1955,8 +1949,8 @@ async def on_callback(u, ctx):
                     txt,
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("✅ بله، حذف شود", callback_data=f"delprof_confirm1_{profile_id}")],
-                        [InlineKeyboardButton("❌ لغو", callback_data=f"prof_{profile_id}")]
+                        [InlineKeyboardButton("✅ بله، حذف شود", callback_data=f"delprof_confirm1_{profile_id}", style="danger")],
+                        [InlineKeyboardButton("❌ لغو", callback_data=f"prof_{profile_id}", style="primary")]
                     ])
                 )
             else:
@@ -1980,8 +1974,8 @@ async def on_callback(u, ctx):
                     txt,
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🗑 حذف نهایی", callback_data=f"delprof_confirm2_{profile_id}")],
-                        [InlineKeyboardButton("❌ لغو", callback_data=f"prof_{profile_id}")]
+                        [InlineKeyboardButton("🗑 حذف نهایی", callback_data=f"delprof_confirm2_{profile_id}", style="danger")],
+                        [InlineKeyboardButton("❌ لغو", callback_data=f"prof_{profile_id}", style="primary")]
                     ])
                 )
             else:
@@ -1999,7 +1993,7 @@ async def on_callback(u, ctx):
                 delete_profile(profile_id)
                 await q.answer("✅ پروفایل حذف شد.")
                 await q.edit_message_text(msg("profile_deleted"), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="profiles_list")]
+                    [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="profiles_list", style="primary")]
                 ]))
             else:
                 await q.answer("⚠️ خطا در داده")
@@ -2051,41 +2045,9 @@ async def on_callback(u, ctx):
                     "📝 **نام اسپانسر را وارد کنید:**",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}")]
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}", style="primary")]
                     ])
                 )
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("sp_color_"):
-            parts = d.split("_")
-            if len(parts) >= 4:
-                try:
-                    profile_id = int(parts[2])
-                    color = parts[3]
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                name = ctx.user_data.get("sponsor_name")
-                url = ctx.user_data.get("sponsor_url")
-                btn_text = ctx.user_data.get("sponsor_button_text")
-                if name and url and btn_text:
-                    add_sponsor(profile_id, name, url, btn_text, color)
-                    await q.answer("✅ اسپانسر اضافه شد.")
-                    await q.edit_message_text(
-                        f"✅ اسپانسر **{name}** با موفقیت اضافه شد.",
-                        parse_mode="HTML",
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🔙 بازگشت به اسپانسرها", callback_data=f"sp_menu_{profile_id}")]
-                        ])
-                    )
-                    del ctx.user_data["sponsor_step"]
-                    del ctx.user_data["sponsor_name"]
-                    del ctx.user_data["sponsor_url"]
-                    del ctx.user_data["sponsor_button_text"]
-                else:
-                    await q.answer("❌ اطلاعات ناقص است.")
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -2108,17 +2070,15 @@ async def on_callback(u, ctx):
                 txt = msg("sp_edit_prompt",
                           name=sponsor["name"],
                           url=sponsor["url"],
-                          text=sponsor["button_text"],
-                          color=sponsor["color"])
+                          text=sponsor["button_text"])
                 await q.edit_message_text(
                     txt,
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("نام", callback_data=f"sp_edit_name_{sid}"),
-                         InlineKeyboardButton("لینک", callback_data=f"sp_edit_url_{sid}")],
-                        [InlineKeyboardButton("متن دکمه", callback_data=f"sp_edit_text_{sid}"),
-                         InlineKeyboardButton("رنگ", callback_data=f"sp_edit_color_{sid}")],
-                        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}")]
+                        [InlineKeyboardButton("نام", callback_data=f"sp_edit_name_{sid}", style="primary"),
+                         InlineKeyboardButton("لینک", callback_data=f"sp_edit_url_{sid}", style="primary")],
+                        [InlineKeyboardButton("متن دکمه", callback_data=f"sp_edit_text_{sid}", style="primary")],
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}", style="primary")]
                     ])
                 )
             else:
@@ -2142,7 +2102,7 @@ async def on_callback(u, ctx):
                     msg("sp_edit_name"),
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_edit_{profile_id}_{sid}")]
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_edit_{profile_id}_{sid}", style="primary")]
                     ])
                 )
             else:
@@ -2166,7 +2126,7 @@ async def on_callback(u, ctx):
                     msg("sp_edit_url"),
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_edit_{profile_id}_{sid}")]
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_edit_{profile_id}_{sid}", style="primary")]
                     ])
                 )
             else:
@@ -2190,61 +2150,9 @@ async def on_callback(u, ctx):
                     msg("sp_edit_text"),
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_edit_{profile_id}_{sid}")]
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_edit_{profile_id}_{sid}", style="primary")]
                     ])
                 )
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("sp_edit_color_"):
-            parts = d.split("_")
-            if len(parts) >= 4:
-                try:
-                    sid = int(parts[3])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                profile_id = ctx.user_data.get("sponsor_edit_profile_id")
-                if not profile_id:
-                    await q.answer("❌ خطا در پروفایل")
-                    return
-                ctx.user_data["sponsor_edit_field"] = "color"
-                await q.edit_message_text(
-                    "🎨 **رنگ جدید (blue / green / red):**",
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔵 آبی", callback_data=f"sp_color_update_{sid}_blue"),
-                         InlineKeyboardButton("🟢 سبز", callback_data=f"sp_color_update_{sid}_green"),
-                         InlineKeyboardButton("🔴 قرمز", callback_data=f"sp_color_update_{sid}_red")],
-                        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_edit_{profile_id}_{sid}")]
-                    ])
-                )
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("sp_color_update_"):
-            parts = d.split("_")
-            if len(parts) >= 5:
-                try:
-                    sid = int(parts[3])
-                    color = parts[4]
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                profile_id = ctx.user_data.get("sponsor_edit_profile_id")
-                if not profile_id:
-                    await q.answer("❌ خطا در پروفایل")
-                    return
-                if color in ("blue", "green", "red"):
-                    update_sponsor(sid, color=color)
-                    await q.answer("✅ رنگ به‌روزرسانی شد.")
-                    await q.edit_message_text(msg("sp_updated"), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔙 بازگشت به اسپانسرها", callback_data=f"sp_menu_{profile_id}")]
-                    ]))
-                else:
-                    await q.answer("❌ رنگ نامعتبر.")
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -2334,7 +2242,7 @@ async def on_callback(u, ctx):
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
                 ctx.user_data["action"] = f"sa_{profile_id}"
-                await q.edit_message_text(msg("send_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"src_list_{profile_id}")]]))
+                await q.edit_message_text(msg("send_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"src_list_{profile_id}", style="primary")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -2364,7 +2272,7 @@ async def on_callback(u, ctx):
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
                 ctx.user_data["action"] = f"da_{profile_id}"
-                await q.edit_message_text("📝 کانال مقصد جدید رو بفرست (با @ یا بدون):\nمثال: `@MyChannel`", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"dl_{profile_id}")]]))
+                await q.edit_message_text("📝 کانال مقصد جدید رو بفرست (با @ یا بدون):\nمثال: `@MyChannel`", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"dl_{profile_id}", style="primary")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -2427,7 +2335,7 @@ async def on_callback(u, ctx):
                     return
                 ctx.user_data["action"] = f"ab_config_{profile_id}"
                 cur = html.escape(get_profile_banner_config(profile_id))
-                await q.edit_message_text(f"Current Config Banner:\n<code>{cur}</code>\n\nSend new banner (must contain {{configs}}):", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")]]))
+                await q.edit_message_text(f"Current Config Banner:\n<code>{cur}</code>\n\nSend new banner (must contain {{configs}}):", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -2442,7 +2350,7 @@ async def on_callback(u, ctx):
                     return
                 ctx.user_data["action"] = f"ab_proxy_{profile_id}"
                 cur = html.escape(get_profile_banner_proxy(profile_id))
-                await q.edit_message_text(f"Current Proxy Banner:\n<code>{cur}</code>\n\nSend new banner (must contain {{proxies}}):", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")]]))
+                await q.edit_message_text(f"Current Proxy Banner:\n<code>{cur}</code>\n\nSend new banner (must contain {{proxies}}):", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -2518,7 +2426,7 @@ async def on_callback(u, ctx):
                 next_n = get_profile_last_num(profile_id) + 1
                 dest = get_profile_dest(profile_id)
                 txt = f"📊 مقصد: {dest}\nمنابع: {len(get_profile_sources(profile_id))}\nاسپانسر: {n_sp}\nبعدی: #{next_n}\nحداکثر: {get_profile_max_post(profile_id)}"
-                await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")]]))
+                await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -2731,7 +2639,7 @@ async def on_callback(u, ctx):
                 except ValueError:
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
-                await q.edit_message_text(msg("clear_q1"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("YES", callback_data=f"cd2_{profile_id}")], [InlineKeyboardButton("NO", callback_data=f"prof_{profile_id}")]]))
+                await q.edit_message_text(msg("clear_q1"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("YES", callback_data=f"cd2_{profile_id}", style="danger")], [InlineKeyboardButton("NO", callback_data=f"prof_{profile_id}", style="primary")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -2768,7 +2676,7 @@ async def on_callback(u, ctx):
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
                 ctx.user_data["action"] = f"manual_{profile_id}"
-                await q.edit_message_text(msg("manual_send_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"prof_{profile_id}")]]))
+                await q.edit_message_text(msg("manual_send_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"prof_{profile_id}", style="danger")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -2840,7 +2748,7 @@ async def show_profile_admin(msg_or_q, profile_id):
             raise
 
 # ======================================================================
-# هندلرهای متنی و سند
+# هندلرهای متنی و سند (با اصلاح اسپانسر و کوئری)
 # ======================================================================
 async def on_text(u, ctx):
     if u.effective_user.id != ADMIN_ID:
@@ -2861,7 +2769,7 @@ async def on_text(u, ctx):
                 await u.message.reply_text("❌ نام خالی ماند.")
         elif field == "url":
             if txt:
-                # بدون تغییر ذخیره می‌شود
+                # بدون اضافه کردن پیشوند
                 update_sponsor(sid, url=txt)
             else:
                 await u.message.reply_text("❌ لینک خالی ماند.")
@@ -2870,11 +2778,6 @@ async def on_text(u, ctx):
                 update_sponsor(sid, button_text=txt)
             else:
                 await u.message.reply_text("❌ متن خالی ماند.")
-        elif field == "color":
-            if txt in ("blue", "green", "red"):
-                update_sponsor(sid, color=txt)
-            else:
-                await u.message.reply_text("❌ رنگ نامعتبر.")
         del ctx.user_data["sponsor_edit_field"]
         await u.message.reply_text(msg("sp_updated"), parse_mode="HTML")
         profile_id = ctx.user_data.get("sponsor_edit_profile_id")
@@ -2894,41 +2797,45 @@ async def on_text(u, ctx):
             ctx.user_data["sponsor_name"] = u.message.text.strip()
             ctx.user_data["sponsor_step"] = "url"
             await u.message.reply_text(
-                "🔗 **لینک اسپانسر را وارد کنید (با http یا https):**",
+                "🔗 **لینک اسپانسر را وارد کنید (دقیقاً همان لینکی که می‌خواهید):**",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}")]
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}", style="primary")]
                 ])
             )
             return
 
         if step == "url":
             url = u.message.text.strip()
-            # بدون افزودن پیشوند
+            # بدون تغییر
             ctx.user_data["sponsor_url"] = url
             ctx.user_data["sponsor_step"] = "button_text"
             await u.message.reply_text(
                 "📝 **متن دکمه را وارد کنید (مثلاً «بازدید»):**",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}")]
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}", style="primary")]
                 ])
             )
             return
 
         if step == "button_text":
             ctx.user_data["sponsor_button_text"] = u.message.text.strip()
-            ctx.user_data["sponsor_step"] = "color"
-            await u.message.reply_text(
-                "🎨 **رنگ دکمه را انتخاب کنید:**",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔵 آبی", callback_data=f"sp_color_{profile_id}_blue")],
-                    [InlineKeyboardButton("🟢 سبز", callback_data=f"sp_color_{profile_id}_green")],
-                    [InlineKeyboardButton("🔴 قرمز", callback_data=f"sp_color_{profile_id}_red")],
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}")]
-                ])
-            )
+            # ذخیره نهایی
+            name = ctx.user_data.get("sponsor_name")
+            url = ctx.user_data.get("sponsor_url")
+            btn_text = ctx.user_data.get("sponsor_button_text")
+            if name and url and btn_text:
+                add_sponsor(profile_id, name, url, btn_text)
+                await u.message.reply_text(msg("sp_added", name=name))
+                await show_profile_admin(u.message, profile_id)
+            else:
+                await u.message.reply_text("❌ اطلاعات ناقص است.")
+            # پاک کردن داده‌های موقت
+            del ctx.user_data["sponsor_step"]
+            del ctx.user_data["sponsor_name"]
+            del ctx.user_data["sponsor_url"]
+            del ctx.user_data["sponsor_button_text"]
             return
 
     a = ctx.user_data.get("action")
@@ -3087,6 +2994,7 @@ async def on_text(u, ctx):
         set_profile_custom_query(profile_id, query)
         await u.message.reply_text(msg("custom_query_set", query=query if query else "خالی"))
         del ctx.user_data["action"]
+        # رفرش صفحه
         await show_profile_admin(u.message, profile_id)
         return
 
@@ -3104,7 +3012,7 @@ async def on_document(u, ctx):
         return
 
 # ======================================================================
-# ارسال دستی (با تقسیم) - بدون تغییر
+# ارسال دستی (بدون تغییر)
 # ======================================================================
 async def process_manual_text(u, message, profile_id, is_document=False):
     p = await message.reply_text(msg("manual_send_processing"))

@@ -1041,40 +1041,8 @@ async def _scrape_channel_internal(profile_id, channel, only_new=True):
         return new_configs, new_proxies
 
 # ======================================================================
-# کش موقت برای کپی کانفیگ
+# ارسال
 # ======================================================================
-_copy_cache = {}
-
-# ======================================================================
-# ارسال به مقصد (با دکمه‌ها)
-# ======================================================================
-def split_text(text, max_len=4096):
-    if len(text) <= max_len:
-        return [text]
-    lines = text.split('\n')
-    chunks = []
-    current = []
-    current_len = 0
-    for line in lines:
-        if len(line) > max_len:
-            if current:
-                chunks.append('\n'.join(current))
-                current = []
-                current_len = 0
-            for i in range(0, len(line), max_len):
-                chunks.append(line[i:i+max_len])
-            continue
-        if current_len + len(line) + 1 > max_len:
-            chunks.append('\n'.join(current))
-            current = [line]
-            current_len = len(line)
-        else:
-            current.append(line)
-            current_len += len(line) + 1
-    if current:
-        chunks.append('\n'.join(current))
-    return chunks
-
 async def send_to_destination(bot, profile_id, text, buttons=None):
     dest = get_profile_dest(profile_id)
     if not dest:
@@ -1105,82 +1073,128 @@ async def send_to_destination(bot, profile_id, text, buttons=None):
                 success = False
     return success
 
+def split_text(text, max_len=4096):
+    if len(text) <= max_len:
+        return [text]
+    lines = text.split('\n')
+    chunks = []
+    current = []
+    current_len = 0
+    for line in lines:
+        if len(line) > max_len:
+            if current:
+                chunks.append('\n'.join(current))
+                current = []
+                current_len = 0
+            for i in range(0, len(line), max_len):
+                chunks.append(line[i:i+max_len])
+            continue
+        if current_len + len(line) + 1 > max_len:
+            chunks.append('\n'.join(current))
+            current = [line]
+            current_len = len(line)
+        else:
+            current.append(line)
+            current_len += len(line) + 1
+    if current:
+        chunks.append('\n'.join(current))
+    return chunks
+
 # ======================================================================
-# ارسال کانفیگ به صورت تکی با بنر و دکمه کپی و اسپانسر
+# ارسال کانفیگ‌ها (با بنر و اسپانسر) - هر کانفیگ جداگانه با بنر کامل
 # ======================================================================
-async def post_single_config(bot, profile_id, url, ping, node_count, source_for_seen, is_first=False):
-    """
-    ارسال یک کانفیگ به صورت یک پیام مجزا با بنر، دکمه کپی و در صورت اولین بودن، اسپانسر.
-    """
+async def post_configs(bot, profile_id, working, source_for_seen=""):
+    if not working:
+        return 0
+
+    max_post = get_profile_max_post(profile_id)
+    items = sorted(working, key=lambda x: x[1])[:max_post]
     last_n = get_profile_last_num(profile_id)
     show_numbers = get_profile_show_numbers(profile_id)
     custom_query = get_profile_custom_query(profile_id)
     dest = get_profile_dest(profile_id)
+    banner_template = get_profile_banner_config(profile_id) or "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
 
-    # شماره‌گذاری
-    n = last_n + 1
-    set_profile_last_num(profile_id, n)
+    # دریافت اسپانسر فعال
+    sponsors = get_enabled_sponsors(profile_id)
+    sponsor_button = None
+    if sponsors:
+        sid, sname, surl, stxt, scolor = sponsors[0]
+        clean_txt = stxt.replace('★', '').replace('☆', '').strip()
+        style_map = {"blue": "primary", "green": "success", "red": "danger", "yellow": "primary", "purple": "primary"}
+        style = style_map.get(scolor, "primary")
+        sponsor_button = InlineKeyboardButton(clean_txt, url=surl, style=style)
 
-    host, _ = extract_host(url)
-    flag = "🌐"
-    if host:
-        ip = await host_to_ip(host)
-        if ip:
-            flag = await get_flag_for_ip(ip)
+    sent_count = 0
+    for i, (url, ping, node_count) in enumerate(items, 1):
+        n = last_n + i
+        host, _ = extract_host(url)
+        flag = "🌐"
+        if host:
+            ip = await host_to_ip(host)
+            if ip:
+                flag = await get_flag_for_ip(ip)
 
-    channel_display = dest if dest else "@VaslZone"
-    modified_url = append_channel_and_flag_encoded(url, channel_display, flag, custom_query)
+        channel_display = dest if dest else "@VaslZone"
+        modified_url = append_channel_and_flag_encoded(url, channel_display, flag, custom_query)
 
-    if show_numbers:
-        if ping > 0:
-            header = f"<b>#{n}</b> {channel_display} {flag} {ping}ms"
+        # ساخت هدر
+        if show_numbers:
+            if ping > 0:
+                header = f"<b>#{n}</b> {channel_display} {flag} {ping}ms"
+            else:
+                header = f"<b>#{n}</b> {channel_display} {flag}"
         else:
-            header = f"<b>#{n}</b> {channel_display} {flag}"
-    else:
-        if ping > 0:
-            header = f"{channel_display} {flag} {ping}ms"
-        else:
-            header = f"{channel_display} {flag}"
+            if ping > 0:
+                header = f"{channel_display} {flag} {ping}ms"
+            else:
+                header = f"{channel_display} {flag}"
 
-    # فرمت با بک‌تیک
-    config_block = f"```\n{modified_url}\n```"
-    configs_text = header + "\n" + config_block
+        # ساخت بلاک کانفیگ با تگ pre برای نمایش کد
+        block = f"<pre>{modified_url}</pre>"
+        configs_text = header + "\n" + block
 
-    # اعمال بنر
-    banner_config = get_profile_banner_config(profile_id)
-    try:
-        text = banner_config.format(configs=configs_text)
-    except KeyError:
-        log.error("❌ Banner config missing {configs} placeholder, using default")
-        default_banner = "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
-        text = default_banner.format(configs=configs_text)
+        # قرار دادن در بنر
+        try:
+            full_text = banner_template.format(configs=configs_text)
+        except KeyError:
+            full_text = f"✦ V2Ray Config List\n\n{configs_text}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
 
-    # دکمه کپی برای همین کانفیگ
-    copy_key = f"{profile_id}_{n}_{int(datetime.now().timestamp())}"
-    _copy_cache[copy_key] = modified_url
-    buttons = [[InlineKeyboardButton("📋 COPY", callback_data=f"copy_{copy_key}")]]
+        # دکمه‌ها: فقط اسپانسر (بدون دکمه کپی اضافه)
+        buttons = []
+        if sponsor_button:
+            buttons.append(sponsor_button)
 
-    # اسپانسر فقط برای اولین کانفیگ
-    if is_first:
-        sponsors = get_enabled_sponsors(profile_id)
-        if sponsors:
-            sid, sname, surl, stxt, scolor = sponsors[0]
-            clean_txt = stxt.replace('★', '').replace('☆', '').strip()
-            style_map = {"blue": "primary", "green": "success", "red": "danger", "yellow": "primary", "purple": "primary"}
-            style = style_map.get(scolor, "primary")
-            buttons.append([InlineKeyboardButton(clean_txt, url=surl, style=style)])
+        reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
 
-    # ارسال
-    sent = await send_to_destination(bot, profile_id, text, buttons)
-    if sent:
+        try:
+            await bot.send_message(
+                dest,
+                full_text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+                disable_web_page_preview=True
+            )
+            sent_count += 1
+            log.info(f"✅ Sent config #{n} to {dest}")
+        except Exception as e:
+            log.error(f"Failed to send config {n}: {e}")
+            # تلاش با متن ساده
+            try:
+                plain = re.sub(r'<[^>]+>', '', full_text)
+                await bot.send_message(dest, plain[:4096], disable_web_page_preview=True)
+                sent_count += 1
+                log.info(f"✅ Sent config #{n} to {dest} (plain)")
+            except Exception as e2:
+                log.error(f"Failed even plain for config {n}: {e2}")
+
         mark_as_posted(profile_id, modified_url, source_for_seen)
-        return 1
-    else:
-        return 0
 
-# ======================================================================
-# ارسال پروکسی‌ها (گروهی)
-# ======================================================================
+    if sent_count > 0:
+        set_profile_last_num(profile_id, last_n + sent_count)
+
+    return sent_count
+
 async def post_proxies(bot, profile_id, proxies_with_ping):
     if not proxies_with_ping:
         return 0, None
@@ -1211,9 +1225,6 @@ async def post_proxies(bot, profile_id, proxies_with_ping):
         text = f"🌐 Proxies\n{proxy_text}"
     return proxy_count, (text, None)
 
-# ======================================================================
-# ارسال تمام کانفیگ‌ها به صورت تکی (با رعایت max_post)
-# ======================================================================
 async def post_working_configs(bot, profile_id, working, proxies_with_ping, source_for_seen="", force=False):
     dest = get_profile_dest(profile_id)
     if not dest:
@@ -1227,7 +1238,6 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
     results = []
 
     if post_configs_enabled and working:
-        # حذف تکراری‌ها
         unique_working = []
         seen_urls = set()
         for url, ping, cnt in working:
@@ -1235,20 +1245,13 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
                 unique_working.append((url, ping, cnt))
             else:
                 log.info(f"⏭️ Skipping duplicate: {url[:50]}...")
-
         if not unique_working:
             log.info("ℹ️ No new configs to post (all duplicates).")
         else:
-            max_post = get_profile_max_post(profile_id)
-            # فقط به اندازه max_post تا ارسال کن
-            to_send = unique_working[:max_post]
-            total_configs = 0
-            for idx, (url, ping, cnt) in enumerate(to_send):
-                is_first = (idx == 0)
-                sent = await post_single_config(bot, profile_id, url, ping, cnt, source_for_seen, is_first)
-                total_configs += sent
-            if total_configs > 0:
-                results.append(f"{total_configs} configs")
+            config_count = await post_configs(bot, profile_id, unique_working, source_for_seen)
+            if config_count > 0:
+                total_configs = config_count
+                results.append(f"{config_count} configs")
 
     if post_proxies_enabled and proxies_with_ping:
         valid_proxies = [p for p in proxies_with_ping if "t.me/proxy" in p[0].lower()]
@@ -1433,7 +1436,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True):
     return result
 
 # ======================================================================
-# حلقه خودکار (با پشتیبانی از حالت لحظه‌ای)
+# حلقه خودکار (دقیق بر اساس فاصله زمانی) با پشتیبانی از حالت لحظه‌ای
 # ======================================================================
 async def profile_loop(bot, profile_id):
     profile = get_profile(profile_id)
@@ -1441,50 +1444,49 @@ async def profile_loop(bot, profile_id):
         log.error(f"❌ Profile {profile_id} not found, stopping loop.")
         return
     interval = profile["interval_min"]
-    
-    # حالت لحظه‌ای
+    # حالت لحظه‌ای: اگر interval صفر باشد، هر ۵ ثانیه یکبار اجرا می‌شود (برای اپدیت لحظه‌ای)
     if interval == 0:
-        log.info(f"⚡ Real-time mode enabled for profile {profile_id}")
+        log.info(f"⚡ Instant update mode for profile {profile_id}")
         while True:
             try:
-                await run_full_cycle_for_profile(bot, profile_id, only_new=True)
-                await asyncio.sleep(2)  # کمی تاخیر برای جلوگیری از overload
+                await asyncio.sleep(5)  # هر ۵ ثانیه
+                log.info(f"⚡ INSTANT UPDATE for profile {profile_id}")
+                n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True)
+                log.info(f"[instant profile {profile_id}] {n} - {m}")
+            except asyncio.CancelledError:
+                log.info(f"🛑 Profile loop {profile_id} cancelled.")
+                break
+            except Exception as e:
+                log.error(f"❌ instant update error for {profile_id}: {e}")
+                await asyncio.sleep(5)
+    else:
+        # حالت عادی با زمان‌بندی
+        next_run = datetime.now(TEHRAN_TZ) + timedelta(minutes=interval)
+        while True:
+            try:
+                now = datetime.now(TEHRAN_TZ)
+                sleep_seconds = (next_run - now).total_seconds()
+                if sleep_seconds > 0:
+                    await asyncio.sleep(sleep_seconds)
+                else:
+                    log.warning(f"Missed schedule for profile {profile_id}, running now.")
+                    next_run = now + timedelta(minutes=interval)
+                    continue
+
+                log.info(f"⏰ AUTO TICK for profile {profile_id} ({profile['dest_name']}) at {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
+                n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True)
+                log.info(f"[auto profile {profile_id}] {n} - {m}")
+
+                next_run = next_run + timedelta(minutes=interval)
             except asyncio.CancelledError:
                 log.info(f"🛑 Profile loop {profile_id} cancelled.")
                 break
             except Exception as e:
                 log.error(f"❌ profile_loop error for {profile_id}: {e}")
                 log.error(traceback.format_exc())
-                await asyncio.sleep(5)
-        return
-
-    # حالت عادی با زمان‌بندی
-    next_run = datetime.now(TEHRAN_TZ) + timedelta(minutes=interval)
-    while True:
-        try:
-            now = datetime.now(TEHRAN_TZ)
-            sleep_seconds = (next_run - now).total_seconds()
-            if sleep_seconds > 0:
-                await asyncio.sleep(sleep_seconds)
-            else:
-                log.warning(f"Missed schedule for profile {profile_id}, running now.")
+                await asyncio.sleep(60)
+                now = datetime.now(TEHRAN_TZ)
                 next_run = now + timedelta(minutes=interval)
-                continue
-
-            log.info(f"⏰ AUTO TICK for profile {profile_id} ({profile['dest_name']}) at {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
-            n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True)
-            log.info(f"[auto profile {profile_id}] {n} - {m}")
-
-            next_run = next_run + timedelta(minutes=interval)
-        except asyncio.CancelledError:
-            log.info(f"🛑 Profile loop {profile_id} cancelled.")
-            break
-        except Exception as e:
-            log.error(f"❌ profile_loop error for {profile_id}: {e}")
-            log.error(traceback.format_exc())
-            await asyncio.sleep(60)
-            now = datetime.now(TEHRAN_TZ)
-            next_run = now + timedelta(minutes=interval)
 
 # ======================================================================
 # کیبوردها و پیام‌ها
@@ -1510,8 +1512,7 @@ T = {
                        "🔢 شماره‌گذاری: {numbers_status}\n"
                        "🔗 کوئری سفارشی: {custom_query}\n"
                        "📅 تاریخ کانفیگ: {date_cfg}\n"
-                       "📅 تاریخ پروکسی: {date_prx}\n"
-                       "⚡ حالت: {mode}",
+                       "📅 تاریخ پروکسی: {date_prx}",
         "btn_back": "🔙 برگشت",
         "btn_add_source": "➕ منبع",
         "btn_add_dest": "➕ مقصد جدید",
@@ -1534,14 +1535,13 @@ T = {
         "btn_lang": "🌐 English",
         "btn_ping_mode": "🌍 ایران‌فقط",
         "btn_runnow": "▶️ اجرا کن",
+        "btn_instant": "⚡ اپدیت لحظه‌ای",
         "btn_manual_send": "📤 ارسال دستی",
         "btn_rename_server": "📝 تغییر نام سرور",
         "btn_manage_sources": "📡 مدیریت منابع",
         "btn_toggle_numbers": "🔢 شماره‌گذاری: {status}",
         "btn_set_custom_query": "🔗 تنظیم کوئری سفارشی",
         "btn_empty": "🧹 خالی کردن",
-        "btn_real_time": "⚡ اپدیت لحظه‌ای",
-        "btn_normal_mode": "⏰ حالت عادی ({n}m)",
         "send_prompt": "📝 نام کانال (با @ یا بدون):",
         "added": "✅ {item}",
         "removed": "✅ حذف شد",
@@ -1555,7 +1555,7 @@ T = {
         "banner_ok": "✅ بنر ذخیره شد",
         "banner_err": "❌ باید {configs} یا {proxies} داشته باشه",
         "interval_ok": "✅ هر {n} دقیقه",
-        "interval_err": "❌ ۱ تا ۱۴۴۰ دقیقه",
+        "interval_err": "❌ ۱ تا ۱۴۴۰ دقیقه (۰ برای لحظه‌ای)",
         "interval_wrong": "❌ فقط عدد",
         "max_ok": "✅ حداکثر {n}",
         "max_err": "❌ ۱ تا ۵۰",
@@ -1614,8 +1614,6 @@ T = {
         "delete_confirm1": "⚠️ **آیا مطمئن هستید که می‌خواهید این پروفایل را حذف کنید؟**\n\nنام: {name}\nشناسه: {id}\n\nاین عملیات غیرقابل برگشت است و تمام داده‌های مربوط به این پروفایل (منابع، اسپانسرها، رمزها، تاریخچه) پاک می‌شود.\n\nبرای تأیید، دکمه **«بله، حذف شود»** را بزنید.",
         "delete_confirm2": "⚠️ **تأیید نهایی حذف پروفایل**\n\nنام: {name}\nشناسه: {id}\n\n**آیا از حذف این پروفایل اطمینان دارید؟**\n\nبرای حذف نهایی، دکمه **«حذف نهایی»** را بزنید.",
         "delete_cancelled": "❌ حذف پروفایل لغو شد.",
-        "real_time_enabled": "⚡ حالت اپدیت لحظه‌ای فعال شد. بات هر لحظه منابع را بررسی و ارسال می‌کند.",
-        "normal_mode_enabled": "⏰ حالت عادی با زمان‌بندی {n} دقیقه‌ای فعال شد.",
     },
     "en": {
         "welcome": "🤖 **Config & Proxy Aggregator**\n\n"
@@ -1634,8 +1632,7 @@ T = {
                        "🔢 Numbering: {numbers_status}\n"
                        "🔗 Custom Query: {custom_query}\n"
                        "📅 Config Date: {date_cfg}\n"
-                       "📅 Proxy Date: {date_prx}\n"
-                       "⚡ Mode: {mode}",
+                       "📅 Proxy Date: {date_prx}",
         "btn_back": "🔙 Back",
         "btn_add_source": "➕ Source",
         "btn_add_dest": "➕ Add Destination",
@@ -1658,14 +1655,13 @@ T = {
         "btn_lang": "🌐 فارسی",
         "btn_ping_mode": "🌍 Iran-Only",
         "btn_runnow": "▶️ Run Now",
+        "btn_instant": "⚡ Instant Update",
         "btn_manual_send": "📤 Manual Send",
         "btn_rename_server": "📝 Rename Server",
         "btn_manage_sources": "📡 Manage Sources",
         "btn_toggle_numbers": "🔢 Numbering: {status}",
         "btn_set_custom_query": "🔗 Set Custom Query",
         "btn_empty": "🧹 Empty",
-        "btn_real_time": "⚡ Real-time Update",
-        "btn_normal_mode": "⏰ Normal Mode ({n}m)",
         "send_prompt": "📝 Channel name (with/without @):",
         "added": "✅ {item}",
         "removed": "✅ Removed",
@@ -1679,7 +1675,7 @@ T = {
         "banner_ok": "✅ Banner saved",
         "banner_err": "❌ must include {configs} or {proxies}",
         "interval_ok": "✅ every {n} min",
-        "interval_err": "❌ 1-1440 min",
+        "interval_err": "❌ 1-1440 min (0 for instant)",
         "interval_wrong": "❌ number only",
         "max_ok": "✅ Max {n}",
         "max_err": "❌ 1-50",
@@ -1738,8 +1734,6 @@ T = {
         "delete_confirm1": "⚠️ **Are you sure you want to delete this profile?**\n\nName: {name}\nID: {id}\n\nThis action is irreversible and all data related to this profile (sources, sponsors, passwords, history) will be deleted.\n\nPress **«Yes, delete»** to confirm.",
         "delete_confirm2": "⚠️ **Final confirmation to delete profile**\n\nName: {name}\nID: {id}\n\n**Are you absolutely sure?**\n\nPress **«Delete permanently»** to delete.",
         "delete_cancelled": "❌ Profile deletion cancelled.",
-        "real_time_enabled": "⚡ Real-time update enabled. Bot will check and post continuously.",
-        "normal_mode_enabled": "⏰ Normal mode with {n} min interval enabled.",
     },
 }
 
@@ -1785,14 +1779,6 @@ def profile_admin_kb(profile_id):
     prx_btn = msg("btn_toggle_proxies", status=prx_status)
     num_btn = msg("btn_toggle_numbers", status=num_status)
 
-    interval = prof["interval_min"]
-    if interval == 0:
-        mode_btn = msg("btn_real_time") + " ✅"
-        mode_callback = "mode_normal"
-    else:
-        mode_btn = msg("btn_normal_mode", n=interval)
-        mode_callback = "mode_realtime"
-
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(msg("btn_manage_sources"), callback_data=f"src_list_{profile_id}", style="primary"),
          InlineKeyboardButton(msg("btn_dest_list"), callback_data=f"dl_{profile_id}", style="primary")],
@@ -1812,10 +1798,10 @@ def profile_admin_kb(profile_id):
          InlineKeyboardButton(f"📅 تاریخ کانفیگ: {date_cfg_status}", callback_data=f"tgl_date_cfg_{profile_id}", style="primary")],
         [InlineKeyboardButton(f"📅 تاریخ پروکسی: {date_prx_status}", callback_data=f"tgl_date_prx_{profile_id}", style="primary"),
          InlineKeyboardButton(msg("btn_set_custom_query"), callback_data=f"setquery_{profile_id}", style="primary")],
-        [InlineKeyboardButton(mode_btn, callback_data=f"{mode_callback}_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_stats"), callback_data=f"ast_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_test"), callback_data=f"sendtest_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_runnow"), callback_data=f"runnow_{profile_id}", style="success")],
+        [InlineKeyboardButton(msg("btn_stats"), callback_data=f"ast_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_test"), callback_data=f"sendtest_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_runnow"), callback_data=f"runnow_{profile_id}", style="success"),
+         InlineKeyboardButton(msg("btn_instant"), callback_data=f"instant_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_manual_send"), callback_data=f"manual_{profile_id}", style="primary"),
          InlineKeyboardButton(msg("btn_reset"), callback_data=f"rn_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_clear"), callback_data=f"cd1_{profile_id}", style="danger"),
@@ -2010,50 +1996,6 @@ async def on_callback(u, ctx):
         d = q.data or ""
         log.info(f"📨 Callback data: {d}")
 
-        # ===== دکمه کپی =====
-        if d.startswith("copy_"):
-            key = d[5:]
-            content = _copy_cache.get(key)
-            if content:
-                await q.answer("✅ کپی شد!")
-                await q.message.reply_text(f"<code>{content}</code>", parse_mode="HTML")
-                _copy_cache.pop(key, None)
-            else:
-                await q.answer("❌ محتوا یافت نشد")
-            return
-
-        # ===== حالت اپدیت لحظه‌ای =====
-        if d.startswith("mode_realtime_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                update_profile(profile_id, interval_min=0)
-                await q.answer(msg("real_time_enabled"))
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("mode_normal_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                update_profile(profile_id, interval_min=5)
-                await q.answer(msg("normal_mode_enabled", n=5))
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        # ===== بقیه کالبک‌ها (بدون تغییر) =====
         if d == "profiles_list":
             await show_profiles_list(q.message)
             return
@@ -2065,6 +2007,24 @@ async def on_callback(u, ctx):
 
         if d == "back_home":
             await show_profiles_list(q.message)
+            return
+
+        # ===== دکمه اپدیت لحظه‌ای =====
+        if d.startswith("instant_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                # تنظیم بازه به ۰ برای حالت لحظه‌ای
+                update_profile(profile_id, interval_min=0)
+                await q.answer("⚡ حالت اپدیت لحظه‌ای فعال شد")
+                await show_profile_admin(q.message, profile_id)
+                # ری‌استارت لوپ (با توجه به اینکه لوپ در حال اجراست، نیاز به ری‌استارت ندارد ولی برای اطمینان)
+            else:
+                await q.answer("⚠️ خطا در داده")
             return
 
         # ===== حذف پروفایل با دو مرحله تایید =====
@@ -2491,7 +2451,6 @@ async def on_callback(u, ctx):
             return
 
         if d.startswith("sp_"):
-            # generic sp_ for password list
             parts = d.split("_")
             if len(parts) >= 3:
                 try:
@@ -2528,7 +2487,6 @@ async def on_callback(u, ctx):
 
         if d.startswith("pr_"):
             try:
-                # format: pr_{profile_id}_{idx}|pwd
                 prefix, pwd = d.split("|", 1)
                 parts = prefix.split("_")
                 if len(parts) >= 3:
@@ -2734,7 +2692,7 @@ async def on_callback(u, ctx):
                     return
                 ctx.user_data["action"] = f"ai_{profile_id}"
                 current = get_profile_interval(profile_id)
-                await q.edit_message_text(f"Now: {current}m\nSend 1-1440 (یا دکمه خالی):", reply_markup=empty_button_kb(profile_id, f"empty_ai_{profile_id}"))
+                await q.edit_message_text(f"Now: {current}m\nSend 0-1440 (0 for instant):", reply_markup=empty_button_kb(profile_id, f"empty_ai_{profile_id}"))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -3052,7 +3010,7 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # fallback: show profile admin
+        # fallback
         await show_profiles_list(q.message)
 
     except Exception as e:
@@ -3092,7 +3050,6 @@ async def show_profile_admin(msg_or_q, profile_id):
     num_status = "✅" if show_num else "❌"
     date_cfg_status = "✅" if show_date_cfg else "❌"
     date_prx_status = "✅" if show_date_prx else "❌"
-    mode = "⚡ لحظه‌ای" if interval == 0 else f"⏰ {interval} دقیقه"
 
     txt = msg(
         "admin_panel",
@@ -3108,7 +3065,6 @@ async def show_profile_admin(msg_or_q, profile_id):
         custom_query=custom_query,
         date_cfg=date_cfg_status,
         date_prx=date_prx_status,
-        mode=mode,
     )
     kb = profile_admin_kb(profile_id)
     try:
@@ -3236,7 +3192,6 @@ async def on_text(u, ctx):
         new_id = create_profile(dest_name)
         await u.message.reply_text(msg("profile_added", name=dest_name))
         del ctx.user_data["action"]
-        # Start loop for new profile if auto enabled
         if ENABLE_AUTO:
             app = u.get_bot()
             app.create_task(profile_loop(app, new_id))
@@ -3347,7 +3302,7 @@ async def on_text(u, ctx):
             n = int(t)
         except:
             return await u.message.reply_text(msg("interval_wrong"))
-        if 1 <= n <= 1440:
+        if 0 <= n <= 1440:
             update_profile(profile_id, interval_min=n)
             await u.message.reply_text(msg("interval_ok", n=n))
         else:

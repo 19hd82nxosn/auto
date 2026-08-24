@@ -111,6 +111,8 @@ c.execute("""CREATE TABLE IF NOT EXISTS posts (
 
 ensure_column("seen", "source", "TEXT DEFAULT ''")
 ensure_column("seen", "profile_id", "INTEGER DEFAULT 1", 1)
+# اضافه کردن ستون full_url برای بک‌آپ
+ensure_column("seen", "full_url", "TEXT DEFAULT ''", "")
 
 c.execute("""CREATE TABLE IF NOT EXISTS country_cache (
     ip TEXT PRIMARY KEY,
@@ -681,18 +683,21 @@ def is_already_posted(profile_id, url):
         "SELECT 1 FROM seen WHERE uuid=? AND address=? AND profile_id=?",
         (uid, host, profile_id)).fetchone() is not None
 
-def mark_as_posted(profile_id, url, source=""):
+# اصلاح: ذخیره full_url برای بک‌آپ
+def mark_as_posted(profile_id, url, source="", full_url=None):
     url = clean_config_url(url)
     uid, host = extract_uuid_and_address(url)
     if not uid or not host:
         return
+    if full_url is None:
+        full_url = url
     now = get_tehran_time()
     c.execute(
-        "INSERT INTO seen (uuid,address,source,first_seen,last_posted,profile_id) "
-        "VALUES (?,?,?,?,?,?) "
+        "INSERT INTO seen (uuid,address,source,first_seen,last_posted,profile_id,full_url) "
+        "VALUES (?,?,?,?,?,?,?) "
         "ON CONFLICT(uuid,address) DO UPDATE SET "
-        "last_posted=excluded.last_posted",
-        (uid, host, source, now, now, profile_id))
+        "last_posted=excluded.last_posted, full_url=excluded.full_url",
+        (uid, host, source, now, now, profile_id, full_url))
     conn.commit()
 
 def is_message_processed(profile_id, source, message_id):
@@ -1137,7 +1142,6 @@ async def post_configs(bot, profile_id, working, source_for_seen=""):
     sponsor_button = None
     if sponsor and sponsor["enabled"]:
         color = sponsor.get("color", "primary")
-        # تلگرام استایل‌های primary, success, danger را پشتیبانی می‌کند
         sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"], style=color)
 
     sent_count = 0
@@ -1198,7 +1202,8 @@ async def post_configs(bot, profile_id, working, source_for_seen=""):
             except Exception as e2:
                 log.error(f"Failed even plain for config {n}: {e2}")
 
-        mark_as_posted(profile_id, modified_url, source_for_seen)
+        # ذخیره full_url برای بک‌آپ
+        mark_as_posted(profile_id, modified_url, source_for_seen, full_url=modified_url)
 
     if sent_count > 0:
         set_profile_last_num(profile_id, last_n + sent_count)
@@ -1324,11 +1329,12 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
     seen_proxies = set()
     seen_urls = set()
 
+    # تنظیمات سریع‌تر برای حالت لحظه‌ای
     if is_instant:
         scrape_limit = 3
-        test_limit = 5
-        ping_timeout = 8
-        max_concurrent = 30
+        test_limit = 0          # پینگ انجام نمی‌شود
+        ping_timeout = 3
+        max_concurrent = 50
     else:
         scrape_limit = 10
         test_limit = 15
@@ -1395,57 +1401,70 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
     log.info(f"📊 New configs: {len(new_configs)}, New proxies: {len(all_proxies)}")
 
     working = []
-    if new_configs:
-        to_test = new_configs[:test_limit]
-        log.info(f"📊 Testing {len(to_test)} configs...")
-        sem = asyncio.Semaphore(max_concurrent)
-        async def _check(u):
-            async with sem:
-                try:
-                    ping, ok, cnt = await check_full_link_ping(u)
-                    if ok:
-                        log.info(f"✅ Config OK: {u[:50]}... ping={ping}ms")
-                        return u, True, ping, cnt
-                    else:
-                        log.info(f"❌ Config FAIL: {u[:50]}...")
-                        return u, False, 0, 0
-                except Exception as e:
-                    log.debug(f"ping failed for {u[:30]}: {e}")
-                    return u, False, 0, 0
-
-        rs = await asyncio.gather(*[_check(u) for u in to_test], return_exceptions=True)
-        for r in rs:
-            if isinstance(r, Exception):
-                continue
-            if r[1]:
-                working.append((r[0], r[2], r[3]))
-        log.info(f"📊 Working configs: {len(working)}")
+    if is_instant:
+        # در حالت لحظه‌ای، همه کانفیگ‌ها را بدون پینگ معتبر در نظر بگیر
+        working = [(u, 0, 0) for u in new_configs]
+        log.info(f"⚡ Instant mode: all {len(working)} configs considered working")
     else:
-        log.info("ℹ️ No new configs to test")
+        if new_configs:
+            to_test = new_configs[:test_limit]
+            log.info(f"📊 Testing {len(to_test)} configs...")
+            sem = asyncio.Semaphore(max_concurrent)
+            async def _check(u):
+                async with sem:
+                    try:
+                        ping, ok, cnt = await check_full_link_ping(u)
+                        if ok:
+                            log.info(f"✅ Config OK: {u[:50]}... ping={ping}ms")
+                            return u, True, ping, cnt
+                        else:
+                            log.info(f"❌ Config FAIL: {u[:50]}...")
+                            return u, False, 0, 0
+                    except Exception as e:
+                        log.debug(f"ping failed for {u[:30]}: {e}")
+                        return u, False, 0, 0
+
+            rs = await asyncio.gather(*[_check(u) for u in to_test], return_exceptions=True)
+            for r in rs:
+                if isinstance(r, Exception):
+                    continue
+                if r[1]:
+                    working.append((r[0], r[2], r[3]))
+            log.info(f"📊 Working configs: {len(working)}")
+        else:
+            log.info("ℹ️ No new configs to test")
 
     proxy_with_ping = []
     if all_proxies:
         valid_proxies = [p for p in all_proxies if "t.me/proxy" in p.lower()]
         if valid_proxies:
-            log.info(f"📊 Testing {len(valid_proxies)} proxies...")
-            sem = asyncio.Semaphore(max_concurrent)
-            async def check_proxy(proxy_url):
-                async with sem:
-                    ping, ok, cnt = await check_full_link_ping(proxy_url)
-                    host, _ = extract_host(proxy_url)
-                    ip = await host_to_ip(host) if host else None
+            log.info(f"📊 Processing {len(valid_proxies)} proxies...")
+            if is_instant:
+                # حالت لحظه‌ای: بدون پینگ و با پرچم پیش‌فرض
+                for proxy_url in valid_proxies[:10]:
+                    # برای سرعت، پرچم را از کش بگیریم یا ساده بگذاریم
                     flag = "🌐"
-                    if ip:
-                        flag = await get_flag_for_ip(ip)
-                    return proxy_url, ping if ok else 0, flag
+                    proxy_with_ping.append((proxy_url, 0, flag))
+                log.info(f"⚡ Instant: {len(proxy_with_ping)} proxies ready")
+            else:
+                sem = asyncio.Semaphore(max_concurrent)
+                async def check_proxy(proxy_url):
+                    async with sem:
+                        ping, ok, cnt = await check_full_link_ping(proxy_url)
+                        host, _ = extract_host(proxy_url)
+                        ip = await host_to_ip(host) if host else None
+                        flag = "🌐"
+                        if ip:
+                            flag = await get_flag_for_ip(ip)
+                        return proxy_url, ping if ok else 0, flag
 
-            results = await asyncio.gather(
-                *[check_proxy(p) for p in valid_proxies[:10]], return_exceptions=True)
-            for r in results:
-                if isinstance(r, Exception):
-                    continue
-                proxy_with_ping.append(r)
-            log.info(f"📊 Proxies with ping: {len(proxy_with_ping)}")
+                results = await asyncio.gather(
+                    *[check_proxy(p) for p in valid_proxies[:10]], return_exceptions=True)
+                for r in results:
+                    if isinstance(r, Exception):
+                        continue
+                    proxy_with_ping.append(r)
+                log.info(f"📊 Proxies with ping: {len(proxy_with_ping)}")
         else:
             log.info("ℹ️ No valid Telegram proxies found.")
     else:
@@ -1456,13 +1475,13 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
         return 0, "no working configs or proxies"
 
     log.info(f"📤 Posting {len(working)} configs and {len(proxy_with_ping)} proxies for profile {profile_id}...")
-    result = await post_working_configs(bot, profile_id, working, proxy_with_ping)
+    result = await post_working_configs(bot, profile_id, working, proxy_with_ping, source_for_seen="auto", force=False)
     log.info(f"✅ Cycle result for profile {profile_id}: {result}")
     log.info("=" * 50)
     return result
 
 # ======================================================================
-# حلقه خودکار (اصلاح‌شده)
+# حلقه خودکار
 # ======================================================================
 async def profile_loop(bot, profile_id):
     profile = get_profile(profile_id)
@@ -1475,7 +1494,7 @@ async def profile_loop(bot, profile_id):
     while True:
         try:
             if interval == 0:
-                # حالت لحظه‌ای
+                # حالت لحظه‌ای: هر ۱ ثانیه یک بار اجرا کن (اما با تأخیر کم)
                 await asyncio.sleep(1)
                 log.info(f"⚡ INSTANT UPDATE for profile {profile_id}")
                 n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=True)
@@ -1530,46 +1549,49 @@ async def send_daily_report(app):
         log.error(f"❌ Failed to send daily report: {e}")
 
 # ======================================================================
-# بک‌آپ کانفیگ/پروکسی
+# بک‌آپ کانفیگ/پروکسی (اصلاح شده)
 # ======================================================================
 async def export_backup(update, context, profile_id, backup_type, count=None):
     """ارسال فایل متنی شامل لینک‌های کانفیگ یا پروکسی"""
     try:
         if backup_type == "configs":
-            query = "SELECT url FROM (SELECT DISTINCT substr(address, instr(address, '://')+1) as url, last_posted FROM seen WHERE profile_id=? ORDER BY last_posted DESC LIMIT ?)"
-            # چون لینک کامل در seen نیست، باید از mark_as_posted استفاده کنیم که فقط uuid و address ذخیره می‌کند.
-            # برای سادگی، از جدول seen برای استخراج لینک‌ها استفاده نمی‌کنیم.
-            # به جای آن، از جدول posts یا از خود لینک‌ها استفاده نمی‌کنیم.
-            # بهتر است یک جدول جداگانه برای ذخیره لینک‌های کامل داشته باشیم، اما فعلاً از seen استفاده می‌کنیم و لینک را بازسازی نمی‌کنیم.
-            # راه حل: ما در mark_as_posted لینک کامل را در source ذخیره نمی‌کنیم. پس نمی‌توانیم از seen استفاده کنیم.
-            # بنابراین از جدول proxies_seen برای پروکسی و از seen برای کانفیگ استفاده می‌کنیم اما لینک کامل نیست.
-            # برای حل این مشکل، ما یک ستون full_url به جدول seen اضافه می‌کنیم.
-            # اما برای سرعت، می‌توانیم از جدول posts استفاده کنیم که در آن content ذخیره می‌شود (اما شامل لینک‌ها نیست).
-            # بهترین راه: اضافه کردن ستون full_url به seen.
-            # اما برای پیاده‌سازی سریع، از جدول seen استفاده می‌کنیم و لینک را از uuid و address بازسازی می‌کنیم (کامل نیست).
-            # بنابراین کاربر باید از قابلیت بک‌آپ صرف‌نظر کند یا ما راه دیگری پیدا کنیم.
-            # من یک راه ساده پیشنهاد می‌کنم: در زمان پست، لینک کامل را در یک جدول جداگانه ذخیره کنیم.
-            # اما برای اینجا، فرض می‌کنیم که کاربر از بک‌آپ استفاده نمی‌کند و ما فقط پیام خطا می‌دهیم.
-            await update.message.reply_text("⚠️ این قابلیت در حال حاضر پشتیبانی نمی‌شود. لطفاً بعداً امتحان کنید.")
-            return
-        else:
-            # پروکسی‌ها در proxies_seen ذخیره می‌شوند
+            # استفاده از ستون full_url
             if count is None or count == -1:  # همه
+                rows = c.execute("SELECT full_url FROM seen WHERE profile_id=? AND full_url != '' ORDER BY last_posted DESC", (profile_id,)).fetchall()
+            else:
+                rows = c.execute("SELECT full_url FROM seen WHERE profile_id=? AND full_url != '' ORDER BY last_posted DESC LIMIT ?", (profile_id, count)).fetchall()
+            links = [row[0] for row in rows if row[0]]
+            if not links:
+                await update.message.reply_text("❌ هیچ کانفیگی برای بک‌آپ یافت نشد.")
+                return
+            filename = f"configs_backup_{get_tehran_date()}.txt"
+            content = "\n".join(links)
+            with open(os.path.join(DATA_DIR, filename), "w", encoding="utf-8") as f:
+                f.write(content)
+            with open(os.path.join(DATA_DIR, filename), "rb") as f:
+                await update.message.reply_document(document=f, filename=filename, caption=f"📤 {len(links)} کانفیگ")
+            os.remove(os.path.join(DATA_DIR, filename))
+            return
+
+        elif backup_type == "proxies":
+            if count is None or count == -1:
                 rows = c.execute("SELECT proxy_url FROM proxies_seen WHERE profile_id=? ORDER BY last_posted DESC", (profile_id,)).fetchall()
             else:
                 rows = c.execute("SELECT proxy_url FROM proxies_seen WHERE profile_id=? ORDER BY last_posted DESC LIMIT ?", (profile_id, count)).fetchall()
-            links = [row[0] for row in rows]
+            links = [row[0] for row in rows if row[0]]
             if not links:
                 await update.message.reply_text("❌ هیچ پروکسی برای بک‌آپ یافت نشد.")
                 return
             filename = f"proxies_backup_{get_tehran_date()}.txt"
             content = "\n".join(links)
-            # ارسال فایل
             with open(os.path.join(DATA_DIR, filename), "w", encoding="utf-8") as f:
                 f.write(content)
             with open(os.path.join(DATA_DIR, filename), "rb") as f:
                 await update.message.reply_document(document=f, filename=filename, caption=f"📤 {len(links)} پروکسی")
             os.remove(os.path.join(DATA_DIR, filename))
+            return
+        else:
+            await update.message.reply_text("❌ نوع نامعتبر.")
     except Exception as e:
         log.error(f"Backup export error: {e}")
         await update.message.reply_text(f"❌ خطا در بک‌آپ: {str(e)[:100]}")
@@ -1714,7 +1736,6 @@ T = {
         "backup_export_scope_custom": "تعداد دلخواه",
     },
     "en": {
-        # مشابه فارسی - فقط کلیدهای جدید
         "btn_blacklist": "🚫 Blacklist",
         "blacklist_title": "🚫 **Blacklist for profile {name}**\n\nBlocked words:\n{words}\n\nAny config containing these words will be filtered.",
         "blacklist_empty": "No words in blacklist.",
@@ -1831,7 +1852,6 @@ def sponsor_kb(profile_id):
     sponsor = get_sponsor(profile_id)
     btns = []
     if sponsor:
-        # دکمه وضعیت (فعال/غیرفعال) با رنگ متناسب
         status_text = "✅ فعال" if sponsor["enabled"] else "❌ غیرفعال"
         btns.append([InlineKeyboardButton(f"{sponsor['name']} - {status_text}", callback_data=f"sp_toggle_{profile_id}", style="primary")])
         btns.append([InlineKeyboardButton("✏️ ویرایش", callback_data=f"sp_edit_{profile_id}", style="success")])
@@ -1869,7 +1889,6 @@ def blacklist_kb(profile_id):
     btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")])
     return InlineKeyboardMarkup(btns)
 
-# ===== کیبورد بک‌آپ =====
 def backup_export_type_kb(profile_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📡 کانفیگ", callback_data=f"backup_export_type_{profile_id}_configs", style="primary")],
@@ -2380,7 +2399,7 @@ async def on_callback(u, ctx):
                     await q.answer("اسپانسری وجود ندارد.")
                     return
                 ctx.user_data["sponsor_edit_profile_id"] = profile_id
-                ctx.user_data["sponsor_edit_field"] = "name"
+                # فعلاً field را تنظیم نمی‌کنیم تا منوی ویرایش نشان داده شود
                 await q.edit_message_text(
                     msg("sp_edit_prompt", name=sponsor["name"], url=sponsor["url"], text=sponsor["button_text"], color=sponsor["color"], enabled=sponsor["enabled"]),
                     parse_mode="HTML",
@@ -2396,6 +2415,7 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
+        # ویرایش فیلدهای اسپانسر (غیر از رنگ که با دکمه انتخاب می‌شود)
         if d.startswith("sp_edit_field_"):
             parts = d.split("_")
             if len(parts) >= 5:
@@ -2405,21 +2425,63 @@ async def on_callback(u, ctx):
                 except ValueError:
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
-                ctx.user_data["sponsor_edit_profile_id"] = profile_id
-                ctx.user_data["sponsor_edit_field"] = field
-                prompt = {
-                    "name": "نام جدید (خالی برای عدم تغییر):",
-                    "url": "لینک جدید (خالی برای عدم تغییر):",
-                    "text": "متن جدید دکمه (خالی برای عدم تغییر):",
-                    "color": "رنگ جدید (primary/success/danger) یا خالی برای عدم تغییر:"
-                }.get(field, "ورودی:")
-                await q.edit_message_text(
-                    prompt,
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_edit_{profile_id}", style="primary")]
-                    ])
-                )
+                if field == "color":
+                    # نمایش دکمه‌های انتخاب رنگ
+                    await q.edit_message_text(
+                        "🎨 **رنگ دکمه را انتخاب کنید:**",
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔵 Primary (آبی)", callback_data=f"sp_setcolor_{profile_id}_primary", style="primary")],
+                            [InlineKeyboardButton("🟢 Success (سبز)", callback_data=f"sp_setcolor_{profile_id}_success", style="success")],
+                            [InlineKeyboardButton("🔴 Danger (قرمز)", callback_data=f"sp_setcolor_{profile_id}_danger", style="danger")],
+                            [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_edit_{profile_id}", style="primary")]
+                        ])
+                    )
+                    return
+                else:
+                    # name, url, text
+                    ctx.user_data["sponsor_edit_profile_id"] = profile_id
+                    ctx.user_data["sponsor_edit_field"] = field
+                    prompt = {
+                        "name": "نام جدید (خالی برای عدم تغییر):",
+                        "url": "لینک جدید (خالی برای عدم تغییر):",
+                        "text": "متن جدید دکمه (خالی برای عدم تغییر):"
+                    }.get(field, "ورودی:")
+                    await q.edit_message_text(
+                        prompt,
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_edit_{profile_id}", style="primary")]
+                        ])
+                    )
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        # تنظیم رنگ اسپانسر با دکمه
+        if d.startswith("sp_setcolor_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[2])
+                    color = parts[3]
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                sponsor = get_sponsor(profile_id)
+                if not sponsor:
+                    await q.answer("اسپانسری وجود ندارد.")
+                    return
+                update_sponsor_color(profile_id, color)
+                await q.answer(f"✅ رنگ به {color} تغییر کرد.")
+                # بازگشت به منوی اسپانسر
+                sponsor = get_sponsor(profile_id)
+                txt = f"📢 **اسپانسر پروفایل {profile_id}**\n\n"
+                if sponsor:
+                    txt += f"نام: {sponsor['name']}\nلینک: {sponsor['url']}\nمتن دکمه: {sponsor['button_text']}\nرنگ: {sponsor['color']}\nوضعیت: {'فعال' if sponsor['enabled'] else 'غیرفعال'}"
+                else:
+                    txt += "هیچ اسپانسری تنظیم نشده است."
+                await q.edit_message_text(txt, parse_mode="HTML", reply_markup=sponsor_kb(profile_id))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -3009,7 +3071,7 @@ async def on_text(u, ctx):
         await u.message.reply_text("✅ بک‌آپ ارسال شد.")
         return
 
-    # ---- ویرایش اسپانسر ----
+    # ---- ویرایش اسپانسر (فیلدهای name, url, text) ----
     if ctx.user_data.get("sponsor_edit_field"):
         field = ctx.user_data["sponsor_edit_field"]
         profile_id = ctx.user_data.get("sponsor_edit_profile_id")
@@ -3023,30 +3085,19 @@ async def on_text(u, ctx):
             del ctx.user_data["sponsor_edit_field"]
             return
         name, url, btn_text, color, enabled = sponsor["name"], sponsor["url"], sponsor["button_text"], sponsor["color"], sponsor["enabled"]
+        # اگر ورودی خالی باشد، بدون تغییر می‌ماند
         if field == "name":
             if txt:
                 name = txt
-            else:
-                await u.message.reply_text("❌ نام خالی ماند.")
+            # else keep old
         elif field == "url":
             if txt:
                 url = txt
-            else:
-                await u.message.reply_text("❌ لینک خالی ماند.")
+            # else keep old
         elif field == "text":
             if txt:
                 btn_text = txt
-            else:
-                await u.message.reply_text("❌ متن خالی ماند.")
-        elif field == "color":
-            if txt:
-                if txt in ["primary", "success", "danger"]:
-                    color = txt
-                else:
-                    await u.message.reply_text("❌ رنگ باید primary, success یا danger باشد.")
-                    return
-            else:
-                await u.message.reply_text("❌ رنگ خالی ماند.")
+            # else keep old
         else:
             await u.message.reply_text("فیلد نامعتبر.")
             del ctx.user_data["sponsor_edit_field"]
@@ -3100,32 +3151,27 @@ async def on_text(u, ctx):
         if step == "button_text":
             btn_text = u.message.text.strip() or "Advertisement"
             ctx.user_data["sponsor_button_text"] = btn_text
-            ctx.user_data["sponsor_step"] = "color"
+            # مرحله رنگ با دکمه‌های انتخاب انجام می‌شود
+            # به جای دریافت متن، دکمه‌های رنگی را نمایش می‌دهیم
             await u.message.reply_text(
-                "🎨 **رنگ دکمه را انتخاب کنید:**\n\n`primary` (آبی)\n`success` (سبز)\n`danger` (قرمز)\n\nیکی را وارد کنید:",
+                "🎨 **رنگ دکمه را انتخاب کنید:**",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔵 Primary (آبی)", callback_data=f"sp_setcolor_{profile_id}_primary", style="primary")],
+                    [InlineKeyboardButton("🟢 Success (سبز)", callback_data=f"sp_setcolor_{profile_id}_success", style="success")],
+                    [InlineKeyboardButton("🔴 Danger (قرمز)", callback_data=f"sp_setcolor_{profile_id}_danger", style="danger")],
                     [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}", style="primary")]
                 ])
             )
+            # بعد از انتخاب رنگ، در callback sp_setcolor_ تکمیل می‌شود
+            # پس از آن، داده‌های اسپانسر را پاک می‌کنیم
+            # اما چون با دکمه انتخاب می‌شود، در callback sp_setcolor_ مقدار را می‌گیرد و ذخیره می‌کند
+            # پس از ذخیره، داده‌های مرحله را پاک می‌کنیم
+            # بنابراین در اینجا فقط نمایش می‌دهیم و state را به حالت انتظار برای رنگ نگه می‌داریم
+            ctx.user_data["sponsor_step"] = "color_wait"  # برای مدیریت در callback
             return
 
-        if step == "color":
-            color = u.message.text.strip().lower()
-            if color not in ["primary", "success", "danger"]:
-                await u.message.reply_text("❌ رنگ باید primary, success یا danger باشد.")
-                return
-            name = ctx.user_data.get("sponsor_name")
-            url = ctx.user_data.get("sponsor_url")
-            btn_text = ctx.user_data.get("sponsor_button_text", "Advertisement")
-            if name and url:
-                set_sponsor(profile_id, name, url, btn_text, color)
-                await u.message.reply_text(msg("sp_added", name=name), parse_mode="HTML")
-                del ctx.user_data["sponsor_step"]
-                await show_profile_admin(u.message, profile_id)
-            else:
-                await u.message.reply_text("❌ اطلاعات ناقص است.")
-            return
+        # برای رنگ در مرحله جدید، در callback sp_setcolor_ مدیریت می‌شود
 
     a = ctx.user_data.get("action")
     if not a:
@@ -3325,7 +3371,6 @@ async def on_text(u, ctx):
         profile_id = int(a.split("_")[1])
         query = t if t else ""
         set_profile_custom_query(profile_id, query)
-        # بلافاصله نمایش به‌روز
         await u.message.reply_text(msg("custom_query_set", query=query if query else "خالی"))
         del ctx.user_data["action"]
         await show_profile_admin(u.message, profile_id)

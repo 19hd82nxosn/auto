@@ -992,14 +992,24 @@ async def check_and_auto_backup(profile_id):
                         filename=filename,
                         caption=f"📤 بک‌آپ خودکار پروفایل {profile_name} (ID:{profile_id}) - {start_num} تا {end_num} (تعداد: {len(links)})"
                     )
-                # فایل را حذف نمی‌کنیم تا روی سرور بماند
-                # os.remove(filepath)
+                # حذف فایل بعد از ۳۰ دقیقه
+                asyncio.create_task(delete_file_after_delay(filepath, 1800))
             else:
                 log.warning("BOT_REF is None, cannot send backup.")
 
         set_profile_last_backup_count(profile_id, total)
     except Exception as e:
         log.error(f"Auto backup check error for profile {profile_id}: {e}")
+
+async def delete_file_after_delay(filepath, delay_seconds):
+    """حذف فایل بعد از مدت زمان مشخص (به ثانیه)"""
+    await asyncio.sleep(delay_seconds)
+    try:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+            log.info(f"🗑️ Deleted file: {filepath}")
+    except Exception as e:
+        log.error(f"Error deleting file {filepath}: {e}")
 
 def is_message_processed(profile_id, source, message_id):
     r = c.execute("SELECT 1 FROM processed_messages WHERE source=? AND message_id=? AND profile_id=?", (source, message_id, profile_id)).fetchone()
@@ -4230,6 +4240,86 @@ async def process_manual_text(u, message, profile_id, is_document=False):
         await p.edit_text(f"❌ {str(e)[:200]}")
 
 # ======================================================================
+# پاکسازی دوره‌ای فایل‌ها و لاگ‌ها
+# ======================================================================
+async def periodic_cleanup():
+    """پاکسازی دوره‌ای: حذف خطوط قدیمی لاگ، حذف فایل‌های اضافی (غیر از دیتابیس)"""
+    while True:
+        try:
+            # 1. پاکسازی لاگ: نگه‌داری فقط ۳۰ دقیقه آخر
+            log_file_path = os.path.join(DATA_DIR, "bot.log")
+            if os.path.exists(log_file_path):
+                now_utc = datetime.utcnow()
+                cutoff_utc = now_utc - timedelta(minutes=30)
+                lines_to_keep = []
+                with open(log_file_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        match = re.match(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', line)
+                        if match:
+                            ts_str = match.group(1)
+                            try:
+                                ts = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')
+                                if ts >= cutoff_utc:
+                                    lines_to_keep.append(line)
+                            except:
+                                # اگر تاریخ معتبر نبود، نگه داریم (احتیاط)
+                                lines_to_keep.append(line)
+                        else:
+                            # خطوط بدون تاریخ (مثل header) نگه داشته شوند
+                            lines_to_keep.append(line)
+                # اگر تعداد خطوط تغییر کرد، بازنویسی کن
+                if len(lines_to_keep) > 0:
+                    # مطمئن شویم که حداقل یک خط آخرین لاگ‌ها را نگه می‌دارد
+                    with open(log_file_path, 'w', encoding='utf-8') as f:
+                        f.writelines(lines_to_keep)
+                else:
+                    # اگر همه خطوط حذف شدند، یک خط خالی ننویسیم (فایل را خالی می‌کنیم)
+                    with open(log_file_path, 'w', encoding='utf-8') as f:
+                        pass
+
+            # 2. حذف فایل‌های موقت (غیر از bot.db) که بیش از ۱ ساعت از ایجادشان گذشته
+            # (فایل‌های بک‌آپ خودکار و دستی که ممکن است باقی مانده باشند)
+            now_ts = time.time()
+            for fname in os.listdir(DATA_DIR):
+                if fname == "bot.db":
+                    continue
+                filepath = os.path.join(DATA_DIR, fname)
+                if os.path.isfile(filepath):
+                    # اگر فایل لاگ باشد، قبلاً مدیریت شده، ولی باز هم چک می‌کنیم
+                    if fname == "bot.log":
+                        continue
+                    # فایل‌های بک‌آپ و لاگ‌های موقت
+                    if (fname.startswith("configs_backup_") or 
+                        fname.startswith("proxies_backup_") or 
+                        fname.startswith("logs_") or 
+                        fname.startswith("bot_backup_")):
+                        # حذف فایل‌های قدیمی‌تر از ۱ ساعت
+                        try:
+                            mtime = os.path.getmtime(filepath)
+                            if now_ts - mtime > 3600:  # 1 ساعت
+                                os.remove(filepath)
+                                log.info(f"🗑️ Cleanup: deleted old file {fname}")
+                        except Exception as e:
+                            log.warning(f"Could not delete {fname}: {e}")
+
+            # 3. پاکسازی فایل‌های داخل backup_dir (در صورت وجود)
+            if os.path.exists(BACKUP_DIR):
+                for fname in os.listdir(BACKUP_DIR):
+                    filepath = os.path.join(BACKUP_DIR, fname)
+                    if os.path.isfile(filepath):
+                        try:
+                            mtime = os.path.getmtime(filepath)
+                            if now_ts - mtime > 3600:  # 1 ساعت
+                                os.remove(filepath)
+                                log.info(f"🗑️ Cleanup: deleted old backup file {fname}")
+                        except Exception as e:
+                            log.warning(f"Could not delete {fname}: {e}")
+
+        except Exception as e:
+            log.error(f"Error in periodic_cleanup: {e}")
+        await asyncio.sleep(300)  # هر ۵ دقیقه اجرا شود
+
+# ======================================================================
 # راه‌اندازی
 # ======================================================================
 ENABLE_AUTO = True
@@ -4265,6 +4355,10 @@ async def post_init(app):
             log.info(f"⏰ Creating auto loop task for profile {prof['id']} ({prof['dest_name']})")
             app.create_task(profile_loop(app.bot, prof["id"]))
         log.info("⏰ Scheduler started for all profiles")
+
+    # شروع تسک پاکسازی دوره‌ای
+    app.create_task(periodic_cleanup())
+    log.info("🧹 Periodic cleanup task started")
 
 def cfg_get(k, default=""):
     r = c.execute("SELECT v FROM cfg WHERE k=?", (k,)).fetchone()

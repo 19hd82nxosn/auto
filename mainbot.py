@@ -1244,13 +1244,27 @@ async def send_to_destination(bot, profile_id, text, buttons=None):
             log.info(f"✅ Sent chunk {idx+1}/{len(chunks)} to {dest} with HTML")
         except Exception as e:
             log.error(f"❌ HTML failed for {dest} chunk {idx+1}: {e}")
+            # اگر HTML خطا داد، با remove tags و ارسال ساده اما با ساختار مناسب
+            plain = re.sub(r'<[^>]+>', '', chunk)
+            # تلاش مجدد با HTML برای بخش‌های بعدی (با حذف تگ‌های مشکل‌دار)
             try:
-                plain = re.sub(r'<[^>]+>', '', chunk)
-                await bot.send_message(dest, plain[:4096], disable_web_page_preview=True)
-                log.info(f"✅ Sent chunk {idx+1}/{len(chunks)} to {dest} (plain)")
-            except Exception as e3:
-                log.error(f"❌ Even plain failed for {dest} chunk {idx+1}: {e3}")
-                success = False
+                # سعی می‌کنیم تگ‌های مشکوک را پاک کنیم و دوباره HTML بفرستیم
+                safe_html = re.sub(r'<pre>(.*?)</pre>', r'<pre>\1</pre>', chunk, flags=re.DOTALL)
+                await bot.send_message(
+                    dest, safe_html,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup if idx == 0 else None,
+                    disable_web_page_preview=True
+                )
+                log.info(f"✅ Sent chunk {idx+1}/{len(chunks)} to {dest} with cleaned HTML")
+            except Exception as e2:
+                # اگر باز هم خطا داد، ارسال ساده
+                try:
+                    await bot.send_message(dest, plain[:4096], disable_web_page_preview=True)
+                    log.info(f"✅ Sent chunk {idx+1}/{len(chunks)} to {dest} (plain)")
+                except Exception as e3:
+                    log.error(f"❌ Even plain failed for {dest} chunk {idx+1}: {e3}")
+                    success = False
     return success
 
 def split_text(text, max_len=4096):
@@ -1281,7 +1295,7 @@ def split_text(text, max_len=4096):
     return chunks
 
 # ======================================================================
-# ارسال کانفیگ‌ها
+# ارسال کانفیگ‌ها (با رفع مشکل خرابی ترکیب و بنر)
 # ======================================================================
 async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplicate=False, is_instant=False):
     if not working:
@@ -1312,7 +1326,7 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
 
     sponsor = get_sponsor(profile_id)
     sponsor_button = None
-    if sponsor:
+    if sponsor and sponsor["enabled"]:
         btn_style = "success" if sponsor["enabled"] else "danger"
         sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"], style=btn_style)
 
@@ -1348,12 +1362,14 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
         except KeyError:
             full_text = f"✦ V2Ray Config List\n\n{configs_text}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
 
+        # اطمینان از اینکه بنر کامل است و اسپانسر اضافه می‌شود
         buttons = []
         if sponsor_button:
             buttons.append(sponsor_button)
 
         reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
 
+        # ارسال با تلاش مجدد در صورت خطای HTML
         try:
             await bot.send_message(
                 dest,
@@ -1366,13 +1382,25 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
             log.info(f"✅ Sent config #{n} to {dest}")
         except Exception as e:
             log.error(f"Failed to send config {n}: {e}")
+            # تلاش با متن ساده (بدون HTML) اما با حفظ ساختار
+            plain_text = re.sub(r'<[^>]+>', '', full_text)
             try:
-                plain = re.sub(r'<[^>]+>', '', full_text)
-                await bot.send_message(dest, plain[:4096], disable_web_page_preview=True)
+                await bot.send_message(
+                    dest,
+                    plain_text,
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True
+                )
                 sent_count += 1
-                log.info(f"✅ Sent config #{n} to {dest} (plain)")
+                log.info(f"✅ Sent config #{n} to {dest} (plain text with button)")
             except Exception as e2:
-                log.error(f"Failed even plain for config {n}: {e2}")
+                # اگر باز هم خطا، بدون دکمه
+                try:
+                    await bot.send_message(dest, plain_text[:4096], disable_web_page_preview=True)
+                    sent_count += 1
+                    log.info(f"✅ Sent config #{n} to {dest} (plain text only)")
+                except Exception as e3:
+                    log.error(f"Failed even plain text for config {n}: {e3}")
 
         if not skip_duplicate or not is_already_posted(profile_id, modified_url):
             mark_as_posted(profile_id, modified_url, source_for_seen, full_url=modified_url)
@@ -1416,7 +1444,7 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False):
 
     sponsor = get_sponsor(profile_id)
     sponsor_button = None
-    if sponsor:
+    if sponsor and sponsor["enabled"]:
         btn_style = "success" if sponsor["enabled"] else "danger"
         sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"], style=btn_style)
     buttons = [sponsor_button] if sponsor_button else None
@@ -1476,7 +1504,7 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
     return total_configs, result_msg
 
 # ======================================================================
-# سیکل کامل
+# سیکل کامل (با تست لحظه‌ای و اسکرپ همه کانال‌ها)
 # ======================================================================
 async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=False):
     log.info("=" * 50)
@@ -1508,9 +1536,10 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
     seen_proxies = set()
     seen_urls = set()
 
+    # ========== تنظیمات بر اساس حالت ==========
     if is_instant:
-        scrape_limit = len(sources)  # همه کانال‌ها
-        test_limit = 0
+        scrape_limit = len(sources)          # همه کانال‌ها
+        test_limit = 30                      # تست حداکثر ۳۰ کانفیگ
         ping_timeout = 3
         max_concurrent = 50
     else:
@@ -1518,6 +1547,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
         test_limit = 15
         ping_timeout = 10
         max_concurrent = 20
+    # ==========================================
 
     async def scrape_one(src):
         config_links, proxy_links = await scrape_channel_with_retry(profile_id, src, only_new=True)
@@ -1586,8 +1616,34 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
 
     working = []
     if is_instant:
-        working = [(u, 0, 0) for u in new_configs]
-        log.info(f"⚡ Instant mode: all {len(working)} configs considered working")
+        # تست پینگ برای همه کانفیگ‌های جدید (با محدودیت test_limit)
+        if new_configs:
+            to_test = new_configs[:test_limit]
+            log.info(f"⚡ Testing {len(to_test)} configs instantly...")
+            sem = asyncio.Semaphore(max_concurrent)
+            async def _check(u):
+                async with sem:
+                    try:
+                        ping, ok, cnt = await check_full_link_ping(u)
+                        if ok:
+                            log.info(f"✅ Config OK: {u[:50]}... ping={ping}ms")
+                            return u, True, ping, cnt
+                        else:
+                            log.info(f"❌ Config FAIL: {u[:50]}...")
+                            return u, False, 0, 0
+                    except Exception as e:
+                        log.debug(f"ping failed for {u[:30]}: {e}")
+                        return u, False, 0, 0
+
+            rs = await asyncio.gather(*[_check(u) for u in to_test], return_exceptions=True)
+            for r in rs:
+                if isinstance(r, Exception):
+                    continue
+                if r[1]:
+                    working.append((r[0], r[2], r[3]))
+            log.info(f"📊 Working configs from instant test: {len(working)}")
+        else:
+            log.info("ℹ️ No new configs to test")
     else:
         if new_configs:
             to_test = new_configs[:test_limit]
@@ -1617,16 +1673,30 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
         else:
             log.info("ℹ️ No new configs to test")
 
+    # ===== پروکسی‌ها (با تست در حالت لحظه‌ای) =====
     proxy_with_ping = []
     if all_proxies:
         valid_proxies = [p for p in all_proxies if "t.me/proxy" in p.lower()]
         if valid_proxies:
             log.info(f"📊 Processing {len(valid_proxies)} proxies...")
             if is_instant:
-                for proxy_url in valid_proxies:
-                    flag = "🌐"
-                    proxy_with_ping.append((proxy_url, 0, flag))
-                log.info(f"⚡ Instant: {len(proxy_with_ping)} proxies ready")
+                sem = asyncio.Semaphore(max_concurrent)
+                async def check_proxy_instant(proxy_url):
+                    async with sem:
+                        ping, ok, cnt = await check_full_link_ping(proxy_url)
+                        host, _ = extract_host(proxy_url)
+                        ip = await host_to_ip(host) if host else None
+                        flag = "🌐"
+                        if ip:
+                            flag = await get_flag_for_ip(ip)
+                        return proxy_url, ping if ok else 0, flag
+                results = await asyncio.gather(
+                    *[check_proxy_instant(p) for p in valid_proxies], return_exceptions=True)
+                for r in results:
+                    if isinstance(r, Exception):
+                        continue
+                    proxy_with_ping.append(r)
+                log.info(f"⚡ Instant proxies with ping: {len(proxy_with_ping)}")
             else:
                 sem = asyncio.Semaphore(max_concurrent)
                 async def check_proxy(proxy_url):
@@ -1729,7 +1799,7 @@ async def profile_loop(bot, profile_id):
             await asyncio.sleep(60)
 
 # ======================================================================
-# توابع دریافت لاگ (با بازه‌های زمانی)
+# توابع دریافت لاگ با بازه‌های زمانی
 # ======================================================================
 async def get_logs(update, context, profile_id, log_type="full", time_range_minutes=30):
     log_file_path = os.path.join(DATA_DIR, "bot.log")

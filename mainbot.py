@@ -287,7 +287,7 @@ def migrate_old_config():
 migrate_old_config()
 
 # ======================================================================
-# توابع پروفایل (با استفاده از نام ستون‌ها به جای ایندکس)
+# توابع پروفایل
 # ======================================================================
 def get_profiles():
     c.execute("SELECT * FROM profiles ORDER BY id")
@@ -499,7 +499,6 @@ def get_profile_timer(profile_id):
             remaining = (expiry - now).total_seconds() / 60
             return expiry, int(remaining)
         else:
-            # expired, clear it
             clear_profile_timer(profile_id)
             return None, 0
     except Exception:
@@ -795,7 +794,6 @@ def mark_as_posted(profile_id, url, source="", full_url=None):
     asyncio.create_task(check_and_auto_backup(profile_id))
 
 async def check_and_auto_backup(profile_id):
-    """ارسال خودکار بک‌آپ برای هر ۱۰۰۰ کانفیگ جدید"""
     try:
         total = c.execute(
             "SELECT COUNT(*) FROM seen WHERE profile_id=? AND full_url != '' AND backup_num > 0",
@@ -1441,7 +1439,7 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
     return total_configs, result_msg
 
 # ======================================================================
-# سیکل کامل (با بهبود برای ارسال خودکار)
+# سیکل کامل
 # ======================================================================
 async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=False):
     log.info("=" * 50)
@@ -1632,7 +1630,6 @@ async def profile_loop(bot, profile_id):
     log.info(f"🔄 Starting auto loop for profile {profile_id}")
     while True:
         try:
-            # دریافت اطلاعات به‌روز پروفایل در هر تکرار
             profile = get_profile(profile_id)
             if not profile:
                 log.error(f"❌ Profile {profile_id} not found, stopping loop.")
@@ -1651,17 +1648,15 @@ async def profile_loop(bot, profile_id):
                     if expiry > now:
                         remaining_seconds = (expiry - now).total_seconds()
                         log.info(f"⏳ Timer active for profile {profile_id}: {remaining_seconds/60:.1f} minutes remaining")
-                        await asyncio.sleep(min(remaining_seconds, 60))  # check every minute
-                        continue  # re-check timer
+                        await asyncio.sleep(min(remaining_seconds, 60))
+                        continue
                     else:
-                        # timer expired
                         clear_profile_timer(profile_id)
                         await bot.send_message(
                             ADMIN_ID,
                             f"⏰ تایمر پروفایل {dest_name} (ID: {profile_id}) به پایان رسید. ارسال خودکار از سر گرفته شد."
                         )
                         log.info(f"✅ Timer expired for profile {profile_id}, resuming auto post")
-                        # run one cycle immediately after timer ends
                         n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=(interval==0))
                         log.info(f"[auto profile {profile_id}] result: {n} - {m}")
                         continue
@@ -1671,13 +1666,11 @@ async def profile_loop(bot, profile_id):
 
             # ===== حلقه عادی =====
             if interval == 0:
-                # حالت لحظه‌ای: هر ۳ ثانیه یک بار
                 await asyncio.sleep(3)
                 log.info(f"⚡ INSTANT UPDATE for profile {profile_id} ({dest_name})")
                 n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=True)
                 log.info(f"[instant profile {profile_id}] result: {n} - {m}")
             else:
-                # حالت زمان‌بندی شده با بازه‌ی دقیقه‌ای
                 now = datetime.now(TEHRAN_TZ)
                 next_run = now + timedelta(minutes=interval)
                 sleep_seconds = (next_run - now).total_seconds()
@@ -2001,7 +1994,6 @@ def profile_admin_kb(profile_id):
     else:
         sponsor_status = "خالی"
 
-    # وضعیت تایمر
     expiry, remaining = get_profile_timer(profile_id)
     if expiry:
         timer_status = msg("timer_status_active", remaining=remaining)
@@ -2038,7 +2030,7 @@ def profile_admin_kb(profile_id):
         [InlineKeyboardButton(msg("btn_backup"), callback_data=f"backup_{profile_id}", style="success"),
          InlineKeyboardButton(msg("btn_backup_export"), callback_data=f"backup_export_menu_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_timer"), callback_data=f"timer_menu_{profile_id}", style="primary"),
-         InlineKeyboardButton(f"⏱️ {timer_status}", callback_data="dummy", style="secondary")],
+         InlineKeyboardButton(f"⏱️ {timer_status}", callback_data="dummy", style="primary")],
         [InlineKeyboardButton(msg("btn_reset"), callback_data=f"rn_{profile_id}", style="primary"),
          InlineKeyboardButton(msg("btn_clear"), callback_data=f"cd1_{profile_id}", style="danger")],
         [InlineKeyboardButton("❌ Delete Profile", callback_data=f"delprof_{profile_id}", style="danger")],
@@ -2246,6 +2238,10 @@ async def on_callback(u, ctx):
         await q.answer()
         d = q.data or ""
         log.info(f"📨 Callback data: {d}")
+
+        # ===== دکمه‌ی بی‌اثر (dummy) =====
+        if d == "dummy":
+            return
 
         # ===== تایمر =====
         if d.startswith("timer_menu_"):
@@ -2758,7 +2754,6 @@ async def on_callback(u, ctx):
                     return
                 sponsor = get_sponsor(profile_id)
                 if not sponsor:
-                    # اگر اسپانسر وجود ندارد و مرحله افزودن است
                     if ctx.user_data.get("sponsor_step") == "color_wait":
                         name = ctx.user_data.get("sponsor_name")
                         url = ctx.user_data.get("sponsor_url")
@@ -2766,7 +2761,6 @@ async def on_callback(u, ctx):
                         if name and url:
                             set_sponsor(profile_id, name, url, btn_text, color, enabled=1)
                             await q.message.reply_text(msg("sp_added", name=name), parse_mode="HTML")
-                            # پاک‌سازی state
                             ctx.user_data.pop("sponsor_step", None)
                             ctx.user_data.pop("sponsor_name", None)
                             ctx.user_data.pop("sponsor_url", None)
@@ -2782,7 +2776,6 @@ async def on_callback(u, ctx):
                 else:
                     update_sponsor_color(profile_id, color)
                     await q.answer(f"✅ رنگ به {color} تغییر کرد.")
-                    # پاک کردن state های ویرایش در صورت وجود
                     ctx.user_data.pop("sponsor_edit_field", None)
                     ctx.user_data.pop("sponsor_edit_profile_id", None)
                     await show_profile_admin(q.message, profile_id)
@@ -3283,7 +3276,6 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # fallback
         await show_profiles_list(q.message)
 
     except Exception as e:
@@ -3324,7 +3316,6 @@ async def show_profile_admin(msg_or_q, profile_id):
     date_cfg_status = "✅" if show_date_cfg else "❌"
     date_prx_status = "✅" if show_date_prx else "❌"
 
-    # وضعیت تایمر
     expiry, remaining = get_profile_timer(profile_id)
     if expiry:
         timer_status = msg("timer_status_active", remaining=remaining)
@@ -3427,7 +3418,6 @@ async def on_text(u, ctx):
             await u.message.reply_text("فیلد نامعتبر.")
             del ctx.user_data["sponsor_edit_field"]
             return
-        # ذخیره با وضعیت فعال/غیرفعال فعلی
         set_sponsor(profile_id, name, url, btn_text, color, enabled=int(enabled))
         await u.message.reply_text(msg("sp_updated"), parse_mode="HTML")
         del ctx.user_data["sponsor_edit_field"]

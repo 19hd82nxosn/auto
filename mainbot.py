@@ -10,6 +10,8 @@ import logging
 import traceback
 import sys
 import html
+import random
+import time
 from datetime import datetime, timedelta
 from urllib.parse import quote, unquote, urlparse, parse_qs, urlencode, urlunparse
 import httpx
@@ -817,17 +819,14 @@ def mark_as_posted(profile_id, url, source="", full_url=None):
     conn.commit()
     asyncio.create_task(check_and_auto_backup(profile_id))
 
-# ======================================================================
-# بک‌آپ خودکار با نام پروفایل
-# ======================================================================
 async def check_and_auto_backup(profile_id):
+    """بک‌آپ خودکار برای هر پروفایل جداگانه با نام پروفایل"""
     try:
-        prof = get_profile(profile_id)
-        if not prof:
-            log.error(f"Profile {profile_id} not found for backup")
+        profile = get_profile(profile_id)
+        if not profile:
             return
-        dest_name = prof.get("dest_name", f"profile_{profile_id}").replace("@", "")
-        
+        profile_name = profile["dest_name"].replace("@", "").strip() or f"profile_{profile_id}"
+
         total = c.execute(
             "SELECT COUNT(*) FROM seen WHERE profile_id=? AND full_url != '' AND backup_num > 0",
             (profile_id,)).fetchone()[0]
@@ -849,8 +848,8 @@ async def check_and_auto_backup(profile_id):
             if not links:
                 continue
 
-            filename = f"configs_backup_{dest_name}_{get_tehran_date()}_{start_num}_{end_num}.txt"
-            content = f"# Backup for {dest_name} (Profile ID: {profile_id})\n# {start_num} to {end_num}\n\n" + "\n".join(links)
+            filename = f"configs_backup_{get_tehran_date()}_{profile_name}_{start_num}_{end_num}.txt"
+            content = f"# Backup for {profile_name} (ID: {profile_id})\n# Range: {start_num} - {end_num}\n# Total: {len(links)}\n\n" + "\n".join(links)
             filepath = os.path.join(DATA_DIR, filename)
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(content)
@@ -862,7 +861,7 @@ async def check_and_auto_backup(profile_id):
                         ADMIN_ID,
                         document=f,
                         filename=filename,
-                        caption=f"📤 بک‌آپ خودکار {dest_name}\n{start_num} تا {end_num} (تعداد: {len(links)})"
+                        caption=f"📤 بک‌آپ خودکار پروفایل {profile_name} (ID:{profile_id}) - {start_num} تا {end_num} (تعداد: {len(links)})"
                     )
                 # فایل را حذف نمی‌کنیم تا روی سرور بماند
                 # os.remove(filepath)
@@ -871,16 +870,370 @@ async def check_and_auto_backup(profile_id):
 
         set_profile_last_backup_count(profile_id, total)
     except Exception as e:
-        log.error(f"Auto backup check error: {e}")
+        log.error(f"Auto backup check error for profile {profile_id}: {e}")
+
+def is_message_processed(profile_id, source, message_id):
+    r = c.execute("SELECT 1 FROM processed_messages WHERE source=? AND message_id=? AND profile_id=?", (source, message_id, profile_id)).fetchone()
+    return r is not None
+
+def mark_message_processed(profile_id, source, message_id):
+    c.execute("INSERT OR REPLACE INTO processed_messages (source, message_id, profile_id) VALUES (?,?,?)",
+              (source, message_id, profile_id))
+    conn.commit()
+
+def is_proxy_posted(profile_id, proxy_url):
+    r = c.execute("SELECT 1 FROM proxies_seen WHERE proxy_url=? AND profile_id=?", (proxy_url, profile_id)).fetchone()
+    return r is not None
+
+def mark_proxy_posted(profile_id, proxy_url):
+    now = get_tehran_time()
+    c.execute("INSERT OR REPLACE INTO proxies_seen (proxy_url, first_seen, last_posted, profile_id) VALUES (?,?,?,?)",
+              (proxy_url, now, now, profile_id))
+    conn.commit()
+
+def get_last_scrape_time(profile_id, source):
+    r = c.execute("SELECT last_scrape_time FROM last_scrape WHERE source=? AND profile_id=?", (source, profile_id)).fetchone()
+    return r[0] if r else None
+
+def update_last_scrape_time(profile_id, source, time_str):
+    c.execute("INSERT OR REPLACE INTO last_scrape (source, last_scrape_time, profile_id) VALUES (?,?,?)",
+              (source, time_str, profile_id))
+    conn.commit()
+
+def strip_url_fragment(url):
+    if '#' in url:
+        return url.split('#')[0]
+    return url
+
+def extract_host(url):
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+        port = parsed.port
+
+        if host and host.lower() == 't.me' and parsed.path.startswith('/proxy'):
+            query = parse_qs(parsed.query)
+            server = query.get('server', [None])[0]
+            if server:
+                if ':' in server:
+                    host, port_str = server.rsplit(':', 1)
+                    port = int(port_str)
+                else:
+                    host = server
+                    port_str = query.get('port', [None])[0]
+                    if port_str:
+                        port = int(port_str)
+                return host, port
+            return host, port
+
+        if host:
+            if parsed.port:
+                return host, parsed.port
+            else:
+                if ':' in parsed.netloc:
+                    host_part, port_part = parsed.netloc.rsplit(':', 1)
+                    if port_part.isdigit():
+                        return host_part, int(port_part)
+                return host, None
+        if "://" in url:
+            url = url.split("://", 1)[1]
+        for c in '?#':
+            if c in url:
+                url = url.split(c)[0]
+        if "@" in url:
+            url = url.split("@")[-1]
+        if ":" in url:
+            host, port = url.rsplit(":", 1)
+            return host.strip(), int(port)
+        else:
+            return url.strip(), None
+    except Exception as e:
+        log.warning(f"extract_host error for {url}: {e}")
+        return None, None
+
+def add_custom_query_to_url(url, custom_query, protocol):
+    if not custom_query or protocol.lower() == 'vmess':
+        return url
+    url = clean_config_url(url)
+    if '#' in url:
+        base, fragment = url.split('#', 1)
+    else:
+        base = url
+        fragment = None
+    parsed = urlparse(base)
+    existing_params = parse_qs(parsed.query)
+    custom_params = parse_qs(custom_query)
+    new_query_dict = {}
+    for k, v in custom_params.items():
+        new_query_dict[k] = v[-1] if v else ""
+    for k, v in existing_params.items():
+        if k not in new_query_dict:
+            new_query_dict[k] = v[-1] if v else ""
+    new_query = urlencode(new_query_dict, doseq=True)
+    new_base = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, ''))
+    if fragment:
+        new_base += '#' + fragment
+    return new_base
+
+def append_channel_and_flag_encoded(url, channel, flag, custom_query=""):
+    url = clean_config_url(url)
+    protocol = url.split('://')[0].lower() if '://' in url else ''
+    if custom_query and protocol != 'vmess':
+        url = add_custom_query_to_url(url, custom_query, protocol)
+    base = strip_url_fragment(url)
+    fragment = f"{channel} {flag}"
+    encoded = quote(fragment, safe='')
+    return f"{base}#{encoded}"
 
 # ======================================================================
-# ارسال با مدیریت کامل Flood Control
+# پینگ
+# ======================================================================
+async def host_to_ip(host):
+    try:
+        return socket.gethostbyname(host)
+    except Exception as e:
+        log.warning(f"DNS resolution failed for {host}: {e}")
+        return None
+
+async def test_tcp_ping(host, port):
+    try:
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=1.5
+        )
+        writer.close()
+        await writer.wait_closed()
+        ping_ms = round((loop.time() - start) * 1000)
+        return True, ping_ms
+    except Exception:
+        return False, 0
+
+async def ping_from_iran_only(host, port=None):
+    ip = await host_to_ip(host)
+    if not ip:
+        ip = host
+    target = ip
+
+    try:
+        async with httpx.AsyncClient(timeout=5) as cl:
+            r = await cl.get(
+                f"https://check-host.net/check-ping?host={target}&json=1",
+                headers={"User-Agent": "Mozilla/5.0"},
+                follow_redirects=True
+            )
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                except json.JSONDecodeError:
+                    log.warning(f"⚠️ check-host.net returned invalid JSON for {target}")
+                    data = None
+                if data:
+                    nodes = data.get("nodes", {})
+                    iran_pings = []
+                    iran_keywords = [
+                        "ir1", "ir2", "ir3", "ir4", "ir5", "ir6", "ir7", "ir8", "ir9",
+                        "iran", "tehran", "ir-", "-ir", "ir_", "_ir",
+                        "mci", "hamrahe", "rightel", "shatel", "iranel",
+                        "teh", "shiraz", "isfahan", "mashhad", "tabriz", "ahvaz"
+                    ]
+                    for node_name, results in nodes.items():
+                        if not isinstance(results, list):
+                            continue
+                        node_lower = node_name.lower()
+                        for v in results:
+                            if isinstance(v, (int, float)) and v > 0:
+                                if any(kw in node_lower for kw in iran_keywords):
+                                    iran_pings.append(int(v))
+                                break
+                    if iran_pings:
+                        avg_ping = int(sum(iran_pings) / len(iran_pings))
+                        log.info(f"✅ Iran ping OK: {target} -> {len(iran_pings)} nodes, avg {avg_ping}ms")
+                        return avg_ping, True, len(iran_pings)
+                    else:
+                        log.info(f"⚠️ No Iran nodes responded for {target}")
+            else:
+                log.warning(f"check-host.net status: {r.status_code}")
+    except Exception as e:
+        log.warning(f"check-host.net request failed: {e}")
+
+    if port is not None:
+        log.info(f"🔄 TCP fallback with config port: {host}:{port}")
+        ok, ping = await test_tcp_ping(host, port)
+        if ok:
+            log.info(f"✅ TCP fallback OK: {host}:{port} -> {ping}ms")
+            return ping, True, 0
+        else:
+            log.info(f"❌ TCP fallback FAILED: {host}:{port}")
+    else:
+        log.info(f"🔄 No port in config, trying common ports...")
+        ports_to_try = [443, 80, 8080, 8443, 2053, 2096, 2087, 2083]
+        for test_port in ports_to_try:
+            ok, ping = await test_tcp_ping(host, test_port)
+            if ok:
+                log.info(f"✅ TCP fallback OK: {host}:{test_port} -> {ping}ms")
+                return ping, True, 0
+
+    log.info(f"❌ All ping attempts failed for {target}")
+    return 0, False, 0
+
+async def check_full_link_ping(url):
+    host, port = extract_host(url)
+    if not host:
+        return 0, False, 0
+    ping, ok, cnt = await ping_from_iran_only(host, port)
+    return ping, ok, cnt
+
+# ======================================================================
+# اسکرپ
+# ======================================================================
+def decrypt_subscription(data: bytes, passwords: list):
+    protocols = ("vless://", "vmess://", "trojan://",
+                  "hy2://", "tuic://")
+    try:
+        text = data.decode('utf-8', errors='ignore')
+        if any(p in text for p in protocols):
+            return text
+    except Exception:
+        pass
+    try:
+        decoded = base64.b64decode(data + b'=' * (-len(data) % 4))
+        text = decoded.decode('utf-8', errors='ignore')
+        if any(p in text for p in protocols):
+            return text
+    except Exception:
+        pass
+    try:
+        decoded = base64.b64decode(data + b'=' * (-len(data) % 4)) \
+            .decode('utf-8', errors='ignore')
+        text = unquote(decoded)
+        if any(p in text for p in protocols):
+            return text
+    except Exception:
+        pass
+    return None
+
+def get_v2ray_links_from_text(text):
+    results = []
+    patterns = [
+        r'vless://[^\s<>"\']+',
+        r'vmess://[^\s<>"\']+',
+        r'trojan://[^\s<>"\']+',
+        r'hy2://[^\s<>"\']+',
+        r'tuic://[^\s<>"\']+'
+    ]
+    for pattern in patterns:
+        for m in re.finditer(pattern, text):
+            link = m.group().strip()
+            if len(link) > 10:
+                results.append(link)
+    return list(set(results))
+
+async def fetch_files_from_channel(bot, profile_id, channel, source):
+    try:
+        chat_id = channel if channel.startswith('@') else '@' + channel
+        messages = await bot.get_chat_history(chat_id, limit=5)
+        new_links = []
+        for msg in messages:
+            if is_message_processed(profile_id, source, msg.message_id):
+                continue
+            doc = msg.document
+            if not doc:
+                continue
+            try:
+                file_obj = await doc.get_file()
+                data = await file_obj.download_as_bytearray()
+            except Exception as e:
+                log.warning(f"Download file from {source} failed: {e}")
+                continue
+
+            text = decrypt_subscription(bytes(data), [])
+            if not text:
+                text = bytes(data).decode('utf-8', errors='ignore')
+
+            links = get_v2ray_links_from_text(text)
+            if not links:
+                links = extract_links_from_text(text)
+
+            if links:
+                new_links.extend(links)
+                log.info(f"✅ Extracted {len(links)} links from file in {source} (msg {msg.message_id})")
+
+            mark_message_processed(profile_id, source, msg.message_id)
+
+        return new_links
+    except Exception as e:
+        log.warning(f"fetch_files_from_channel({channel}) error: {e}")
+        return []
+
+_scrape_cache = {}
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+]
+
+async def scrape_channel_with_retry(profile_id, channel, only_new=True, max_retries=2):
+    try:
+        return await _scrape_channel_internal(profile_id, channel, only_new)
+    except Exception as e:
+        log.error(f"❌ scrape {channel} error: {e}")
+        return [], []
+
+async def _scrape_channel_internal(profile_id, channel, only_new=True):
+    import time as _t
+    current_time = _t.time()
+    clean_channel = normalize_channel_input(channel)
+    if not clean_channel:
+        log.warning(f"Invalid channel name: {channel}")
+        return [], []
+    url = f"https://t.me/s/{clean_channel.lstrip('@')}"
+    log.info(f"🔍 Scraping {clean_channel}...")
+    headers = {
+        "User-Agent": _USER_AGENTS[hash(datetime.now().timestamp()) % len(_USER_AGENTS)],
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,fa;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as cl:
+        r = await cl.get(url, headers=headers)
+        if r.status_code == 429:
+            log.warning(f"Rate limit for {clean_channel}, waiting 30s")
+            await asyncio.sleep(30)
+            r = await cl.get(url, headers=headers)
+        if r.status_code != 200:
+            log.warning(f"⚠️ {clean_channel} returned status {r.status_code}")
+            return [], []
+        html_text = r.text
+
+        config_links = extract_links_from_text(html_text)
+        proxy_links = extract_proxy_links_from_text(html_text)
+
+        log.info(f"📊 {clean_channel}: found {len(config_links)} configs, {len(proxy_links)} proxies")
+        update_last_scrape_time(profile_id, clean_channel, get_tehran_time())
+
+        cached = _scrape_cache.get((profile_id, clean_channel), (0, [], []))
+        old_configs = cached[1] if len(cached) > 1 else []
+        old_proxies = cached[2] if len(cached) > 2 else []
+        new_configs = [link for link in config_links if link not in old_configs]
+        new_proxies = [link for link in proxy_links if link not in old_proxies]
+        log.info(f"🆕 {clean_channel}: {len(new_configs)} new configs, {len(new_proxies)} new proxies")
+        _scrape_cache[(profile_id, clean_channel)] = (current_time, config_links, proxy_links)
+        return new_configs, new_proxies
+
+# ======================================================================
+# ارسال (با مدیریت Flood Control)
 # ======================================================================
 async def send_with_retry(bot, chat_id, text, parse_mode="HTML", reply_markup=None, disable_web_page_preview=True, max_retries=5):
-    """ارسال پیام با مدیریت کامل خطاهای Flood control، Timeout و Retry"""
+    """ارسال پیام با مدیریت خطاهای Flood control و retry"""
     retry_count = 0
     last_error = None
-    
     while retry_count < max_retries:
         try:
             await bot.send_message(
@@ -896,37 +1249,30 @@ async def send_with_retry(bot, chat_id, text, parse_mode="HTML", reply_markup=No
             log.warning(f"Flood control, waiting {wait} seconds...")
             await asyncio.sleep(wait)
             retry_count += 1
-            continue
         except TimedOut:
             log.warning(f"Timeout, retrying... ({retry_count+1}/{max_retries})")
             await asyncio.sleep(3)
             retry_count += 1
-            continue
         except BadRequest as e:
-            error_msg = str(e).lower()
-            if "can't parse entities" in error_msg or "unsupported start tag" in error_msg:
-                # حذف تگ‌های HTML و ارسال ساده
+            if "can't parse entities" in str(e):
+                # اگر HTML خراب بود، با متن ساده امتحان کن
                 try:
-                    plain_text = re.sub(r'<[^>]+>', '', text)
                     await bot.send_message(
                         chat_id=chat_id,
-                        text=plain_text[:4096],
+                        text=re.sub(r'<[^>]+>', '', text)[:4096],
                         reply_markup=reply_markup,
                         disable_web_page_preview=disable_web_page_preview
                     )
                     return True
-                except Exception as e2:
-                    log.error(f"Plain text send failed: {e2}")
-                    return False
-            else:
-                log.error(f"BadRequest: {e}")
-                return False
+                except Exception:
+                    pass
+            log.error(f"BadRequest: {e}")
+            return False
         except Exception as e:
             log.error(f"Send error: {e}")
+            last_error = e
             await asyncio.sleep(2)
             retry_count += 1
-            continue
-    
     return False
 
 async def send_to_destination(bot, profile_id, text, buttons=None):
@@ -938,20 +1284,16 @@ async def send_to_destination(bot, profile_id, text, buttons=None):
     log.info(f"📤 Sending to {dest} (profile {profile_id})")
     chunks = split_text(text, 4096)
     success = True
-    
     for idx, chunk in enumerate(chunks):
         reply_markup = InlineKeyboardMarkup(buttons) if buttons and idx == 0 else None
-        
-        # تلاش با HTML
         ok = await send_with_retry(
             bot, dest, chunk,
             parse_mode="HTML",
             reply_markup=reply_markup,
             disable_web_page_preview=True
         )
-        
         if not ok:
-            # اگر HTML خطا داد، با متن ساده امتحان کن
+            # تلاش با متن ساده
             plain = re.sub(r'<[^>]+>', '', chunk)
             ok2 = await send_with_retry(
                 bot, dest, plain[:4096],
@@ -961,12 +1303,9 @@ async def send_to_destination(bot, profile_id, text, buttons=None):
             )
             if not ok2:
                 success = False
-                log.error(f"Failed to send chunk {idx+1}/{len(chunks)} to {dest}")
-        
         # تاخیر بین چانک‌ها
         if idx < len(chunks) - 1:
-            await asyncio.sleep(1.0)
-    
+            await asyncio.sleep(1)
     return success
 
 def split_text(text, max_len=4096):
@@ -997,7 +1336,7 @@ def split_text(text, max_len=4096):
     return chunks
 
 # ======================================================================
-# ارسال کانفیگ‌ها (با تاخیر و محدودیت تعداد)
+# ارسال کانفیگ‌ها (با رفع مشکل خرابی بنر و اسپانسر)
 # ======================================================================
 async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplicate=False, is_instant=False):
     if not working:
@@ -1005,8 +1344,8 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
 
     max_post = get_profile_max_post(profile_id)
     if is_instant:
-        # در حالت لحظه‌ای، حداکثر ۳ کانفیگ در هر بار ارسال شود تا از Flood جلوگیری شود
-        max_post = min(max_post, 3)
+        # در حالت لحظه‌ای، حداکثر ۵ کانفیگ در هر بار ارسال شود تا از Flood جلوگیری شود
+        max_post = min(max_post, 5)
 
     blacklist_words = get_blacklist(profile_id)
     filtered_working = []
@@ -1023,6 +1362,7 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
     last_n = get_profile_last_num(profile_id)
     show_numbers = get_profile_show_numbers(profile_id)
     custom_query = get_profile_custom_query(profile_id)
+    log.info(f"🔧 Using custom_query: '{custom_query}'")
     dest = get_profile_dest(profile_id)
     banner_template = get_profile_banner_config(profile_id) or "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
 
@@ -1064,12 +1404,13 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
         except KeyError:
             full_text = f"✦ V2Ray Config List\n\n{configs_text}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
 
+        # ساخت دکمه اسپانسر
         buttons = []
         if sponsor_button:
             buttons.append(sponsor_button)
         reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
 
-        # ارسال با مدیریت کامل خطا
+        # ارسال با تلاش مجدد و مدیریت خطا
         ok = await send_with_retry(
             bot, dest, full_text,
             parse_mode="HTML",
@@ -1077,15 +1418,18 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
             disable_web_page_preview=True,
             max_retries=5
         )
-        
         if ok:
             sent_count += 1
             log.info(f"✅ Sent config #{n} to {dest}")
         else:
-            # تلاش نهایی با متن ساده
-            plain = re.sub(r'<[^>]+>', '', full_text)
+            # اگر HTML خطا داد، با متن ساده اما با ساختار مناسب ارسال کنیم
+            plain_text = re.sub(r'<[^>]+>', '', full_text)
+            # ساخت متن ساده با خطوط جداکننده
+            plain_text = f"✦ V2Ray Config List\n\n{configs_text}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
+            # حذف تگ‌های HTML از آن
+            plain_text = re.sub(r'<[^>]+>', '', plain_text)
             ok2 = await send_with_retry(
-                bot, dest, plain[:4096],
+                bot, dest, plain_text,
                 parse_mode=None,
                 reply_markup=reply_markup,
                 disable_web_page_preview=True,
@@ -1093,18 +1437,30 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
             )
             if ok2:
                 sent_count += 1
-                log.info(f"✅ Sent config #{n} to {dest} (plain)")
+                log.info(f"✅ Sent config #{n} to {dest} (plain text with button)")
             else:
-                log.error(f"❌ Failed to send config #{n} after all retries")
+                # آخرین تلاش: بدون دکمه
+                ok3 = await send_with_retry(
+                    bot, dest, plain_text[:4096],
+                    parse_mode=None,
+                    reply_markup=None,
+                    disable_web_page_preview=True,
+                    max_retries=2
+                )
+                if ok3:
+                    sent_count += 1
+                    log.info(f"✅ Sent config #{n} to {dest} (plain text only)")
+                else:
+                    log.error(f"❌ Failed to send config #{n} after all retries")
 
         if not skip_duplicate or not is_already_posted(profile_id, modified_url):
             mark_as_posted(profile_id, modified_url, source_for_seen, full_url=modified_url)
 
-        # تاخیر بین هر کانفیگ برای جلوگیری از Flood
+        # تاخیر بین هر کانفیگ برای جلوگیری از Flood (مخصوصاً در حالت لحظه‌ای)
         if is_instant:
-            await asyncio.sleep(2.0)  # تاخیر ۲ ثانیه در حالت لحظه‌ای
+            await asyncio.sleep(2.0)  # تاخیر بیشتر برای جلوگیری از Flood
         else:
-            await asyncio.sleep(1.0)  # تاخیر ۱ ثانیه در حالت عادی
+            await asyncio.sleep(0.8)
 
     if sent_count > 0:
         set_profile_last_num(profile_id, last_n + sent_count)
@@ -1117,7 +1473,7 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False):
 
     max_proxies = get_profile_max_proxies(profile_id)
     if is_instant:
-        max_proxies = min(max_proxies, 2)  # حداکثر ۲ پروکسی در حالت لحظه‌ای
+        max_proxies = min(max_proxies, 3)  # حداکثر ۳ پروکسی در حالت لحظه‌ای
 
     show_date = get_profile_show_date_proxy(profile_id)
     proxy_text = ""
@@ -1205,7 +1561,7 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
     return total_configs, result_msg
 
 # ======================================================================
-# سیکل کامل - اسکرپ همه کانال‌ها در حالت لحظه‌ای
+# سیکل کامل (با تست همه کانال‌ها در حالت لحظه‌ای)
 # ======================================================================
 async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=False):
     log.info("=" * 50)
@@ -1240,7 +1596,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
     # ========== تنظیمات بر اساس حالت ==========
     if is_instant:
         scrape_limit = len(sources)          # همه کانال‌ها
-        test_limit = 25                      # تست حداکثر ۲۵ کانفیگ
+        test_limit = 30                      # تست حداکثر ۳۰ کانفیگ در هر سیکل
         ping_timeout = 3
         max_concurrent = 30
     else:
@@ -1317,6 +1673,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
 
     working = []
     if is_instant:
+        # تست پینگ برای همه کانفیگ‌های جدید (با محدودیت test_limit)
         if new_configs:
             to_test = new_configs[:test_limit]
             log.info(f"⚡ Testing {len(to_test)} configs instantly...")
@@ -1373,6 +1730,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
         else:
             log.info("ℹ️ No new configs to test")
 
+    # ===== پروکسی‌ها (با تست در حالت لحظه‌ای) =====
     proxy_with_ping = []
     if all_proxies:
         valid_proxies = [p for p in all_proxies if "t.me/proxy" in p.lower()]
@@ -1431,7 +1789,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
     return result
 
 # ======================================================================
-# حلقه خودکار (با تاخیر بیشتر در حالت لحظه‌ای)
+# حلقه خودکار
 # ======================================================================
 async def profile_loop(bot, profile_id):
     log.info(f"🔄 Starting auto loop for profile {profile_id}")
@@ -1474,7 +1832,7 @@ async def profile_loop(bot, profile_id):
                 log.info(f"⚡ INSTANT UPDATE for profile {profile_id} ({dest_name})")
                 n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=True)
                 log.info(f"[instant profile {profile_id}] result: {n} - {m}")
-                await asyncio.sleep(10)  # تاخیر ۱۰ ثانیه بین سیکل‌های لحظه‌ای
+                await asyncio.sleep(5)  # افزایش تاخیر بین سیکل‌های لحظه‌ای به ۵ ثانیه
             else:
                 now = datetime.now(TEHRAN_TZ)
                 next_run = now + timedelta(minutes=interval)
@@ -1498,7 +1856,7 @@ async def profile_loop(bot, profile_id):
             await asyncio.sleep(60)
 
 # ======================================================================
-# توابع دریافت لاگ با بازه‌های زمانی (بدون تغییر)
+# توابع دریافت لاگ با بازه‌های زمانی
 # ======================================================================
 async def get_logs(update, context, profile_id, log_type="full", time_range_minutes=30):
     log_file_path = os.path.join(DATA_DIR, "bot.log")
@@ -1600,6 +1958,9 @@ async def send_daily_report(app):
 # ======================================================================
 async def export_backup(update, context, profile_id, backup_type, count=None):
     try:
+        profile = get_profile(profile_id)
+        profile_name = profile["dest_name"].replace("@", "").strip() if profile else f"profile_{profile_id}"
+
         if backup_type == "configs":
             if count is None or count == -1:
                 rows = c.execute("SELECT full_url FROM seen WHERE profile_id=? AND full_url != '' ORDER BY last_posted DESC", (profile_id,)).fetchall()
@@ -1609,14 +1970,12 @@ async def export_backup(update, context, profile_id, backup_type, count=None):
             if not links:
                 await update.message.reply_text("❌ هیچ کانفیگی برای بک‌آپ یافت نشد.")
                 return
-            prof = get_profile(profile_id)
-            dest_name = prof["dest_name"] if prof else f"profile_{profile_id}"
-            filename = f"configs_backup_{dest_name.replace('@','')}_{get_tehran_date()}.txt"
-            content = "\n".join(links)
+            filename = f"configs_backup_{profile_name}_{get_tehran_date()}.txt"
+            content = f"# Backup for {profile_name} (ID: {profile_id})\n# Total: {len(links)}\n\n" + "\n".join(links)
             with open(os.path.join(DATA_DIR, filename), "w", encoding="utf-8") as f:
                 f.write(content)
             with open(os.path.join(DATA_DIR, filename), "rb") as f:
-                await update.message.reply_document(document=f, filename=filename, caption=f"📤 {len(links)} کانفیگ")
+                await update.message.reply_document(document=f, filename=filename, caption=f"📤 {len(links)} کانفیگ - {profile_name}")
             os.remove(os.path.join(DATA_DIR, filename))
             return
 
@@ -1629,14 +1988,12 @@ async def export_backup(update, context, profile_id, backup_type, count=None):
             if not links:
                 await update.message.reply_text("❌ هیچ پروکسی برای بک‌آپ یافت نشد.")
                 return
-            prof = get_profile(profile_id)
-            dest_name = prof["dest_name"] if prof else f"profile_{profile_id}"
-            filename = f"proxies_backup_{dest_name.replace('@','')}_{get_tehran_date()}.txt"
-            content = "\n".join(links)
+            filename = f"proxies_backup_{profile_name}_{get_tehran_date()}.txt"
+            content = f"# Backup for {profile_name} (ID: {profile_id})\n# Total: {len(links)}\n\n" + "\n".join(links)
             with open(os.path.join(DATA_DIR, filename), "w", encoding="utf-8") as f:
                 f.write(content)
             with open(os.path.join(DATA_DIR, filename), "rb") as f:
-                await update.message.reply_document(document=f, filename=filename, caption=f"📤 {len(links)} پروکسی")
+                await update.message.reply_document(document=f, filename=filename, caption=f"📤 {len(links)} پروکسی - {profile_name}")
             os.remove(os.path.join(DATA_DIR, filename))
             return
         else:
@@ -1646,7 +2003,7 @@ async def export_backup(update, context, profile_id, backup_type, count=None):
         await update.message.reply_text(f"❌ خطا در بک‌آپ: {str(e)[:100]}")
 
 # ======================================================================
-# کیبوردها و پیام‌ها (بدون تغییر - فقط نمونه)
+# کیبوردها و پیام‌ها
 # ======================================================================
 BOT_REF = None
 BOT_LANG = "fa"
@@ -1843,7 +2200,7 @@ def msg(key, **kwargs):
     return text
 
 # ======================================================================
-# کیبوردها (بدون تغییر)
+# کیبوردها
 # ======================================================================
 def profiles_kb():
     profiles = get_profiles()
@@ -2130,7 +2487,7 @@ async def cmd_diag(update: Update, context):
     await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
 
 # ======================================================================
-# کالبک (بدون تغییر کامل - فقط بخش‌های کلیدی)
+# کالبک
 # ======================================================================
 async def on_callback(u, ctx):
     q = u.callback_query

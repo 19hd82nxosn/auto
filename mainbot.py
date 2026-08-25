@@ -175,7 +175,6 @@ ensure_column("profiles", "show_date_proxy", "INTEGER DEFAULT 1", 1)
 ensure_column("profiles", "schedule_cron", "TEXT DEFAULT ''", "")
 ensure_column("profiles", "last_backup_count", "INTEGER DEFAULT 0", 0)
 
-# ===== افزودن ستون‌های تایمر =====
 ensure_column("profiles", "timer_expiry", "TEXT DEFAULT NULL", None)
 ensure_column("profiles", "timer_duration", "INTEGER DEFAULT 0", 0)
 
@@ -188,7 +187,7 @@ c.execute("""CREATE TABLE IF NOT EXISTS blacklist (
 conn.commit()
 
 # ======================================================================
-# تعمیر نوع ستون custom_query در صورت نیاز
+# تعمیر نوع ستون custom_query
 # ======================================================================
 def fix_column_types():
     c.execute("PRAGMA table_info(profiles)")
@@ -287,6 +286,29 @@ def migrate_old_config():
 migrate_old_config()
 
 # ======================================================================
+# توابع کمکی جدید برای پاکسازی نام کانال
+# ======================================================================
+def clean_source_name(name: str) -> str:
+    if not name:
+        return ""
+    name = name.strip()
+    if "t.me/" in name.lower():
+        match = re.search(r't\.me/([^/?]+)', name, re.IGNORECASE)
+        if match:
+            name = match.group(1)
+    if name and not name.startswith("@"):
+        name = "@" + name
+    cleaned = re.sub(r'[^@a-zA-Z0-9_]', '', name)
+    if len(cleaned) <= 1:
+        if re.match(r'^@[a-zA-Z0-9_]+$', name):
+            return name
+        return ""
+    return cleaned
+
+def normalize_channel_input(text: str) -> str:
+    return clean_source_name(text)
+
+# ======================================================================
 # توابع پروفایل
 # ======================================================================
 def get_profiles():
@@ -358,10 +380,12 @@ def get_profile_sources(profile_id):
         return []
     s = prof["sources"]
     items = [x.strip() for x in s.split(",") if x.strip()]
+    items = [normalize_channel_input(x) for x in items if normalize_channel_input(x)]
     return items
 
 def set_profile_sources(profile_id, sources_list):
-    s = ",".join(sources_list)
+    normalized = [normalize_channel_input(s) for s in sources_list if normalize_channel_input(s)]
+    s = ",".join(normalized)
     update_profile(profile_id, sources=s)
 
 def get_profile_dest(profile_id):
@@ -794,6 +818,7 @@ def mark_as_posted(profile_id, url, source="", full_url=None):
     asyncio.create_task(check_and_auto_backup(profile_id))
 
 async def check_and_auto_backup(profile_id):
+    """بک‌آپ خودکار بدون حذف فایل"""
     try:
         total = c.execute(
             "SELECT COUNT(*) FROM seen WHERE profile_id=? AND full_url != '' AND backup_num > 0",
@@ -818,19 +843,21 @@ async def check_and_auto_backup(profile_id):
 
             filename = f"configs_backup_{get_tehran_date()}_profile_{profile_id}_{start_num}_{end_num}.txt"
             content = "\n".join(links)
-            with open(os.path.join(DATA_DIR, filename), "w", encoding="utf-8") as f:
+            filepath = os.path.join(DATA_DIR, filename)
+            with open(filepath, "w", encoding="utf-8") as f:
                 f.write(content)
 
             bot = BOT_REF
             if bot:
-                with open(os.path.join(DATA_DIR, filename), "rb") as f:
+                with open(filepath, "rb") as f:
                     await bot.send_document(
                         ADMIN_ID,
                         document=f,
                         filename=filename,
                         caption=f"📤 بک‌آپ خودکار {start_num} تا {end_num} (تعداد: {len(links)})"
                     )
-                os.remove(os.path.join(DATA_DIR, filename))
+                # فایل را حذف نمی‌کنیم تا روی سرور بماند
+                # os.remove(filepath)
             else:
                 log.warning("BOT_REF is None, cannot send backup.")
 
@@ -1152,8 +1179,12 @@ async def scrape_channel_with_retry(profile_id, channel, only_new=True, max_retr
 async def _scrape_channel_internal(profile_id, channel, only_new=True):
     import time as _t
     current_time = _t.time()
-    url = f"https://t.me/s/{channel.lstrip('@')}"
-    log.info(f"🔍 Scraping {channel}...")
+    clean_channel = normalize_channel_input(channel)
+    if not clean_channel:
+        log.warning(f"Invalid channel name: {channel}")
+        return [], []
+    url = f"https://t.me/s/{clean_channel.lstrip('@')}"
+    log.info(f"🔍 Scraping {clean_channel}...")
     headers = {
         "User-Agent": _USER_AGENTS[hash(datetime.now().timestamp()) % len(_USER_AGENTS)],
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -1166,27 +1197,27 @@ async def _scrape_channel_internal(profile_id, channel, only_new=True):
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as cl:
         r = await cl.get(url, headers=headers)
         if r.status_code == 429:
-            log.warning(f"Rate limit for {channel}, waiting 30s")
+            log.warning(f"Rate limit for {clean_channel}, waiting 30s")
             await asyncio.sleep(30)
             r = await cl.get(url, headers=headers)
         if r.status_code != 200:
-            log.warning(f"⚠️ {channel} returned status {r.status_code}")
+            log.warning(f"⚠️ {clean_channel} returned status {r.status_code}")
             return [], []
         html_text = r.text
 
         config_links = extract_links_from_text(html_text)
         proxy_links = extract_proxy_links_from_text(html_text)
 
-        log.info(f"📊 {channel}: found {len(config_links)} configs, {len(proxy_links)} proxies")
-        update_last_scrape_time(profile_id, channel, get_tehran_time())
+        log.info(f"📊 {clean_channel}: found {len(config_links)} configs, {len(proxy_links)} proxies")
+        update_last_scrape_time(profile_id, clean_channel, get_tehran_time())
 
-        cached = _scrape_cache.get((profile_id, channel), (0, [], []))
+        cached = _scrape_cache.get((profile_id, clean_channel), (0, [], []))
         old_configs = cached[1] if len(cached) > 1 else []
         old_proxies = cached[2] if len(cached) > 2 else []
         new_configs = [link for link in config_links if link not in old_configs]
         new_proxies = [link for link in proxy_links if link not in old_proxies]
-        log.info(f"🆕 {channel}: {len(new_configs)} new configs, {len(new_proxies)} new proxies")
-        _scrape_cache[(profile_id, channel)] = (current_time, config_links, proxy_links)
+        log.info(f"🆕 {clean_channel}: {len(new_configs)} new configs, {len(new_proxies)} new proxies")
+        _scrape_cache[(profile_id, clean_channel)] = (current_time, config_links, proxy_links)
         return new_configs, new_proxies
 
 # ======================================================================
@@ -1250,13 +1281,16 @@ def split_text(text, max_len=4096):
     return chunks
 
 # ======================================================================
-# ارسال کانفیگ‌ها (با اسپانسر و استایل رنگی)
+# ارسال کانفیگ‌ها
 # ======================================================================
-async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplicate=False):
+async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplicate=False, is_instant=False):
     if not working:
         return 0
 
     max_post = get_profile_max_post(profile_id)
+    if is_instant:
+        max_post = len(working)  # در حالت لحظه‌ای همه را ارسال کن
+
     blacklist_words = get_blacklist(profile_id)
     filtered_working = []
     for url, ping, cnt in working:
@@ -1348,11 +1382,14 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
 
     return sent_count
 
-async def post_proxies(bot, profile_id, proxies_with_ping):
+async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False):
     if not proxies_with_ping:
         return 0, None
 
     max_proxies = get_profile_max_proxies(profile_id)
+    if is_instant:
+        max_proxies = len(proxies_with_ping)  # همه را ارسال کن
+
     show_date = get_profile_show_date_proxy(profile_id)
     proxy_text = ""
     for proxy_url, ping, flag in proxies_with_ping[:max_proxies]:
@@ -1385,7 +1422,7 @@ async def post_proxies(bot, profile_id, proxies_with_ping):
     buttons = [sponsor_button] if sponsor_button else None
     return proxy_count, (text, buttons)
 
-async def post_working_configs(bot, profile_id, working, proxies_with_ping, source_for_seen="", force=False, skip_duplicate=False):
+async def post_working_configs(bot, profile_id, working, proxies_with_ping, source_for_seen="", force=False, skip_duplicate=False, is_instant=False):
     dest = get_profile_dest(profile_id)
     if not dest:
         return 0, "❌ هیچ مقصدی تنظیم نشده!"
@@ -1411,7 +1448,7 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
         if not unique_working:
             log.info("ℹ️ No new configs to post (all duplicates).")
         else:
-            config_count = await post_configs(bot, profile_id, unique_working, source_for_seen, skip_duplicate=skip_duplicate)
+            config_count = await post_configs(bot, profile_id, unique_working, source_for_seen, skip_duplicate=skip_duplicate, is_instant=is_instant)
             if config_count > 0:
                 total_configs = config_count
                 results.append(f"{config_count} configs")
@@ -1424,7 +1461,7 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, sour
                 if skip_duplicate or not is_proxy_posted(profile_id, p[0]):
                     unique_proxies.append(p)
             if unique_proxies:
-                proxy_count, proxy_payload = await post_proxies(bot, profile_id, unique_proxies)
+                proxy_count, proxy_payload = await post_proxies(bot, profile_id, unique_proxies, is_instant=is_instant)
                 if proxy_count > 0 and proxy_payload:
                     text, buttons = proxy_payload
                     sent = await send_to_destination(bot, profile_id, text, buttons)
@@ -1451,9 +1488,10 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
         return 0, "profile not found"
 
     sources = get_profile_sources(profile_id)
+    sources = [normalize_channel_input(s) for s in sources if normalize_channel_input(s)]
     if not sources:
-        log.error(f"❌ Profile {profile_id} has no sources!")
-        return 0, "no sources"
+        log.error(f"❌ Profile {profile_id} has no valid sources after cleaning!")
+        return 0, "no valid sources"
 
     dest = get_profile_dest(profile_id)
     if not dest:
@@ -1471,7 +1509,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
     seen_urls = set()
 
     if is_instant:
-        scrape_limit = 3
+        scrape_limit = len(sources)  # همه کانال‌ها
         test_limit = 0
         ping_timeout = 3
         max_concurrent = 50
@@ -1585,7 +1623,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
         if valid_proxies:
             log.info(f"📊 Processing {len(valid_proxies)} proxies...")
             if is_instant:
-                for proxy_url in valid_proxies[:10]:
+                for proxy_url in valid_proxies:
                     flag = "🌐"
                     proxy_with_ping.append((proxy_url, 0, flag))
                 log.info(f"⚡ Instant: {len(proxy_with_ping)} proxies ready")
@@ -1618,13 +1656,13 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
         return 0, "no working configs or proxies"
 
     log.info(f"📤 Posting {len(working)} configs and {len(proxy_with_ping)} proxies for profile {profile_id}...")
-    result = await post_working_configs(bot, profile_id, working, proxy_with_ping, source_for_seen="auto", force=False, skip_duplicate=True)
+    result = await post_working_configs(bot, profile_id, working, proxy_with_ping, source_for_seen="auto", force=False, skip_duplicate=True, is_instant=is_instant)
     log.info(f"✅ Cycle result for profile {profile_id}: {result}")
     log.info("=" * 50)
     return result
 
 # ======================================================================
-# حلقه خودکار (اصلاح شده با لاگ‌های دقیق و مدیریت خطا)
+# حلقه خودکار
 # ======================================================================
 async def profile_loop(bot, profile_id):
     log.info(f"🔄 Starting auto loop for profile {profile_id}")
@@ -1640,7 +1678,6 @@ async def profile_loop(bot, profile_id):
             timer_expiry = profile.get("timer_expiry")
             timer_duration = profile.get("timer_duration", 0)
 
-            # ===== بررسی تایمر =====
             if timer_expiry:
                 try:
                     expiry = datetime.fromisoformat(timer_expiry)
@@ -1664,12 +1701,11 @@ async def profile_loop(bot, profile_id):
                     log.error(f"Error parsing timer for profile {profile_id}: {e}")
                     clear_profile_timer(profile_id)
 
-            # ===== حلقه عادی =====
             if interval == 0:
                 log.info(f"⚡ INSTANT UPDATE for profile {profile_id} ({dest_name})")
                 n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=True)
                 log.info(f"[instant profile {profile_id}] result: {n} - {m}")
-                await asyncio.sleep(3)  # هر ۳ ثانیه یک بار
+                await asyncio.sleep(3)
             else:
                 now = datetime.now(TEHRAN_TZ)
                 next_run = now + timedelta(minutes=interval)
@@ -1693,21 +1729,16 @@ async def profile_loop(bot, profile_id):
             await asyncio.sleep(60)
 
 # ======================================================================
-# توابع دریافت لاگ (جدید)
+# توابع دریافت لاگ (با بازه‌های زمانی)
 # ======================================================================
-async def get_logs(update, context, profile_id, log_type="full"):
-    """
-    log_type: 'full' or 'errors'
-    """
+async def get_logs(update, context, profile_id, log_type="full", time_range_minutes=30):
     log_file_path = os.path.join(DATA_DIR, "bot.log")
     if not os.path.exists(log_file_path):
         await update.message.reply_text("❌ فایل لاگ وجود ندارد.")
         return
 
-    # زمان ۳۰ دقیقه قبل
-    now = datetime.now(TEHRAN_TZ)
-    cutoff = now - timedelta(minutes=30)
-    cutoff_str = cutoff.strftime('%Y-%m-%d %H:%M:%S')
+    now_utc = datetime.utcnow()
+    cutoff_utc = now_utc - timedelta(minutes=time_range_minutes)
 
     try:
         with open(log_file_path, 'r', encoding='utf-8') as f:
@@ -1716,23 +1747,19 @@ async def get_logs(update, context, profile_id, log_type="full"):
         await update.message.reply_text(f"❌ خطا در خواندن لاگ: {e}")
         return
 
-    # فیلتر بر اساس زمان و نوع
     filtered = []
     error_keywords = ["ERROR", "❌", "CRITICAL", "Exception", "Traceback"]
     for line in lines:
-        # استخراج timestamp از خط (فرض می‌کنیم فرمت 'YYYY-MM-DD HH:MM:SS' در ابتدای خط است)
         match = re.match(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', line)
-        if match:
-            ts_str = match.group(1)
-            try:
-                ts = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')
-                ts = TEHRAN_TZ.localize(ts)  # منطقه‌دار کردن
-            except:
-                continue
-            if ts < cutoff:
-                continue  # قدیمی‌تر از ۳۰ دقیقه
-        else:
-            continue  # بدون timestamp قابل قبول نیست
+        if not match:
+            continue
+        ts_str = match.group(1)
+        try:
+            ts = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')
+        except:
+            continue
+        if ts < cutoff_utc:
+            continue
 
         if log_type == "errors":
             if any(kw in line for kw in error_keywords):
@@ -1741,22 +1768,25 @@ async def get_logs(update, context, profile_id, log_type="full"):
             filtered.append(line)
 
     if not filtered:
-        await update.message.reply_text(f"❌ هیچ لاگ {log_type} در ۳۰ دقیقه گذشته یافت نشد.")
+        await update.message.reply_text(f"❌ هیچ لاگ {log_type} در {time_range_minutes} دقیقهٔ اخیر یافت نشد.")
         return
 
-    # ساخت فایل txt
-    content = "\n".join(filtered[-500:])  # حداکثر ۵۰۰ خط برای جلوگیری از بزرگ شدن فایل
-    filename = f"logs_{log_type}_{get_tehran_date()}.txt"
+    max_lines = 500
+    if len(filtered) > max_lines:
+        filtered = filtered[-max_lines:]
+
+    content = "\n".join(filtered)
+    range_label = f"{time_range_minutes}m" if time_range_minutes < 1440 else "24h"
+    filename = f"logs_{log_type}_{range_label}_{get_tehran_date()}.txt"
     filepath = os.path.join(DATA_DIR, filename)
     with open(filepath, 'w', encoding='utf-8') as f:
         f.write(content)
 
-    # ارسال فایل
     with open(filepath, 'rb') as f:
         await update.message.reply_document(
             document=f,
             filename=filename,
-            caption=f"📋 لاگ {log_type} (۳۰ دقیقه آخر) - {len(filtered)} خط"
+            caption=f"📋 لاگ {log_type} ({range_label} اخیر) - {len(filtered)} خط"
         )
     os.remove(filepath)
 
@@ -1797,7 +1827,7 @@ async def send_daily_report(app):
         log.error(f"❌ Failed to send daily report: {e}")
 
 # ======================================================================
-# بک‌آپ کانفیگ/پروکسی
+# بک‌آپ کانفیگ/پروکسی (دستی)
 # ======================================================================
 async def export_backup(update, context, profile_id, backup_type, count=None):
     try:
@@ -1843,7 +1873,7 @@ async def export_backup(update, context, profile_id, backup_type, count=None):
         await update.message.reply_text(f"❌ خطا در بک‌آپ: {str(e)[:100]}")
 
 # ======================================================================
-# کیبوردها و پیام‌ها
+# کیبوردها و پیام‌ها (فقط بخش‌های ضروری)
 # ======================================================================
 BOT_REF = None
 BOT_LANG = "fa"
@@ -1996,9 +2026,13 @@ T = {
         "timer_custom_prompt": "⏱️ تعداد دقیقه را وارد کنید:",
         "timer_status_active": "⏳ {remaining} دقیقه باقی‌مانده",
         "timer_status_inactive": "غیرفعال",
-        # دکمه‌های جدید لاگ
-        "btn_log_full": "📋 دریافت لاگ کامل (۳۰ دقیقه)",
-        "btn_log_errors": "📋 دریافت لاگ خطاها (۳۰ دقیقه)",
+        "btn_log_menu": "📋 دریافت لاگ",
+        "log_menu_title": "📋 **دریافت لاگ**\n\nنوع لاگ مورد نظر را انتخاب کنید:",
+        "log_range_title": "📋 **دریافت لاگ {log_type}**\n\nبازه‌ی زمانی مورد نظر را انتخاب کنید:",
+        "log_range_30m": "📅 ۳۰ دقیقه",
+        "log_range_1h": "📅 ۱ ساعت",
+        "log_range_6h": "📅 ۶ ساعت",
+        "log_range_24h": "📅 ۲۴ ساعت",
     },
     "en": {
         "btn_timer": "⏱️ Timer",
@@ -2016,8 +2050,13 @@ T = {
         "timer_custom_prompt": "⏱️ Enter minutes:",
         "timer_status_active": "⏳ {remaining} min remaining",
         "timer_status_inactive": "Inactive",
-        "btn_log_full": "📋 Get full logs (last 30 min)",
-        "btn_log_errors": "📋 Get error logs (last 30 min)",
+        "btn_log_menu": "📋 Get Logs",
+        "log_menu_title": "📋 **Get Logs**\n\nSelect log type:",
+        "log_range_title": "📋 **Get {log_type} Logs**\n\nSelect time range:",
+        "log_range_30m": "📅 30 min",
+        "log_range_1h": "📅 1 hour",
+        "log_range_6h": "📅 6 hours",
+        "log_range_24h": "📅 24 hours",
     }
 }
 
@@ -2031,7 +2070,7 @@ def msg(key, **kwargs):
     return text
 
 # ======================================================================
-# کیبوردها با استایل‌های رنگی
+# کیبوردها
 # ======================================================================
 def profiles_kb():
     profiles = get_profiles()
@@ -2104,9 +2143,7 @@ def profile_admin_kb(profile_id):
          InlineKeyboardButton(msg("btn_backup_export"), callback_data=f"backup_export_menu_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_timer"), callback_data=f"timer_menu_{profile_id}", style="primary"),
          InlineKeyboardButton(f"⏱️ {timer_status}", callback_data="dummy", style="primary")],
-        # دکمه‌های جدید لاگ
-        [InlineKeyboardButton(msg("btn_log_full"), callback_data=f"log_full_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_log_errors"), callback_data=f"log_errors_{profile_id}", style="danger")],
+        [InlineKeyboardButton(msg("btn_log_menu"), callback_data=f"log_menu_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_reset"), callback_data=f"rn_{profile_id}", style="primary"),
          InlineKeyboardButton(msg("btn_clear"), callback_data=f"cd1_{profile_id}", style="danger")],
         [InlineKeyboardButton("❌ Delete Profile", callback_data=f"delprof_{profile_id}", style="danger")],
@@ -2190,6 +2227,22 @@ def timer_menu_kb(profile_id):
         [InlineKeyboardButton(msg("timer_option_8h"), callback_data=f"timer_set_{profile_id}_480", style="primary")],
         [InlineKeyboardButton(msg("timer_option_custom"), callback_data=f"timer_custom_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("timer_disable"), callback_data=f"timer_clear_{profile_id}", style="danger")],
+        [InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")],
+    ])
+
+def log_range_kb(profile_id, log_type):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(msg("log_range_30m"), callback_data=f"log_range_{profile_id}_{log_type}_30", style="primary")],
+        [InlineKeyboardButton(msg("log_range_1h"), callback_data=f"log_range_{profile_id}_{log_type}_60", style="primary")],
+        [InlineKeyboardButton(msg("log_range_6h"), callback_data=f"log_range_{profile_id}_{log_type}_360", style="primary")],
+        [InlineKeyboardButton(msg("log_range_24h"), callback_data=f"log_range_{profile_id}_{log_type}_1440", style="primary")],
+        [InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")],
+    ])
+
+def log_menu_kb(profile_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 لاگ کامل", callback_data=f"log_full_{profile_id}", style="primary")],
+        [InlineKeyboardButton("🚨 فقط خطاها", callback_data=f"log_errors_{profile_id}", style="danger")],
         [InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")],
     ])
 
@@ -2315,11 +2368,27 @@ async def on_callback(u, ctx):
         d = q.data or ""
         log.info(f"📨 Callback data: {d}")
 
-        # ===== دکمه‌ی بی‌اثر (dummy) =====
         if d == "dummy":
             return
 
-        # ===== دریافت لاگ =====
+        # ===== منوی لاگ =====
+        if d.startswith("log_menu_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                await q.edit_message_text(
+                    msg("log_menu_title"),
+                    parse_mode="HTML",
+                    reply_markup=log_menu_kb(profile_id)
+                )
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
         if d.startswith("log_full_") or d.startswith("log_errors_"):
             parts = d.split("_")
             if len(parts) >= 3:
@@ -2329,8 +2398,26 @@ async def on_callback(u, ctx):
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
                 log_type = "full" if d.startswith("log_full_") else "errors"
-                await get_logs(q, ctx, profile_id, log_type)
-                # بعد از ارسال فایل، پیام را به حالت قبل برمی‌گردانیم
+                await q.edit_message_text(
+                    msg("log_range_title", log_type=log_type),
+                    parse_mode="HTML",
+                    reply_markup=log_range_kb(profile_id, log_type)
+                )
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("log_range_"):
+            parts = d.split("_")
+            if len(parts) >= 5:
+                try:
+                    profile_id = int(parts[2])
+                    log_type = parts[3]
+                    minutes = int(parts[4])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                await get_logs(q, ctx, profile_id, log_type, minutes)
                 await show_profile_admin(q.message, profile_id)
             else:
                 await q.answer("⚠️ خطا در داده")
@@ -2609,7 +2696,6 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # حذف پروفایل با تأیید دو مرحله‌ای
         if d.startswith("delprof_"):
             parts = d.split("_")
             if len(parts) >= 2:
@@ -3450,7 +3536,6 @@ async def on_text(u, ctx):
     if u.effective_user.id != ADMIN_ID:
         return
 
-    # ---- تایمر سفارشی ----
     if ctx.user_data.get("action", "").startswith("timer_custom_"):
         profile_id = int(ctx.user_data["action"].split("_")[2])
         try:
@@ -3466,7 +3551,6 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    # ---- بک‌آپ custom count ----
     if ctx.user_data.get("backup_export_custom"):
         data = ctx.user_data["backup_export_custom"]
         profile_id = data["profile_id"]
@@ -3483,7 +3567,6 @@ async def on_text(u, ctx):
         await u.message.reply_text("✅ بک‌آپ ارسال شد.")
         return
 
-    # ---- ویرایش اسپانسر (فیلدهای name, url, text) ----
     if ctx.user_data.get("sponsor_edit_field"):
         field = ctx.user_data["sponsor_edit_field"]
         profile_id = ctx.user_data.get("sponsor_edit_profile_id")
@@ -3518,12 +3601,10 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    # ---- مرحله رنگ در افزودن اسپانسر جدید (از طریق دکمه انجام می‌شود) ----
     if ctx.user_data.get("sponsor_step") == "color_wait":
         await u.message.reply_text("🎨 لطفاً رنگ را با دکمه‌های بالا انتخاب کنید.")
         return
 
-    # ---- مراحل اسپانسر جدید ----
     if ctx.user_data.get("sponsor_step"):
         profile_id = ctx.user_data.get("sponsor_profile_id")
         if not profile_id:
@@ -3585,7 +3666,6 @@ async def on_text(u, ctx):
 
     t = u.message.text.strip()
 
-    # ===== افزودن لیست سیاه =====
     if a.startswith("bl_add_"):
         profile_id = int(a.split("_")[2])
         if not t:
@@ -3610,7 +3690,6 @@ async def on_text(u, ctx):
         await u.message.reply_text(txt, parse_mode="HTML", reply_markup=blacklist_kb(profile_id))
         return
 
-    # ===== تنظیم کرون =====
     if a.startswith("setcron_"):
         profile_id = int(a.split("_")[1])
         cron = t.strip()
@@ -3628,14 +3707,15 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    # ===== بقیه اکشن‌ها =====
     if a == "prof_add":
         dest_name = t if t else None
         if not dest_name:
             await u.message.reply_text("❌ نام مقصد خالی است.")
             return
-        if not dest_name.startswith("@") and not dest_name.isdigit():
-            dest_name = "@" + dest_name
+        dest_name = normalize_channel_input(dest_name)
+        if not dest_name:
+            await u.message.reply_text("❌ نام مقصد نامعتبر است.")
+            return
         profiles = get_profiles()
         if any(p["dest_name"] == dest_name for p in profiles):
             await u.message.reply_text("❌ این مقصد قبلاً وجود دارد.")
@@ -3656,13 +3736,17 @@ async def on_text(u, ctx):
             await u.message.reply_text("❌ ورودی خالی است.")
             return
         items = re.split(r'[,،\n]+', t)
-        items = [x.strip() for x in items if x.strip()]
+        normalized_items = []
+        for item in items:
+            item = normalize_channel_input(item.strip())
+            if item:
+                normalized_items.append(item)
+        if not normalized_items:
+            await u.message.reply_text("❌ هیچ منبع معتبری یافت نشد.")
+            return
         srcs = get_profile_sources(profile_id)
         added = []
-        for item in items:
-            if not item.startswith("@"):
-                item = "@" + item
-            item = item.lower()
+        for item in normalized_items:
             if item not in srcs:
                 srcs.append(item)
                 added.append(item)
@@ -3682,8 +3766,10 @@ async def on_text(u, ctx):
             set_profile_dest(profile_id, "")
             await u.message.reply_text(msg("removed"))
         else:
-            if not dest.startswith("@") and not dest.isdigit():
-                dest = "@" + dest
+            dest = normalize_channel_input(dest)
+            if not dest:
+                await u.message.reply_text("❌ مقصد نامعتبر است.")
+                return
             set_profile_dest(profile_id, dest)
             await u.message.reply_text(msg("dest_set", dest=dest))
         del ctx.user_data["action"]
@@ -3693,6 +3779,8 @@ async def on_text(u, ctx):
     if a.startswith("ac_"):
         profile_id = int(a.split("_")[1])
         name = t if t else ""
+        if name:
+            name = normalize_channel_input(name)
         set_profile_dest(profile_id, name)
         await u.message.reply_text(msg("name_set", name=name if name else "حذف شد"))
         del ctx.user_data["action"]
@@ -3875,7 +3963,7 @@ async def process_manual_text(u, message, profile_id, is_document=False):
         if len(working) > 0:
             update_profile(profile_id, max_post=len(working))
         try:
-            n, m = await post_working_configs(u.get_bot(), profile_id, working, proxy_with_ping, source_for_seen="manual", force=True, skip_duplicate=True)
+            n, m = await post_working_configs(u.get_bot(), profile_id, working, proxy_with_ping, source_for_seen="manual", force=True, skip_duplicate=True, is_instant=True)
         finally:
             update_profile(profile_id, max_post=old_max)
 

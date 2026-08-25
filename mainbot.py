@@ -1624,7 +1624,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
     return result
 
 # ======================================================================
-# حلقه خودکار (با پشتیبانی از تایمر)
+# حلقه خودکار (اصلاح شده با لاگ‌های دقیق و مدیریت خطا)
 # ======================================================================
 async def profile_loop(bot, profile_id):
     log.info(f"🔄 Starting auto loop for profile {profile_id}")
@@ -1656,7 +1656,7 @@ async def profile_loop(bot, profile_id):
                             ADMIN_ID,
                             f"⏰ تایمر پروفایل {dest_name} (ID: {profile_id}) به پایان رسید. ارسال خودکار از سر گرفته شد."
                         )
-                        log.info(f"✅ Timer expired for profile {profile_id}, resuming auto post")
+                        log.info(f"✅ Timer expired for profile {profile_id}, running cycle immediately")
                         n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=(interval==0))
                         log.info(f"[auto profile {profile_id}] result: {n} - {m}")
                         continue
@@ -1666,10 +1666,10 @@ async def profile_loop(bot, profile_id):
 
             # ===== حلقه عادی =====
             if interval == 0:
-                await asyncio.sleep(3)
                 log.info(f"⚡ INSTANT UPDATE for profile {profile_id} ({dest_name})")
                 n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=True)
                 log.info(f"[instant profile {profile_id}] result: {n} - {m}")
+                await asyncio.sleep(3)  # هر ۳ ثانیه یک بار
             else:
                 now = datetime.now(TEHRAN_TZ)
                 next_run = now + timedelta(minutes=interval)
@@ -1689,7 +1689,76 @@ async def profile_loop(bot, profile_id):
             break
         except Exception as e:
             log.error(f"❌ profile_loop error for {profile_id}: {e}")
+            log.error(traceback.format_exc())
             await asyncio.sleep(60)
+
+# ======================================================================
+# توابع دریافت لاگ (جدید)
+# ======================================================================
+async def get_logs(update, context, profile_id, log_type="full"):
+    """
+    log_type: 'full' or 'errors'
+    """
+    log_file_path = os.path.join(DATA_DIR, "bot.log")
+    if not os.path.exists(log_file_path):
+        await update.message.reply_text("❌ فایل لاگ وجود ندارد.")
+        return
+
+    # زمان ۳۰ دقیقه قبل
+    now = datetime.now(TEHRAN_TZ)
+    cutoff = now - timedelta(minutes=30)
+    cutoff_str = cutoff.strftime('%Y-%m-%d %H:%M:%S')
+
+    try:
+        with open(log_file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطا در خواندن لاگ: {e}")
+        return
+
+    # فیلتر بر اساس زمان و نوع
+    filtered = []
+    error_keywords = ["ERROR", "❌", "CRITICAL", "Exception", "Traceback"]
+    for line in lines:
+        # استخراج timestamp از خط (فرض می‌کنیم فرمت 'YYYY-MM-DD HH:MM:SS' در ابتدای خط است)
+        match = re.match(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', line)
+        if match:
+            ts_str = match.group(1)
+            try:
+                ts = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')
+                ts = TEHRAN_TZ.localize(ts)  # منطقه‌دار کردن
+            except:
+                continue
+            if ts < cutoff:
+                continue  # قدیمی‌تر از ۳۰ دقیقه
+        else:
+            continue  # بدون timestamp قابل قبول نیست
+
+        if log_type == "errors":
+            if any(kw in line for kw in error_keywords):
+                filtered.append(line)
+        else:
+            filtered.append(line)
+
+    if not filtered:
+        await update.message.reply_text(f"❌ هیچ لاگ {log_type} در ۳۰ دقیقه گذشته یافت نشد.")
+        return
+
+    # ساخت فایل txt
+    content = "\n".join(filtered[-500:])  # حداکثر ۵۰۰ خط برای جلوگیری از بزرگ شدن فایل
+    filename = f"logs_{log_type}_{get_tehran_date()}.txt"
+    filepath = os.path.join(DATA_DIR, filename)
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+    # ارسال فایل
+    with open(filepath, 'rb') as f:
+        await update.message.reply_document(
+            document=f,
+            filename=filename,
+            caption=f"📋 لاگ {log_type} (۳۰ دقیقه آخر) - {len(filtered)} خط"
+        )
+    os.remove(filepath)
 
 # ======================================================================
 # گزارش روزانه
@@ -1927,9 +1996,11 @@ T = {
         "timer_custom_prompt": "⏱️ تعداد دقیقه را وارد کنید:",
         "timer_status_active": "⏳ {remaining} دقیقه باقی‌مانده",
         "timer_status_inactive": "غیرفعال",
+        # دکمه‌های جدید لاگ
+        "btn_log_full": "📋 دریافت لاگ کامل (۳۰ دقیقه)",
+        "btn_log_errors": "📋 دریافت لاگ خطاها (۳۰ دقیقه)",
     },
     "en": {
-        # ... (بقیه متن‌های انگلیسی در صورت نیاز)
         "btn_timer": "⏱️ Timer",
         "timer_menu": "⏱️ **Timer Management for {name}**\n\nCurrent status: {status}\n\nSelect pause duration before auto-posting resumes.",
         "timer_set": "✅ Timer set for {minutes} minutes. Auto-posting will pause until timer ends.",
@@ -1945,6 +2016,8 @@ T = {
         "timer_custom_prompt": "⏱️ Enter minutes:",
         "timer_status_active": "⏳ {remaining} min remaining",
         "timer_status_inactive": "Inactive",
+        "btn_log_full": "📋 Get full logs (last 30 min)",
+        "btn_log_errors": "📋 Get error logs (last 30 min)",
     }
 }
 
@@ -2031,6 +2104,9 @@ def profile_admin_kb(profile_id):
          InlineKeyboardButton(msg("btn_backup_export"), callback_data=f"backup_export_menu_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_timer"), callback_data=f"timer_menu_{profile_id}", style="primary"),
          InlineKeyboardButton(f"⏱️ {timer_status}", callback_data="dummy", style="primary")],
+        # دکمه‌های جدید لاگ
+        [InlineKeyboardButton(msg("btn_log_full"), callback_data=f"log_full_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_log_errors"), callback_data=f"log_errors_{profile_id}", style="danger")],
         [InlineKeyboardButton(msg("btn_reset"), callback_data=f"rn_{profile_id}", style="primary"),
          InlineKeyboardButton(msg("btn_clear"), callback_data=f"cd1_{profile_id}", style="danger")],
         [InlineKeyboardButton("❌ Delete Profile", callback_data=f"delprof_{profile_id}", style="danger")],
@@ -2241,6 +2317,23 @@ async def on_callback(u, ctx):
 
         # ===== دکمه‌ی بی‌اثر (dummy) =====
         if d == "dummy":
+            return
+
+        # ===== دریافت لاگ =====
+        if d.startswith("log_full_") or d.startswith("log_errors_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                log_type = "full" if d.startswith("log_full_") else "errors"
+                await get_logs(q, ctx, profile_id, log_type)
+                # بعد از ارسال فایل، پیام را به حالت قبل برمی‌گردانیم
+                await show_profile_admin(q.message, profile_id)
+            else:
+                await q.answer("⚠️ خطا در داده")
             return
 
         # ===== تایمر =====
@@ -3824,6 +3917,7 @@ async def post_init(app):
 
     if ENABLE_AUTO:
         for prof in profiles:
+            log.info(f"⏰ Creating auto loop task for profile {prof['id']} ({prof['dest_name']})")
             app.create_task(profile_loop(app.bot, prof["id"]))
         log.info("⏰ Scheduler started for all profiles")
 

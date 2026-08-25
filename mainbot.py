@@ -523,7 +523,6 @@ def get_sponsor(profile_id):
         }
     return None
 
-# اصلاح: اضافه کردن پارامتر enabled
 def set_sponsor(profile_id, name, url, button_text="Advertisement", color="primary", enabled=1):
     now = get_tehran_time()
     c.execute("DELETE FROM sponsors WHERE profile_id=?", (profile_id,))
@@ -1588,36 +1587,40 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
 # حلقه خودکار (با لاگ‌های بیشتر و پایداری)
 # ======================================================================
 async def profile_loop(bot, profile_id):
-    profile = get_profile(profile_id)
-    if not profile:
-        log.error(f"❌ Profile {profile_id} not found, stopping loop.")
-        return
-
-    interval = profile.get("interval_min", 5)
-    log.info(f"🔄 Starting auto loop for profile {profile_id} with interval {interval} min")
+    log.info(f"🔄 Starting auto loop for profile {profile_id}")
     while True:
         try:
-            # اگر interval == 0 یعنی حالت لحظه‌ای
+            # دریافت اطلاعات به‌روز پروفایل در هر تکرار
+            profile = get_profile(profile_id)
+            if not profile:
+                log.error(f"❌ Profile {profile_id} not found, stopping loop.")
+                break
+
+            interval = profile.get("interval_min", 5)
+            dest_name = profile.get("dest_name", "unknown")
+
             if interval == 0:
-                # با کمی تاخیر برای جلوگیری از بار زیاد
+                # حالت لحظه‌ای: هر ۳ ثانیه یک بار
                 await asyncio.sleep(3)
-                log.info(f"⚡ INSTANT UPDATE for profile {profile_id}")
+                log.info(f"⚡ INSTANT UPDATE for profile {profile_id} ({dest_name})")
                 n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=True)
                 log.info(f"[instant profile {profile_id}] result: {n} - {m}")
             else:
-                # محاسبه زمان تا اجرای بعدی
+                # حالت زمان‌بندی شده با بازه‌ی دقیقه‌ای
                 now = datetime.now(TEHRAN_TZ)
                 next_run = now + timedelta(minutes=interval)
                 sleep_seconds = (next_run - now).total_seconds()
                 if sleep_seconds > 0:
-                    log.info(f"⏳ Profile {profile_id} sleeping for {sleep_seconds:.0f} seconds until {next_run.strftime('%H:%M:%S')}")
+                    log.info(f"⏳ Profile {profile_id} ({dest_name}) sleeping for {sleep_seconds:.0f} seconds until {next_run.strftime('%H:%M:%S')}")
                     await asyncio.sleep(sleep_seconds)
                 else:
-                    # اگر تاخیر منفی شد (به دلیل اشکال) یک ثانیه صبر کن
+                    # اگر خواب منفی شد (نادر) یک ثانیه صبر کن
                     await asyncio.sleep(1)
-                log.info(f"⏰ AUTO TICK for profile {profile_id} ({profile['dest_name']})")
+
+                log.info(f"⏰ AUTO TICK for profile {profile_id} ({dest_name})")
                 n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=False)
                 log.info(f"[auto profile {profile_id}] result: {n} - {m}")
+
         except asyncio.CancelledError:
             log.info(f"🛑 Auto loop for profile {profile_id} cancelled.")
             break
@@ -2578,9 +2581,8 @@ async def on_callback(u, ctx):
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
                 sponsor = get_sponsor(profile_id)
-                # اگر اسپانسر وجود ندارد و مرحله اضافه کردن است، نام و لینک و متن باید قبلاً در user_data ذخیره شده باشند.
                 if not sponsor:
-                    # برای افزودن جدید (مرحله color_wait)
+                    # اگر اسپانسر وجود ندارد و مرحله افزودن است
                     if ctx.user_data.get("sponsor_step") == "color_wait":
                         name = ctx.user_data.get("sponsor_name")
                         url = ctx.user_data.get("sponsor_url")
@@ -2600,11 +2602,9 @@ async def on_callback(u, ctx):
                         await q.answer("اسپانسری وجود ندارد.")
                         return
                 else:
-                    # ویرایش رنگ
                     update_sponsor_color(profile_id, color)
                     await q.answer(f"✅ رنگ به {color} تغییر کرد.")
-                    # اگر از مرحله ویرایش آمده، فقط رنگ را تغییر بده
-                    # پاک کردن state های اضافی
+                    # پاک کردن state های ویرایش در صورت وجود
                     if ctx.user_data.get("sponsor_edit_field"):
                         del ctx.user_data["sponsor_edit_field"]
                     await show_profile_admin(q.message, profile_id)
@@ -3224,7 +3224,7 @@ async def on_text(u, ctx):
             await u.message.reply_text("فیلد نامعتبر.")
             del ctx.user_data["sponsor_edit_field"]
             return
-        # حفظ وضعیت فعال/غیرفعال
+        # ذخیره با وضعیت فعال/غیرفعال فعلی
         set_sponsor(profile_id, name, url, btn_text, color, enabled=int(enabled))
         await u.message.reply_text(msg("sp_updated"), parse_mode="HTML")
         del ctx.user_data["sponsor_edit_field"]

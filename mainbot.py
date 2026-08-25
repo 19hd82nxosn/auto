@@ -93,13 +93,17 @@ def ensure_column(table, column, col_type, default=None):
 # ======================================================================
 # ایجاد جداول
 # ======================================================================
+# جدول seen با کلید یکتای صحیح شامل profile_id
 c.execute("""CREATE TABLE IF NOT EXISTS seen (
     uuid TEXT,
     address TEXT,
     source TEXT DEFAULT '',
     first_seen TEXT,
     last_posted TEXT,
-    UNIQUE(uuid, address))""")
+    profile_id INTEGER DEFAULT 1,
+    full_url TEXT DEFAULT '',
+    backup_num INTEGER DEFAULT 0,
+    UNIQUE(uuid, address, profile_id))""")
 
 c.execute("""CREATE TABLE IF NOT EXISTS cfg (
     k TEXT PRIMARY KEY,
@@ -111,7 +115,7 @@ c.execute("""CREATE TABLE IF NOT EXISTS posts (
     count INTEGER,
     created_at TEXT)""")
 
-ensure_column("seen", "source", "TEXT DEFAULT ''")
+# اطمینان از وجود ستون‌های اضافی (اگر جدول قدیمی باشد)
 ensure_column("seen", "profile_id", "INTEGER DEFAULT 1", 1)
 ensure_column("seen", "full_url", "TEXT DEFAULT ''", "")
 ensure_column("seen", "backup_num", "INTEGER DEFAULT 0", 0)
@@ -187,6 +191,49 @@ c.execute("""CREATE TABLE IF NOT EXISTS blacklist (
     created_at TEXT,
     UNIQUE(profile_id, word))""")
 conn.commit()
+
+# ======================================================================
+# مهاجرت برای اصلاح کلید یکتای جدول seen (افزودن profile_id)
+# ======================================================================
+def migrate_seen_table():
+    """اگر کلید یکتای جدول seen شامل profile_id نباشد، جدول را بازسازی می‌کند."""
+    c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='seen'")
+    row = c.fetchone()
+    if not row:
+        return
+    create_sql = row[0].upper()
+    # بررسی وجود UNIQUE شامل profile_id
+    import re
+    match = re.search(r'UNIQUE\s*\(([^)]+)\)', create_sql, re.IGNORECASE)
+    if match:
+        unique_cols = [col.strip().lower() for col in match.group(1).split(',')]
+        if 'profile_id' in unique_cols:
+            log.info("✅ Seen table already has correct UNIQUE constraint.")
+            return
+    # در غیر این صورت بازسازی می‌کنیم
+    log.info("🔄 Seen table missing profile_id in UNIQUE, migrating...")
+    try:
+        c.execute('''CREATE TABLE seen_new (
+            uuid TEXT,
+            address TEXT,
+            source TEXT DEFAULT '',
+            first_seen TEXT,
+            last_posted TEXT,
+            profile_id INTEGER DEFAULT 1,
+            full_url TEXT DEFAULT '',
+            backup_num INTEGER DEFAULT 0,
+            UNIQUE(uuid, address, profile_id)
+        )''')
+        c.execute('''INSERT INTO seen_new (uuid, address, source, first_seen, last_posted, profile_id, full_url, backup_num)
+                     SELECT uuid, address, source, first_seen, last_posted, profile_id, full_url, backup_num FROM seen''')
+        c.execute('DROP TABLE seen')
+        c.execute('ALTER TABLE seen_new RENAME TO seen')
+        conn.commit()
+        log.info("✅ Seen table migrated successfully.")
+    except Exception as e:
+        log.error(f"❌ Migration failed: {e}")
+
+migrate_seen_table()
 
 # ======================================================================
 # تعمیر نوع ستون custom_query
@@ -863,8 +910,6 @@ async def check_and_auto_backup(profile_id):
                         filename=filename,
                         caption=f"📤 بک‌آپ خودکار پروفایل {profile_name} (ID:{profile_id}) - {start_num} تا {end_num} (تعداد: {len(links)})"
                     )
-                # فایل را حذف نمی‌کنیم تا روی سرور بماند
-                # os.remove(filepath)
             else:
                 log.warning("BOT_REF is None, cannot send backup.")
 
@@ -1369,9 +1414,8 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
     sponsor = get_sponsor(profile_id)
     sponsor_button = None
     if sponsor and sponsor["enabled"]:
-        # استفاده از رنگ ذخیره‌شده برای استایل دکمه
         btn_style = sponsor["color"] if sponsor["color"] in ["primary", "success", "danger"] else "primary"
-        sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"], style=btn_style)
+        sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"])
 
     sent_count = 0
     for i, (url, ping, node_count) in enumerate(items, 1):
@@ -1504,7 +1548,7 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False):
     sponsor_button = None
     if sponsor and sponsor["enabled"]:
         btn_style = sponsor["color"] if sponsor["color"] in ["primary", "success", "danger"] else "primary"
-        sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"], style=btn_style)
+        sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"])
     buttons = [sponsor_button] if sponsor_button else None
     return proxy_count, (text, buttons)
 
@@ -2207,9 +2251,9 @@ def profiles_kb():
     profiles = get_profiles()
     btns = []
     for p in profiles:
-        btns.append([InlineKeyboardButton(f"{p['dest_name']} (ID:{p['id']})", callback_data=f"prof_{p['id']}", style="primary")])
-    btns.append([InlineKeyboardButton("➕ Add Profile", callback_data="prof_add", style="success")])
-    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data="back_home", style="primary")])
+        btns.append([InlineKeyboardButton(f"{p['dest_name']} (ID:{p['id']})", callback_data=f"prof_{p['id']}")])
+    btns.append([InlineKeyboardButton("➕ Add Profile", callback_data="prof_add")])
+    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data="back_home")])
     return InlineKeyboardMarkup(btns)
 
 def profile_admin_kb(profile_id):
@@ -2248,48 +2292,48 @@ def profile_admin_kb(profile_id):
     num_btn = msg("btn_toggle_numbers", status=num_status)
 
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(msg("btn_manage_sources"), callback_data=f"src_list_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_dest_list"), callback_data=f"dl_{profile_id}", style="primary")],
-        [InlineKeyboardButton(f"📢 اسپانسر: {sponsor_status}", callback_data=f"sp_menu_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_set_name"), callback_data=f"ac_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_set_banner_config"), callback_data=f"ab_config_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_set_banner_proxy"), callback_data=f"ab_proxy_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_set_time"), callback_data=f"ai_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_set_max"), callback_data=f"setmax_{profile_id}", style="primary")],
-        [InlineKeyboardButton(ping_label, callback_data=f"tglping_{profile_id}", style="primary"),
-         InlineKeyboardButton(cfg_btn, callback_data=f"tglcfg_{profile_id}", style="primary")],
-        [InlineKeyboardButton(prx_btn, callback_data=f"tglproxy_{profile_id}", style="primary"),
-         InlineKeyboardButton(num_btn, callback_data=f"togglenum_{profile_id}", style="primary")],
-        [InlineKeyboardButton(f"📅 تاریخ کانفیگ: {date_cfg_status}", callback_data=f"tgl_date_cfg_{profile_id}", style="primary"),
-         InlineKeyboardButton(f"📅 تاریخ پروکسی: {date_prx_status}", callback_data=f"tgl_date_prx_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_set_custom_query"), callback_data=f"setquery_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_stats"), callback_data=f"ast_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_test"), callback_data=f"sendtest_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_runnow"), callback_data=f"runnow_{profile_id}", style="success")],
-        [InlineKeyboardButton(msg("btn_instant"), callback_data=f"instant_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_manual_send"), callback_data=f"manual_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_blacklist"), callback_data=f"bl_list_{profile_id}", style="danger"),
-         InlineKeyboardButton(msg("btn_set_schedule_cron"), callback_data=f"setcron_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_backup"), callback_data=f"backup_{profile_id}", style="success"),
-         InlineKeyboardButton(msg("btn_backup_export"), callback_data=f"backup_export_menu_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_timer"), callback_data=f"timer_menu_{profile_id}", style="primary"),
-         InlineKeyboardButton(f"⏱️ {timer_status}", callback_data="dummy", style="primary")],
-        [InlineKeyboardButton(msg("btn_log_menu"), callback_data=f"log_menu_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_reset"), callback_data=f"rn_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_clear"), callback_data=f"cd1_{profile_id}", style="danger")],
-        [InlineKeyboardButton("❌ Delete Profile", callback_data=f"delprof_{profile_id}", style="danger")],
-        [InlineKeyboardButton(msg("btn_back"), callback_data="profiles_list", style="primary")],
+        [InlineKeyboardButton(msg("btn_manage_sources"), callback_data=f"src_list_{profile_id}"),
+         InlineKeyboardButton(msg("btn_dest_list"), callback_data=f"dl_{profile_id}")],
+        [InlineKeyboardButton(f"📢 اسپانسر: {sponsor_status}", callback_data=f"sp_menu_{profile_id}"),
+         InlineKeyboardButton(msg("btn_set_name"), callback_data=f"ac_{profile_id}")],
+        [InlineKeyboardButton(msg("btn_set_banner_config"), callback_data=f"ab_config_{profile_id}"),
+         InlineKeyboardButton(msg("btn_set_banner_proxy"), callback_data=f"ab_proxy_{profile_id}")],
+        [InlineKeyboardButton(msg("btn_set_time"), callback_data=f"ai_{profile_id}"),
+         InlineKeyboardButton(msg("btn_set_max"), callback_data=f"setmax_{profile_id}")],
+        [InlineKeyboardButton(ping_label, callback_data=f"tglping_{profile_id}"),
+         InlineKeyboardButton(cfg_btn, callback_data=f"tglcfg_{profile_id}")],
+        [InlineKeyboardButton(prx_btn, callback_data=f"tglproxy_{profile_id}"),
+         InlineKeyboardButton(num_btn, callback_data=f"togglenum_{profile_id}")],
+        [InlineKeyboardButton(f"📅 تاریخ کانفیگ: {date_cfg_status}", callback_data=f"tgl_date_cfg_{profile_id}"),
+         InlineKeyboardButton(f"📅 تاریخ پروکسی: {date_prx_status}", callback_data=f"tgl_date_prx_{profile_id}")],
+        [InlineKeyboardButton(msg("btn_set_custom_query"), callback_data=f"setquery_{profile_id}"),
+         InlineKeyboardButton(msg("btn_stats"), callback_data=f"ast_{profile_id}")],
+        [InlineKeyboardButton(msg("btn_test"), callback_data=f"sendtest_{profile_id}"),
+         InlineKeyboardButton(msg("btn_runnow"), callback_data=f"runnow_{profile_id}")],
+        [InlineKeyboardButton(msg("btn_instant"), callback_data=f"instant_{profile_id}"),
+         InlineKeyboardButton(msg("btn_manual_send"), callback_data=f"manual_{profile_id}")],
+        [InlineKeyboardButton(msg("btn_blacklist"), callback_data=f"bl_list_{profile_id}"),
+         InlineKeyboardButton(msg("btn_set_schedule_cron"), callback_data=f"setcron_{profile_id}")],
+        [InlineKeyboardButton(msg("btn_backup"), callback_data=f"backup_{profile_id}"),
+         InlineKeyboardButton(msg("btn_backup_export"), callback_data=f"backup_export_menu_{profile_id}")],
+        [InlineKeyboardButton(msg("btn_timer"), callback_data=f"timer_menu_{profile_id}"),
+         InlineKeyboardButton(f"⏱️ {timer_status}", callback_data="dummy")],
+        [InlineKeyboardButton(msg("btn_log_menu"), callback_data=f"log_menu_{profile_id}")],
+        [InlineKeyboardButton(msg("btn_reset"), callback_data=f"rn_{profile_id}"),
+         InlineKeyboardButton(msg("btn_clear"), callback_data=f"cd1_{profile_id}")],
+        [InlineKeyboardButton("❌ Delete Profile", callback_data=f"delprof_{profile_id}")],
+        [InlineKeyboardButton(msg("btn_back"), callback_data="profiles_list")],
     ])
 
 def destinations_kb(profile_id):
     dest = get_profile_dest(profile_id)
     btns = []
     if dest:
-        btns.append([InlineKeyboardButton(f"❌ {dest}", callback_data=f"dd_{profile_id}", style="danger")])
+        btns.append([InlineKeyboardButton(f"❌ {dest}", callback_data=f"dd_{profile_id}")])
     btns.append([
-        InlineKeyboardButton(msg("btn_add_dest"), callback_data=f"da_{profile_id}", style="success"),
+        InlineKeyboardButton(msg("btn_add_dest"), callback_data=f"da_{profile_id}"),
     ])
-    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")])
+    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")])
     return InlineKeyboardMarkup(btns)
 
 def sponsor_kb(profile_id):
@@ -2297,13 +2341,12 @@ def sponsor_kb(profile_id):
     btns = []
     if sponsor:
         status_text = "✅ فعال" if sponsor["enabled"] else "❌ غیرفعال"
-        btn_style = "success" if sponsor["enabled"] else "danger"
-        btns.append([InlineKeyboardButton(f"{sponsor['name']} - {status_text}", callback_data=f"sp_toggle_{profile_id}", style=btn_style)])
-        btns.append([InlineKeyboardButton("✏️ ویرایش", callback_data=f"sp_edit_{profile_id}", style="success")])
-        btns.append([InlineKeyboardButton("🗑 حذف", callback_data=f"sp_clear_{profile_id}", style="danger")])
+        btns.append([InlineKeyboardButton(f"{sponsor['name']} - {status_text}", callback_data=f"sp_toggle_{profile_id}")])
+        btns.append([InlineKeyboardButton("✏️ ویرایش", callback_data=f"sp_edit_{profile_id}")])
+        btns.append([InlineKeyboardButton("🗑 حذف", callback_data=f"sp_clear_{profile_id}")])
     else:
-        btns.append([InlineKeyboardButton("➕ افزودن اسپانسر", callback_data=f"sp_add_{profile_id}", style="success")])
-    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")])
+        btns.append([InlineKeyboardButton("➕ افزودن اسپانسر", callback_data=f"sp_add_{profile_id}")])
+    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")])
     return InlineKeyboardMarkup(btns)
 
 def source_list_kb(profile_id):
@@ -2311,15 +2354,15 @@ def source_list_kb(profile_id):
     btns = []
     if sources:
         for i, src in enumerate(sources):
-            btns.append([InlineKeyboardButton(f"❌ {src}", callback_data=f"src_del_{profile_id}_{i}", style="danger")])
-    btns.append([InlineKeyboardButton(msg("btn_add_source"), callback_data=f"sa_{profile_id}", style="success")])
-    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")])
+            btns.append([InlineKeyboardButton(f"❌ {src}", callback_data=f"src_del_{profile_id}_{i}")])
+    btns.append([InlineKeyboardButton(msg("btn_add_source"), callback_data=f"sa_{profile_id}")])
+    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")])
     return InlineKeyboardMarkup(btns)
 
 def empty_button_kb(profile_id, callback):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(msg("btn_empty"), callback_data=callback, style="danger")],
-        [InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]
+        [InlineKeyboardButton(msg("btn_empty"), callback_data=callback)],
+        [InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")]
     ])
 
 def blacklist_kb(profile_id):
@@ -2327,54 +2370,54 @@ def blacklist_kb(profile_id):
     btns = []
     if words:
         for w in words:
-            btns.append([InlineKeyboardButton(f"❌ {w}", callback_data=f"bl_del_{profile_id}_{w}", style="danger")])
-    btns.append([InlineKeyboardButton("➕ افزودن", callback_data=f"bl_add_{profile_id}", style="success")])
+            btns.append([InlineKeyboardButton(f"❌ {w}", callback_data=f"bl_del_{profile_id}_{w}")])
+    btns.append([InlineKeyboardButton("➕ افزودن", callback_data=f"bl_add_{profile_id}")])
     if words:
-        btns.append([InlineKeyboardButton("🗑 پاک کردن همه", callback_data=f"bl_clear_{profile_id}", style="danger")])
-    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")])
+        btns.append([InlineKeyboardButton("🗑 پاک کردن همه", callback_data=f"bl_clear_{profile_id}")])
+    btns.append([InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")])
     return InlineKeyboardMarkup(btns)
 
 def backup_export_type_kb(profile_id):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📡 کانفیگ", callback_data=f"backup_export_type_{profile_id}_configs", style="primary")],
-        [InlineKeyboardButton("🌐 پروکسی", callback_data=f"backup_export_type_{profile_id}_proxies", style="primary")],
-        [InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")],
+        [InlineKeyboardButton("📡 کانفیگ", callback_data=f"backup_export_type_{profile_id}_configs")],
+        [InlineKeyboardButton("🌐 پروکسی", callback_data=f"backup_export_type_{profile_id}_proxies")],
+        [InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")],
     ])
 
 def backup_export_scope_kb(profile_id, backup_type):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(msg("backup_export_scope_all"), callback_data=f"backup_export_scope_{profile_id}_{backup_type}_all", style="primary")],
-        [InlineKeyboardButton(msg("backup_export_scope_100"), callback_data=f"backup_export_scope_{profile_id}_{backup_type}_100", style="primary")],
-        [InlineKeyboardButton(msg("backup_export_scope_custom"), callback_data=f"backup_export_scope_{profile_id}_{backup_type}_custom", style="primary")],
-        [InlineKeyboardButton(msg("btn_back"), callback_data=f"backup_export_menu_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("backup_export_scope_all"), callback_data=f"backup_export_scope_{profile_id}_{backup_type}_all")],
+        [InlineKeyboardButton(msg("backup_export_scope_100"), callback_data=f"backup_export_scope_{profile_id}_{backup_type}_100")],
+        [InlineKeyboardButton(msg("backup_export_scope_custom"), callback_data=f"backup_export_scope_{profile_id}_{backup_type}_custom")],
+        [InlineKeyboardButton(msg("btn_back"), callback_data=f"backup_export_menu_{profile_id}")],
     ])
 
 def timer_menu_kb(profile_id):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(msg("timer_option_30m"), callback_data=f"timer_set_{profile_id}_30", style="primary")],
-        [InlineKeyboardButton(msg("timer_option_1h"), callback_data=f"timer_set_{profile_id}_60", style="primary")],
-        [InlineKeyboardButton(msg("timer_option_2h"), callback_data=f"timer_set_{profile_id}_120", style="primary")],
-        [InlineKeyboardButton(msg("timer_option_4h"), callback_data=f"timer_set_{profile_id}_240", style="primary")],
-        [InlineKeyboardButton(msg("timer_option_8h"), callback_data=f"timer_set_{profile_id}_480", style="primary")],
-        [InlineKeyboardButton(msg("timer_option_custom"), callback_data=f"timer_custom_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("timer_disable"), callback_data=f"timer_clear_{profile_id}", style="danger")],
-        [InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("timer_option_30m"), callback_data=f"timer_set_{profile_id}_30")],
+        [InlineKeyboardButton(msg("timer_option_1h"), callback_data=f"timer_set_{profile_id}_60")],
+        [InlineKeyboardButton(msg("timer_option_2h"), callback_data=f"timer_set_{profile_id}_120")],
+        [InlineKeyboardButton(msg("timer_option_4h"), callback_data=f"timer_set_{profile_id}_240")],
+        [InlineKeyboardButton(msg("timer_option_8h"), callback_data=f"timer_set_{profile_id}_480")],
+        [InlineKeyboardButton(msg("timer_option_custom"), callback_data=f"timer_custom_{profile_id}")],
+        [InlineKeyboardButton(msg("timer_disable"), callback_data=f"timer_clear_{profile_id}")],
+        [InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")],
     ])
 
 def log_range_kb(profile_id, log_type):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(msg("log_range_30m"), callback_data=f"log_range_{profile_id}_{log_type}_30", style="primary")],
-        [InlineKeyboardButton(msg("log_range_1h"), callback_data=f"log_range_{profile_id}_{log_type}_60", style="primary")],
-        [InlineKeyboardButton(msg("log_range_6h"), callback_data=f"log_range_{profile_id}_{log_type}_360", style="primary")],
-        [InlineKeyboardButton(msg("log_range_24h"), callback_data=f"log_range_{profile_id}_{log_type}_1440", style="primary")],
-        [InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("log_range_30m"), callback_data=f"log_range_{profile_id}_{log_type}_30")],
+        [InlineKeyboardButton(msg("log_range_1h"), callback_data=f"log_range_{profile_id}_{log_type}_60")],
+        [InlineKeyboardButton(msg("log_range_6h"), callback_data=f"log_range_{profile_id}_{log_type}_360")],
+        [InlineKeyboardButton(msg("log_range_24h"), callback_data=f"log_range_{profile_id}_{log_type}_1440")],
+        [InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")],
     ])
 
 def log_menu_kb(profile_id):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 لاگ کامل", callback_data=f"log_full_{profile_id}", style="primary")],
-        [InlineKeyboardButton("🚨 فقط خطاها", callback_data=f"log_errors_{profile_id}", style="danger")],
-        [InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")],
+        [InlineKeyboardButton("📋 لاگ کامل", callback_data=f"log_full_{profile_id}")],
+        [InlineKeyboardButton("🚨 فقط خطاها", callback_data=f"log_errors_{profile_id}")],
+        [InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")],
     ])
 
 # ======================================================================
@@ -2390,7 +2433,7 @@ async def cmd_start(u, ctx):
         last_num = max(p["last_num"] for p in profiles)
         next_n = last_num + 1
     txt = msg("welcome", profiles=total, next_n=next_n)
-    btns = [[InlineKeyboardButton("📋 Manage Profiles", callback_data="profiles_list", style="primary")]]
+    btns = [[InlineKeyboardButton("📋 Manage Profiles", callback_data="profiles_list")]]
     await u.message.reply_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(btns))
 
 async def cmd_admin(u, ctx):
@@ -2619,7 +2662,7 @@ async def on_callback(u, ctx):
                     return
                 ctx.user_data["action"] = f"timer_custom_{profile_id}"
                 await q.edit_message_text(msg("timer_custom_prompt"), reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(msg("btn_back"), callback_data=f"timer_menu_{profile_id}", style="primary")]
+                    [InlineKeyboardButton(msg("btn_back"), callback_data=f"timer_menu_{profile_id}")]
                 ]))
             else:
                 await q.answer("⚠️ خطا در داده")
@@ -2672,7 +2715,7 @@ async def on_callback(u, ctx):
                     await q.edit_message_text("✅ بک‌آپ ارسال شد.")
                 elif scope == "custom":
                     ctx.user_data["backup_export_custom"] = {"profile_id": profile_id, "type": backup_type}
-                    await q.edit_message_text(msg("backup_export_count_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"backup_export_menu_{profile_id}", style="primary")]]))
+                    await q.edit_message_text(msg("backup_export_count_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"backup_export_menu_{profile_id}")]]))
                 else:
                     await q.answer("⚠️ محدوده نامعتبر")
             else:
@@ -2707,7 +2750,7 @@ async def on_callback(u, ctx):
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
                 ctx.user_data["action"] = f"bl_add_{profile_id}"
-                await q.edit_message_text(msg("blacklist_add_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"bl_list_{profile_id}", style="primary")]]))
+                await q.edit_message_text(msg("blacklist_add_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"bl_list_{profile_id}")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -2805,7 +2848,7 @@ async def on_callback(u, ctx):
 
         if d == "prof_add":
             ctx.user_data["action"] = "prof_add"
-            await q.edit_message_text(msg("profile_add_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="profiles_list", style="primary")]]))
+            await q.edit_message_text(msg("profile_add_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="profiles_list")]]))
             return
 
         if d == "back_home":
@@ -2844,8 +2887,8 @@ async def on_callback(u, ctx):
                     txt,
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("✅ بله، حذف شود", callback_data=f"delprof_confirm1_{profile_id}", style="danger")],
-                        [InlineKeyboardButton("❌ لغو", callback_data=f"prof_{profile_id}", style="primary")]
+                        [InlineKeyboardButton("✅ بله، حذف شود", callback_data=f"delprof_confirm1_{profile_id}")],
+                        [InlineKeyboardButton("❌ لغو", callback_data=f"prof_{profile_id}")]
                     ])
                 )
             else:
@@ -2869,8 +2912,8 @@ async def on_callback(u, ctx):
                     txt,
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🗑 حذف نهایی", callback_data=f"delprof_confirm2_{profile_id}", style="danger")],
-                        [InlineKeyboardButton("❌ لغو", callback_data=f"prof_{profile_id}", style="primary")]
+                        [InlineKeyboardButton("🗑 حذف نهایی", callback_data=f"delprof_confirm2_{profile_id}")],
+                        [InlineKeyboardButton("❌ لغو", callback_data=f"prof_{profile_id}")]
                     ])
                 )
             else:
@@ -2888,7 +2931,7 @@ async def on_callback(u, ctx):
                 delete_profile(profile_id)
                 await q.answer("✅ پروفایل حذف شد.")
                 await q.edit_message_text(msg("profile_deleted"), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="profiles_list", style="primary")]
+                    [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="profiles_list")]
                 ]))
             else:
                 await q.answer("⚠️ خطا در داده")
@@ -2945,7 +2988,7 @@ async def on_callback(u, ctx):
                     "📝 **نام اسپانسر را وارد کنید:**",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}", style="primary")]
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}")]
                     ])
                 )
             else:
@@ -3002,11 +3045,11 @@ async def on_callback(u, ctx):
                     msg("sp_edit_prompt", name=sponsor["name"], url=sponsor["url"], text=sponsor["button_text"], color=sponsor["color"], enabled=sponsor["enabled"]),
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("نام", callback_data=f"sp_edit_field_{profile_id}_name", style="primary"),
-                         InlineKeyboardButton("لینک", callback_data=f"sp_edit_field_{profile_id}_url", style="primary")],
-                        [InlineKeyboardButton("متن دکمه", callback_data=f"sp_edit_field_{profile_id}_text", style="primary"),
-                         InlineKeyboardButton("رنگ", callback_data=f"sp_edit_field_{profile_id}_color", style="primary")],
-                        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}", style="primary")]
+                        [InlineKeyboardButton("نام", callback_data=f"sp_edit_field_{profile_id}_name"),
+                         InlineKeyboardButton("لینک", callback_data=f"sp_edit_field_{profile_id}_url")],
+                        [InlineKeyboardButton("متن دکمه", callback_data=f"sp_edit_field_{profile_id}_text"),
+                         InlineKeyboardButton("رنگ", callback_data=f"sp_edit_field_{profile_id}_color")],
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}")]
                     ])
                 )
             else:
@@ -3027,10 +3070,10 @@ async def on_callback(u, ctx):
                         "🎨 **رنگ دکمه را انتخاب کنید:**",
                         parse_mode="HTML",
                         reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🔵 Primary (آبی)", callback_data=f"sp_setcolor_{profile_id}_primary", style="primary")],
-                            [InlineKeyboardButton("🟢 Success (سبز)", callback_data=f"sp_setcolor_{profile_id}_success", style="success")],
-                            [InlineKeyboardButton("🔴 Danger (قرمز)", callback_data=f"sp_setcolor_{profile_id}_danger", style="danger")],
-                            [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_edit_{profile_id}", style="primary")]
+                            [InlineKeyboardButton("🔵 Primary (آبی)", callback_data=f"sp_setcolor_{profile_id}_primary")],
+                            [InlineKeyboardButton("🟢 Success (سبز)", callback_data=f"sp_setcolor_{profile_id}_success")],
+                            [InlineKeyboardButton("🔴 Danger (قرمز)", callback_data=f"sp_setcolor_{profile_id}_danger")],
+                            [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_edit_{profile_id}")]
                         ])
                     )
                     return
@@ -3046,7 +3089,7 @@ async def on_callback(u, ctx):
                         prompt,
                         parse_mode="HTML",
                         reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_edit_{profile_id}", style="primary")]
+                            [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_edit_{profile_id}")]
                         ])
                     )
             else:
@@ -3142,7 +3185,7 @@ async def on_callback(u, ctx):
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
                 ctx.user_data["action"] = f"sa_{profile_id}"
-                await q.edit_message_text(msg("send_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"src_list_{profile_id}", style="primary")]]))
+                await q.edit_message_text(msg("send_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"src_list_{profile_id}")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -3172,7 +3215,7 @@ async def on_callback(u, ctx):
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
                 ctx.user_data["action"] = f"da_{profile_id}"
-                await q.edit_message_text("📝 کانال مقصد جدید رو بفرست (با @ یا بدون):\nمثال: `@MyChannel`", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"dl_{profile_id}", style="primary")]]))
+                await q.edit_message_text("📝 کانال مقصد جدید رو بفرست (با @ یا بدون):\nمثال: `@MyChannel`", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"dl_{profile_id}")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -3235,7 +3278,7 @@ async def on_callback(u, ctx):
                     return
                 ctx.user_data["action"] = f"ab_config_{profile_id}"
                 cur = html.escape(get_profile_banner_config(profile_id))
-                await q.edit_message_text(f"Current Config Banner:\n<code>{cur}</code>\n\nSend new banner (must contain {{configs}}):", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
+                await q.edit_message_text(f"Current Config Banner:\n<code>{cur}</code>\n\nSend new banner (must contain {{configs}}):", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -3250,7 +3293,7 @@ async def on_callback(u, ctx):
                     return
                 ctx.user_data["action"] = f"ab_proxy_{profile_id}"
                 cur = html.escape(get_profile_banner_proxy(profile_id))
-                await q.edit_message_text(f"Current Proxy Banner:\n<code>{cur}</code>\n\nSend new banner (must contain {{proxies}}):", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
+                await q.edit_message_text(f"Current Proxy Banner:\n<code>{cur}</code>\n\nSend new banner (must contain {{proxies}}):", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -3326,7 +3369,7 @@ async def on_callback(u, ctx):
                 next_n = get_profile_last_num(profile_id) + 1
                 dest = get_profile_dest(profile_id)
                 txt = f"📊 مقصد: {dest}\nمنابع: {len(get_profile_sources(profile_id))}\nاسپانسر: {n_sp}\nبعدی: #{next_n}\nحداکثر: {get_profile_max_post(profile_id)}"
-                await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
+                await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -3539,7 +3582,7 @@ async def on_callback(u, ctx):
                 except ValueError:
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
-                await q.edit_message_text(msg("clear_q1"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("YES", callback_data=f"cd2_{profile_id}", style="danger")], [InlineKeyboardButton("NO", callback_data=f"prof_{profile_id}", style="primary")]]))
+                await q.edit_message_text(msg("clear_q1"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("YES", callback_data=f"cd2_{profile_id}")], [InlineKeyboardButton("NO", callback_data=f"prof_{profile_id}")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -3577,7 +3620,7 @@ async def on_callback(u, ctx):
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
                 ctx.user_data["action"] = f"manual_{profile_id}"
-                await q.edit_message_text(msg("manual_send_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"prof_{profile_id}", style="danger")]]))
+                await q.edit_message_text(msg("manual_send_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"prof_{profile_id}")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -3750,7 +3793,7 @@ async def on_text(u, ctx):
                 "🔗 **لینک اسپانسر را وارد کنید (مثلاً https://example.com):**",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}", style="primary")]
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}")]
                 ])
             )
             return
@@ -3766,7 +3809,7 @@ async def on_text(u, ctx):
                 "📝 **متن دکمه را وارد کنید (مثلاً «بازدید»):**",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}", style="primary")]
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}")]
                 ])
             )
             return
@@ -3779,10 +3822,10 @@ async def on_text(u, ctx):
                 "🎨 **رنگ دکمه را انتخاب کنید:**",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔵 Primary (آبی)", callback_data=f"sp_setcolor_{profile_id}_primary", style="primary")],
-                    [InlineKeyboardButton("🟢 Success (سبز)", callback_data=f"sp_setcolor_{profile_id}_success", style="success")],
-                    [InlineKeyboardButton("🔴 Danger (قرمز)", callback_data=f"sp_setcolor_{profile_id}_danger", style="danger")],
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}", style="primary")]
+                    [InlineKeyboardButton("🔵 Primary (آبی)", callback_data=f"sp_setcolor_{profile_id}_primary")],
+                    [InlineKeyboardButton("🟢 Success (سبز)", callback_data=f"sp_setcolor_{profile_id}_success")],
+                    [InlineKeyboardButton("🔴 Danger (قرمز)", callback_data=f"sp_setcolor_{profile_id}_danger")],
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"sp_menu_{profile_id}")]
                 ])
             )
             return

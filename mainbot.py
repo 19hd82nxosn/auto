@@ -1618,7 +1618,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
         return 0, "no working configs or proxies"
 
     log.info(f"📤 Posting {len(working)} configs and {len(proxy_with_ping)} proxies for profile {profile_id}...")
-    result = await post_working_configs(bot, profile_id, working, proxy_with_ping, source_for_seen="auto", force=False)
+    result = await post_working_configs(bot, profile_id, working, proxy_with_ping, source_for_seen="auto", force=False, skip_duplicate=True)
     log.info(f"✅ Cycle result for profile {profile_id}: {result}")
     log.info("=" * 50)
     return result

@@ -992,7 +992,6 @@ async def check_and_auto_backup(profile_id):
                         filename=filename,
                         caption=f"📤 بک‌آپ خودکار پروفایل {profile_name} (ID:{profile_id}) - {start_num} تا {end_num} (تعداد: {len(links)})"
                     )
-                # حذف فایل بعد از ۳۰ دقیقه
                 asyncio.create_task(delete_file_after_delay(filepath, 1800))
             else:
                 log.warning("BOT_REF is None, cannot send backup.")
@@ -1002,7 +1001,6 @@ async def check_and_auto_backup(profile_id):
         log.error(f"Auto backup check error for profile {profile_id}: {e}")
 
 async def delete_file_after_delay(filepath, delay_seconds):
-    """حذف فایل بعد از مدت زمان مشخص (به ثانیه)"""
     await asyncio.sleep(delay_seconds)
     try:
         if os.path.exists(filepath):
@@ -1272,7 +1270,8 @@ def get_v2ray_links_from_text(text):
 async def fetch_files_from_channel(bot, profile_id, channel, source):
     try:
         chat_id = channel if channel.startswith('@') else '@' + channel
-        messages = await bot.get_chat_history(chat_id, limit=5)
+        # افزایش تعداد پیام‌های بررسی‌شده از ۵ به ۱۰ برای دریافت کانفیگ‌های بیشتر
+        messages = await bot.get_chat_history(chat_id, limit=10)
         new_links = []
         for msg in messages:
             if is_message_processed(profile_id, source, msg.message_id):
@@ -1394,7 +1393,6 @@ async def send_with_retry(bot, chat_id, text, parse_mode="HTML", reply_markup=No
             retry_count += 1
         except BadRequest as e:
             if "can't parse entities" in str(e):
-                # اگر HTML خراب بود، با متن ساده امتحان کن
                 try:
                     await bot.send_message(
                         chat_id=chat_id,
@@ -1432,7 +1430,6 @@ async def send_to_destination(bot, profile_id, text, buttons=None):
             disable_web_page_preview=True
         )
         if not ok:
-            # تلاش با متن ساده
             plain = re.sub(r'<[^>]+>', '', chunk)
             ok2 = await send_with_retry(
                 bot, dest, plain[:4096],
@@ -1442,7 +1439,6 @@ async def send_to_destination(bot, profile_id, text, buttons=None):
             )
             if not ok2:
                 success = False
-        # تاخیر بین چانک‌ها
         if idx < len(chunks) - 1:
             await asyncio.sleep(1)
     return success
@@ -1483,7 +1479,6 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
 
     max_post = get_profile_max_post(profile_id)
     if is_instant:
-        # در حالت لحظه‌ای، حداکثر ۵ کانفیگ در هر بار ارسال شود تا از Flood جلوگیری شود
         max_post = min(max_post, 5)
 
     blacklist_words = get_blacklist(profile_id)
@@ -1508,7 +1503,6 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
     sponsor = get_sponsor(profile_id)
     sponsor_button = None
     if sponsor and sponsor["enabled"]:
-        # استفاده از رنگ ذخیره‌شده برای استایل دکمه
         btn_style = sponsor["color"] if sponsor["color"] in ["primary", "success", "danger"] else "primary"
         sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"], style=btn_style)
 
@@ -1544,13 +1538,11 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
         except KeyError:
             full_text = f"✦ V2Ray Config List\n\n{configs_text}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
 
-        # ساخت دکمه اسپانسر
         buttons = []
         if sponsor_button:
             buttons.append(sponsor_button)
         reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
 
-        # ارسال با تلاش مجدد و مدیریت خطا
         ok = await send_with_retry(
             bot, dest, full_text,
             parse_mode="HTML",
@@ -1562,11 +1554,8 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
             sent_count += 1
             log.info(f"✅ Sent config #{n} to {dest}")
         else:
-            # اگر HTML خطا داد، با متن ساده اما با ساختار مناسب ارسال کنیم
             plain_text = re.sub(r'<[^>]+>', '', full_text)
-            # ساخت متن ساده با خطوط جداکننده
             plain_text = f"✦ V2Ray Config List\n\n{configs_text}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
-            # حذف تگ‌های HTML از آن
             plain_text = re.sub(r'<[^>]+>', '', plain_text)
             ok2 = await send_with_retry(
                 bot, dest, plain_text,
@@ -1579,7 +1568,6 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
                 sent_count += 1
                 log.info(f"✅ Sent config #{n} to {dest} (plain text with button)")
             else:
-                # آخرین تلاش: بدون دکمه
                 ok3 = await send_with_retry(
                     bot, dest, plain_text[:4096],
                     parse_mode=None,
@@ -1596,9 +1584,8 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
         if not skip_duplicate or not is_already_posted(profile_id, modified_url):
             mark_as_posted(profile_id, modified_url, source_for_seen, full_url=modified_url)
 
-        # تاخیر بین هر کانفیگ برای جلوگیری از Flood (مخصوصاً در حالت لحظه‌ای)
         if is_instant:
-            await asyncio.sleep(2.0)  # تاخیر بیشتر برای جلوگیری از Flood
+            await asyncio.sleep(2.0)
         else:
             await asyncio.sleep(0.8)
 
@@ -1613,7 +1600,7 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False):
 
     max_proxies = get_profile_max_proxies(profile_id)
     if is_instant:
-        max_proxies = min(max_proxies, 3)  # حداکثر ۳ پروکسی در حالت لحظه‌ای
+        max_proxies = min(max_proxies, 3)
 
     show_date = get_profile_show_date_proxy(profile_id)
     proxy_text = ""
@@ -1734,14 +1721,19 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
     seen_urls = set()
 
     # ========== تنظیمات بر اساس حالت ==========
+    max_post = get_profile_max_post(profile_id)
     if is_instant:
-        scrape_limit = len(sources)          # همه کانال‌ها
-        test_limit = 30                      # تست حداکثر ۳۰ کانفیگ در هر سیکل
+        scrape_limit = len(sources)
+        # برای حالت لحظه‌ای حداقل ۱۰ و حداکثر ۳۰ کانفیگ تست شود
+        test_limit = max(max_post, 10)
+        test_limit = min(test_limit, 30)
         ping_timeout = 3
         max_concurrent = 30
     else:
         scrape_limit = 10
-        test_limit = 15
+        # برای حالت عادی حداقل برابر max_post و حداقل ۲۰
+        test_limit = max(max_post, 20)
+        test_limit = min(test_limit, 50)  # محدودیت برای جلوگیری از سنگینی
         ping_timeout = 10
         max_concurrent = 20
     # ==========================================
@@ -1813,7 +1805,6 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
 
     working = []
     if is_instant:
-        # تست پینگ برای همه کانفیگ‌های جدید (با محدودیت test_limit)
         if new_configs:
             to_test = new_configs[:test_limit]
             log.info(f"⚡ Testing {len(to_test)} configs instantly...")
@@ -1870,7 +1861,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
         else:
             log.info("ℹ️ No new configs to test")
 
-    # ===== پروکسی‌ها (با تست در حالت لحظه‌ای) =====
+    # ===== پروکسی‌ها =====
     proxy_with_ping = []
     if all_proxies:
         valid_proxies = [p for p in all_proxies if "t.me/proxy" in p.lower()]
@@ -1888,7 +1879,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
                             flag = await get_flag_for_ip(ip)
                         return proxy_url, ping if ok else 0, flag
                 results = await asyncio.gather(
-                    *[check_proxy_instant(p) for p in valid_proxies[:5]], return_exceptions=True)
+                    *[check_proxy_instant(p) for p in valid_proxies[:10]], return_exceptions=True)
                 for r in results:
                     if isinstance(r, Exception):
                         continue
@@ -1907,7 +1898,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
                         return proxy_url, ping if ok else 0, flag
 
                 results = await asyncio.gather(
-                    *[check_proxy(p) for p in valid_proxies[:10]], return_exceptions=True)
+                    *[check_proxy(p) for p in valid_proxies[:20]], return_exceptions=True)
                 for r in results:
                     if isinstance(r, Exception):
                         continue
@@ -1972,7 +1963,7 @@ async def profile_loop(bot, profile_id):
                 log.info(f"⚡ INSTANT UPDATE for profile {profile_id} ({dest_name})")
                 n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=True)
                 log.info(f"[instant profile {profile_id}] result: {n} - {m}")
-                await asyncio.sleep(5)  # افزایش تاخیر بین سیکل‌های لحظه‌ای به ۵ ثانیه
+                await asyncio.sleep(5)
             else:
                 now = datetime.now(TEHRAN_TZ)
                 next_run = now + timedelta(minutes=interval)
@@ -3201,10 +3192,8 @@ async def on_callback(u, ctx):
                 except ValueError:
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
-                # بروزرسانی رنگ در دیتابیس
                 update_sponsor_color(profile_id, color)
                 await q.answer(f"✅ رنگ به {color} تغییر کرد.")
-                # اگر در حالت افزودن اسپانسر هستیم، ادامه
                 if ctx.user_data.get("sponsor_step") == "color_wait":
                     name = ctx.user_data.get("sponsor_name")
                     url = ctx.user_data.get("sponsor_url")
@@ -3221,7 +3210,6 @@ async def on_callback(u, ctx):
                     else:
                         await q.answer("⚠️ اطلاعات اسپانسر کامل نیست.")
                 else:
-                    # ویرایش رنگ اسپانسر موجود
                     ctx.user_data.pop("sponsor_edit_field", None)
                     ctx.user_data.pop("sponsor_edit_profile_id", None)
                     await show_profile_admin(q.message, profile_id)
@@ -4243,10 +4231,8 @@ async def process_manual_text(u, message, profile_id, is_document=False):
 # پاکسازی دوره‌ای فایل‌ها و لاگ‌ها
 # ======================================================================
 async def periodic_cleanup():
-    """پاکسازی دوره‌ای: حذف خطوط قدیمی لاگ، حذف فایل‌های اضافی (غیر از دیتابیس)"""
     while True:
         try:
-            # 1. پاکسازی لاگ: نگه‌داری فقط ۳۰ دقیقه آخر
             log_file_path = os.path.join(DATA_DIR, "bot.log")
             if os.path.exists(log_file_path):
                 now_utc = datetime.utcnow()
@@ -4262,54 +4248,43 @@ async def periodic_cleanup():
                                 if ts >= cutoff_utc:
                                     lines_to_keep.append(line)
                             except:
-                                # اگر تاریخ معتبر نبود، نگه داریم (احتیاط)
                                 lines_to_keep.append(line)
                         else:
-                            # خطوط بدون تاریخ (مثل header) نگه داشته شوند
                             lines_to_keep.append(line)
-                # اگر تعداد خطوط تغییر کرد، بازنویسی کن
                 if len(lines_to_keep) > 0:
-                    # مطمئن شویم که حداقل یک خط آخرین لاگ‌ها را نگه می‌دارد
                     with open(log_file_path, 'w', encoding='utf-8') as f:
                         f.writelines(lines_to_keep)
                 else:
-                    # اگر همه خطوط حذف شدند، یک خط خالی ننویسیم (فایل را خالی می‌کنیم)
                     with open(log_file_path, 'w', encoding='utf-8') as f:
                         pass
 
-            # 2. حذف فایل‌های موقت (غیر از bot.db) که بیش از ۱ ساعت از ایجادشان گذشته
-            # (فایل‌های بک‌آپ خودکار و دستی که ممکن است باقی مانده باشند)
             now_ts = time.time()
             for fname in os.listdir(DATA_DIR):
                 if fname == "bot.db":
                     continue
                 filepath = os.path.join(DATA_DIR, fname)
                 if os.path.isfile(filepath):
-                    # اگر فایل لاگ باشد، قبلاً مدیریت شده، ولی باز هم چک می‌کنیم
                     if fname == "bot.log":
                         continue
-                    # فایل‌های بک‌آپ و لاگ‌های موقت
                     if (fname.startswith("configs_backup_") or 
                         fname.startswith("proxies_backup_") or 
                         fname.startswith("logs_") or 
                         fname.startswith("bot_backup_")):
-                        # حذف فایل‌های قدیمی‌تر از ۱ ساعت
                         try:
                             mtime = os.path.getmtime(filepath)
-                            if now_ts - mtime > 3600:  # 1 ساعت
+                            if now_ts - mtime > 3600:
                                 os.remove(filepath)
                                 log.info(f"🗑️ Cleanup: deleted old file {fname}")
                         except Exception as e:
                             log.warning(f"Could not delete {fname}: {e}")
 
-            # 3. پاکسازی فایل‌های داخل backup_dir (در صورت وجود)
             if os.path.exists(BACKUP_DIR):
                 for fname in os.listdir(BACKUP_DIR):
                     filepath = os.path.join(BACKUP_DIR, fname)
                     if os.path.isfile(filepath):
                         try:
                             mtime = os.path.getmtime(filepath)
-                            if now_ts - mtime > 3600:  # 1 ساعت
+                            if now_ts - mtime > 3600:
                                 os.remove(filepath)
                                 log.info(f"🗑️ Cleanup: deleted old backup file {fname}")
                         except Exception as e:
@@ -4317,7 +4292,7 @@ async def periodic_cleanup():
 
         except Exception as e:
             log.error(f"Error in periodic_cleanup: {e}")
-        await asyncio.sleep(300)  # هر ۵ دقیقه اجرا شود
+        await asyncio.sleep(300)
 
 # ======================================================================
 # راه‌اندازی
@@ -4356,7 +4331,6 @@ async def post_init(app):
             app.create_task(profile_loop(app.bot, prof["id"]))
         log.info("⏰ Scheduler started for all profiles")
 
-    # شروع تسک پاکسازی دوره‌ای
     app.create_task(periodic_cleanup())
     log.info("🧹 Periodic cleanup task started")
 

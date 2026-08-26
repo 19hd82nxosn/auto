@@ -1270,7 +1270,6 @@ def get_v2ray_links_from_text(text):
 async def fetch_files_from_channel(bot, profile_id, channel, source):
     try:
         chat_id = channel if channel.startswith('@') else '@' + channel
-        # افزایش تعداد پیام‌های بررسی‌شده از ۵ به ۱۰ برای دریافت کانفیگ‌های بیشتر
         messages = await bot.get_chat_history(chat_id, limit=10)
         new_links = []
         for msg in messages:
@@ -1471,7 +1470,7 @@ def split_text(text, max_len=4096):
     return chunks
 
 # ======================================================================
-# ارسال کانفیگ‌ها (با رفع مشکل خرابی بنر و اسپانسر)
+# ارسال کانفیگ‌ها (با رفع مشکل ارسال تکی -> گروهی)
 # ======================================================================
 async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplicate=False, is_instant=False):
     if not working:
@@ -1506,7 +1505,8 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
         btn_style = sponsor["color"] if sponsor["color"] in ["primary", "success", "danger"] else "primary"
         sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"], style=btn_style)
 
-    sent_count = 0
+    # ===== جمع‌آوری همه کانفیگ‌ها در یک لیست =====
+    config_blocks = []
     for i, (url, ping, node_count) in enumerate(items, 1):
         n = last_n + i
         host, _ = extract_host(url)
@@ -1531,67 +1531,53 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
                 header = f"{channel_display} {flag}"
 
         block = f"<pre>{modified_url}</pre>"
-        configs_text = header + "\n" + block
+        config_blocks.append(header + "\n" + block)
 
-        try:
-            full_text = banner_template.format(configs=configs_text)
-        except KeyError:
-            full_text = f"✦ V2Ray Config List\n\n{configs_text}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
+    # ===== ساخت متن نهایی =====
+    configs_text = "\n\n".join(config_blocks)
+    try:
+        full_text = banner_template.format(configs=configs_text)
+    except KeyError:
+        full_text = f"✦ V2Ray Config List\n\n{configs_text}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
 
-        buttons = []
-        if sponsor_button:
-            buttons.append(sponsor_button)
-        reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
+    buttons = []
+    if sponsor_button:
+        buttons.append(sponsor_button)
+    reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
 
-        ok = await send_with_retry(
-            bot, dest, full_text,
-            parse_mode="HTML",
+    # ===== ارسال یک پیام =====
+    ok = await send_with_retry(
+        bot, dest, full_text,
+        parse_mode="HTML",
+        reply_markup=reply_markup,
+        disable_web_page_preview=True,
+        max_retries=5
+    )
+    if not ok:
+        # تلاش با متن ساده
+        plain_text = re.sub(r'<[^>]+>', '', full_text)
+        ok2 = await send_with_retry(
+            bot, dest, plain_text,
+            parse_mode=None,
             reply_markup=reply_markup,
             disable_web_page_preview=True,
-            max_retries=5
+            max_retries=3
         )
-        if ok:
-            sent_count += 1
-            log.info(f"✅ Sent config #{n} to {dest}")
-        else:
-            plain_text = re.sub(r'<[^>]+>', '', full_text)
-            plain_text = f"✦ V2Ray Config List\n\n{configs_text}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
-            plain_text = re.sub(r'<[^>]+>', '', plain_text)
-            ok2 = await send_with_retry(
-                bot, dest, plain_text,
-                parse_mode=None,
-                reply_markup=reply_markup,
-                disable_web_page_preview=True,
-                max_retries=3
-            )
-            if ok2:
-                sent_count += 1
-                log.info(f"✅ Sent config #{n} to {dest} (plain text with button)")
-            else:
-                ok3 = await send_with_retry(
-                    bot, dest, plain_text[:4096],
-                    parse_mode=None,
-                    reply_markup=None,
-                    disable_web_page_preview=True,
-                    max_retries=2
-                )
-                if ok3:
-                    sent_count += 1
-                    log.info(f"✅ Sent config #{n} to {dest} (plain text only)")
-                else:
-                    log.error(f"❌ Failed to send config #{n} after all retries")
+        if not ok2:
+            log.error(f"❌ Failed to send configs after all retries")
+            return 0
 
+    # ===== مارک کردن به‌عنوان ارسال‌شده و به‌روزرسانی شماره =====
+    sent_count = len(items)
+    for i, (url, ping, node_count) in enumerate(items, 1):
+        modified_url = append_channel_and_flag_encoded(url, dest if dest else "@VaslZone", "🌐", custom_query)
         if not skip_duplicate or not is_already_posted(profile_id, modified_url):
             mark_as_posted(profile_id, modified_url, source_for_seen, full_url=modified_url)
-
-        if is_instant:
-            await asyncio.sleep(2.0)
-        else:
-            await asyncio.sleep(0.8)
 
     if sent_count > 0:
         set_profile_last_num(profile_id, last_n + sent_count)
 
+    log.info(f"✅ Sent {sent_count} configs in one message to {dest}")
     return sent_count
 
 async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False):
@@ -1724,16 +1710,14 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
     max_post = get_profile_max_post(profile_id)
     if is_instant:
         scrape_limit = len(sources)
-        # برای حالت لحظه‌ای حداقل ۱۰ و حداکثر ۳۰ کانفیگ تست شود
         test_limit = max(max_post, 10)
         test_limit = min(test_limit, 30)
         ping_timeout = 3
         max_concurrent = 30
     else:
         scrape_limit = 10
-        # برای حالت عادی حداقل برابر max_post و حداقل ۲۰
         test_limit = max(max_post, 20)
-        test_limit = min(test_limit, 50)  # محدودیت برای جلوگیری از سنگینی
+        test_limit = min(test_limit, 50)
         ping_timeout = 10
         max_concurrent = 20
     # ==========================================

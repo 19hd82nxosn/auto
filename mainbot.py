@@ -36,6 +36,11 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 if not ADMIN_ID:
     raise ValueError("ADMIN_ID environment variable not set")
 
+# تنظیمات مربوط به دریافت کردیت از Railway (اختیاری)
+CREDIT_API_URL = os.getenv("CREDIT_API_URL", "")    # مثلاً: https://api.example.com/balance
+CREDIT_API_TOKEN = os.getenv("CREDIT_API_TOKEN", "")
+CREDIT_THRESHOLD = float(os.getenv("CREDIT_THRESHOLD", "0.05"))  # آستانه ارسال بک‌آپ
+
 # ======================================================================
 # مسیر پایدار (ولوم ثابت /app/data)
 # ======================================================================
@@ -177,7 +182,8 @@ c.execute("""CREATE TABLE IF NOT EXISTS profiles (
     schedule_cron TEXT DEFAULT '',
     last_backup_count INTEGER DEFAULT 0,
     timer_expiry TEXT DEFAULT NULL,
-    timer_duration INTEGER DEFAULT 0)""")
+    timer_duration INTEGER DEFAULT 0,
+    backup_interval INTEGER DEFAULT 1000)""")
 conn.commit()
 
 ensure_column("profiles", "show_numbers", "INTEGER DEFAULT 1", 1)
@@ -188,6 +194,7 @@ ensure_column("profiles", "schedule_cron", "TEXT DEFAULT ''", "")
 ensure_column("profiles", "last_backup_count", "INTEGER DEFAULT 0", 0)
 ensure_column("profiles", "timer_expiry", "TEXT DEFAULT NULL", None)
 ensure_column("profiles", "timer_duration", "INTEGER DEFAULT 0", 0)
+ensure_column("profiles", "backup_interval", "INTEGER DEFAULT 1000", 1000)
 
 c.execute("""CREATE TABLE IF NOT EXISTS blacklist (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -228,7 +235,8 @@ def fix_column_types():
                     schedule_cron TEXT DEFAULT '',
                     last_backup_count INTEGER DEFAULT 0,
                     timer_expiry TEXT DEFAULT NULL,
-                    timer_duration INTEGER DEFAULT 0
+                    timer_duration INTEGER DEFAULT 0,
+                    backup_interval INTEGER DEFAULT 1000
                 )
             """)
             c.execute("""
@@ -236,11 +244,11 @@ def fix_column_types():
                     (id, dest_name, sources, banner_config, banner_proxy, interval_min,
                      max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num,
                      created_at, show_numbers, custom_query, show_date_config, show_date_proxy,
-                     schedule_cron, last_backup_count, timer_expiry, timer_duration)
+                     schedule_cron, last_backup_count, timer_expiry, timer_duration, backup_interval)
                 SELECT id, dest_name, sources, banner_config, banner_proxy, interval_min,
                        max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num,
                        created_at, show_numbers, custom_query, show_date_config, show_date_proxy,
-                       schedule_cron, last_backup_count, timer_expiry, timer_duration
+                       schedule_cron, last_backup_count, timer_expiry, timer_duration, backup_interval
                 FROM profiles
             """)
             c.execute("DROP TABLE profiles")
@@ -405,12 +413,12 @@ def migrate_old_config():
             (dest_name, sources, banner_config, banner_proxy, interval_min,
              max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num, created_at,
              show_numbers, custom_query, show_date_config, show_date_proxy, schedule_cron, last_backup_count,
-             timer_expiry, timer_duration)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             timer_expiry, timer_duration, backup_interval)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (dest, old_sources, old_banner_config, old_banner_proxy,
              old_interval, old_max_post, old_max_proxies,
              old_post_configs, old_post_proxies, old_ping_mode, old_last_num,
-             datetime.now().isoformat(), 1, "", 1, 1, "", 0, None, 0))
+             datetime.now().isoformat(), 1, "", 1, 1, "", 0, None, 0, 1000))
     conn.commit()
     log.info(f"✅ Migrated {len(dest_list)} profiles.")
 
@@ -464,7 +472,7 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
                    interval_min=5, max_post=8, max_proxies=10,
                    post_configs=1, post_proxies=1, ping_mode="iran", last_num=0,
                    show_numbers=1, custom_query="",
-                   show_date_config=1, show_date_proxy=1, schedule_cron=""):
+                   show_date_config=1, show_date_proxy=1, schedule_cron="", backup_interval=1000):
     if not banner_config:
         banner_config = "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
     if not banner_proxy:
@@ -473,13 +481,13 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
         (dest_name, sources, banner_config, banner_proxy, interval_min,
          max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num, created_at,
          show_numbers, custom_query, show_date_config, show_date_proxy, schedule_cron, last_backup_count,
-         timer_expiry, timer_duration)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         timer_expiry, timer_duration, backup_interval)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (dest_name, sources, banner_config, banner_proxy,
          interval_min, max_post, max_proxies,
          post_configs, post_proxies, ping_mode, last_num,
          get_tehran_time(), show_numbers, custom_query,
-         show_date_config, show_date_proxy, schedule_cron, 0, None, 0))
+         show_date_config, show_date_proxy, schedule_cron, 0, None, 0, backup_interval))
     conn.commit()
     return c.lastrowid
 
@@ -488,7 +496,8 @@ def update_profile(profile_id, **kwargs):
                "interval_min", "max_post", "max_proxies", "post_configs",
                "post_proxies", "ping_mode", "last_num",
                "show_numbers", "custom_query", "show_date_config", "show_date_proxy",
-               "schedule_cron", "last_backup_count", "timer_expiry", "timer_duration"]
+               "schedule_cron", "last_backup_count", "timer_expiry", "timer_duration",
+               "backup_interval"]
     for key, value in kwargs.items():
         if key in allowed:
             c.execute(f"UPDATE profiles SET {key}=? WHERE id=?", (value, profile_id))
@@ -626,6 +635,13 @@ def get_profile_last_backup_count(profile_id):
 
 def set_profile_last_backup_count(profile_id, count):
     update_profile(profile_id, last_backup_count=count)
+
+def get_profile_backup_interval(profile_id):
+    prof = get_profile(profile_id)
+    return prof.get("backup_interval", 1000) if prof else 1000
+
+def set_profile_backup_interval(profile_id, interval):
+    update_profile(profile_id, backup_interval=interval)
 
 # ===== توابع تایمر =====
 def set_profile_timer(profile_id, minutes):
@@ -920,83 +936,70 @@ def is_already_posted(profile_id, url):
         "SELECT 1 FROM seen WHERE uuid=? AND address=? AND profile_id=?",
         (uid, host, profile_id)).fetchone() is not None
 
-def mark_as_posted(profile_id, url, source="", full_url=None):
-    url = clean_config_url(url)
-    uid, host = extract_uuid_and_address(url)
-    if not uid or not host:
-        return
-    if full_url is None:
-        full_url = url
-    now = get_tehran_time()
-
-    existing = c.execute(
-        "SELECT backup_num FROM seen WHERE uuid=? AND address=? AND profile_id=?",
-        (uid, host, profile_id)).fetchone()
-    if existing:
-        c.execute(
-            "UPDATE seen SET last_posted=?, full_url=? WHERE uuid=? AND address=? AND profile_id=?",
-            (now, full_url, uid, host, profile_id))
-    else:
-        max_num = c.execute(
-            "SELECT COALESCE(MAX(backup_num), 0) FROM seen WHERE profile_id=?",
-            (profile_id,)).fetchone()[0]
-        backup_num = max_num + 1
-        c.execute(
-            "INSERT INTO seen (uuid,address,source,first_seen,last_posted,profile_id,full_url,backup_num) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (uid, host, source, now, now, profile_id, full_url, backup_num))
-    conn.commit()
-    asyncio.create_task(check_and_auto_backup(profile_id))
+# قفل برای جلوگیری از هم‌پوشانی بک‌آپ‌ها
+backup_locks = {}
 
 async def check_and_auto_backup(profile_id):
-    """بک‌آپ خودکار برای هر پروفایل جداگانه با نام پروفایل"""
+    """بک‌آپ خودکار با بازه‌ی قابل تنظیم (backup_interval) و قفل برای هر پروفایل"""
     try:
         profile = get_profile(profile_id)
         if not profile:
             return
         profile_name = profile["dest_name"].replace("@", "").strip() or f"profile_{profile_id}"
+        backup_interval = get_profile_backup_interval(profile_id) or 1000
 
-        total = c.execute(
-            "SELECT COUNT(*) FROM seen WHERE profile_id=? AND full_url != '' AND backup_num > 0",
-            (profile_id,)).fetchone()[0]
-        last_backup = get_profile_last_backup_count(profile_id)
+        # قفل مخصوص هر پروفایل
+        lock = backup_locks.get(profile_id)
+        if not lock:
+            lock = asyncio.Lock()
+            backup_locks[profile_id] = lock
 
-        needed_blocks = total // 1000 - last_backup // 1000
-        if needed_blocks <= 0:
-            return
+        async with lock:
+            total = c.execute(
+                "SELECT COUNT(*) FROM seen WHERE profile_id=? AND full_url != '' AND backup_num > 0",
+                (profile_id,)).fetchone()[0]
+            last_backup = get_profile_last_backup_count(profile_id)
 
-        for block in range(1, needed_blocks + 1):
-            start_num = (last_backup // 1000 + block - 1) * 1000 + 1
-            end_num = (last_backup // 1000 + block) * 1000
+            # محاسبه آخرین بلاک بک‌آپ شده
+            last_backup_block = last_backup // backup_interval if backup_interval > 0 else 0
+            current_block = total // backup_interval if backup_interval > 0 else 0
 
-            rows = c.execute(
-                "SELECT full_url FROM seen WHERE profile_id=? AND full_url != '' AND backup_num BETWEEN ? AND ? ORDER BY backup_num",
-                (profile_id, start_num, end_num)
-            ).fetchall()
-            links = [r[0] for r in rows if r[0]]
-            if not links:
-                continue
+            if current_block <= last_backup_block:
+                return
 
-            filename = f"configs_backup_{get_tehran_date()}_{profile_name}_{start_num}_{end_num}.txt"
-            content = f"# Backup for {profile_name} (ID: {profile_id})\n# Range: {start_num} - {end_num}\n# Total: {len(links)}\n\n" + "\n".join(links)
-            filepath = os.path.join(DATA_DIR, filename)
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(content)
+            # برای هر بلاک جدید یک فایل ارسال کن
+            for block in range(last_backup_block + 1, current_block + 1):
+                start_num = (block - 1) * backup_interval + 1
+                end_num = block * backup_interval
 
-            bot = BOT_REF
-            if bot:
-                with open(filepath, "rb") as f:
-                    await bot.send_document(
-                        ADMIN_ID,
-                        document=f,
-                        filename=filename,
-                        caption=f"📤 بک‌آپ خودکار پروفایل {profile_name} (ID:{profile_id}) - {start_num} تا {end_num} (تعداد: {len(links)})"
-                    )
-                asyncio.create_task(delete_file_after_delay(filepath, 1800))
-            else:
-                log.warning("BOT_REF is None, cannot send backup.")
+                rows = c.execute(
+                    "SELECT full_url FROM seen WHERE profile_id=? AND full_url != '' AND backup_num BETWEEN ? AND ? ORDER BY backup_num",
+                    (profile_id, start_num, end_num)
+                ).fetchall()
+                links = [r[0] for r in rows if r[0]]
+                if not links:
+                    continue
 
-        set_profile_last_backup_count(profile_id, total)
+                filename = f"configs_backup_{get_tehran_date()}_{profile_name}_{start_num}_{end_num}.txt"
+                content = f"# Backup for {profile_name} (ID: {profile_id})\n# Range: {start_num} - {end_num}\n# Total: {len(links)}\n\n" + "\n".join(links)
+                filepath = os.path.join(DATA_DIR, filename)
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(content)
+
+                bot = BOT_REF
+                if bot:
+                    with open(filepath, "rb") as f:
+                        await bot.send_document(
+                            ADMIN_ID,
+                            document=f,
+                            filename=filename,
+                            caption=f"📤 بک‌آپ خودکار پروفایل {profile_name} (ID:{profile_id}) - {start_num} تا {end_num} (تعداد: {len(links)})"
+                        )
+                    asyncio.create_task(delete_file_after_delay(filepath, 1800))
+                else:
+                    log.warning("BOT_REF is None, cannot send backup.")
+
+            set_profile_last_backup_count(profile_id, total)
     except Exception as e:
         log.error(f"Auto backup check error for profile {profile_id}: {e}")
 
@@ -1147,7 +1150,11 @@ async def test_tcp_ping(host, port):
     except Exception:
         return False, 0
 
-async def ping_from_iran_only(host, port=None):
+async def ping_from_iran_only(host, port=None, allow_tcp_fallback=True):
+    """
+    پینگ از طریق check-host.net با فیلتر ایران.
+    اگر allow_tcp_fallback=True و check-host.net جواب نداد، TCP fallback انجام می‌شود.
+    """
     ip = await host_to_ip(host)
     if not ip:
         ip = host
@@ -1195,6 +1202,12 @@ async def ping_from_iran_only(host, port=None):
     except Exception as e:
         log.warning(f"check-host.net request failed: {e}")
 
+    # اگر fallback مجاز نبود، همینجا fail برگردان
+    if not allow_tcp_fallback:
+        log.info(f"❌ Iran ping failed and TCP fallback disabled for {target}")
+        return 0, False, 0
+
+    # در غیر این صورت TCP fallback
     if port is not None:
         log.info(f"🔄 TCP fallback with config port: {host}:{port}")
         ok, ping = await test_tcp_ping(host, port)
@@ -1215,11 +1228,16 @@ async def ping_from_iran_only(host, port=None):
     log.info(f"❌ All ping attempts failed for {target}")
     return 0, False, 0
 
-async def check_full_link_ping(url):
+async def check_full_link_ping(url, ping_mode="iran"):
+    """
+    بر اساس حالت پینگ (iran یا global) عمل می‌کند.
+    در حالت iran، fallback TCP غیرفعال است.
+    """
     host, port = extract_host(url)
     if not host:
         return 0, False, 0
-    ping, ok, cnt = await ping_from_iran_only(host, port)
+    allow_tcp = (ping_mode != "iran")  # در حالت iran، fallback مجاز نیست
+    ping, ok, cnt = await ping_from_iran_only(host, port, allow_tcp_fallback=allow_tcp)
     return ping, ok, cnt
 
 # ======================================================================
@@ -1696,9 +1714,12 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
         log.error(f"❌ Profile {profile_id} has no destination!")
         return 0, "no destination"
 
+    ping_mode = get_profile_ping_mode(profile_id)
+
     log.info(f"📡 Sources ({len(sources)}): {sources}")
     log.info(f"🎯 Destination: {dest}")
     log.info(f"🆕 only_new: {only_new}")
+    log.info(f"🌍 Ping mode: {ping_mode}")
 
     all_configs = []
     all_proxies = []
@@ -1796,7 +1817,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
             async def _check(u):
                 async with sem:
                     try:
-                        ping, ok, cnt = await check_full_link_ping(u)
+                        ping, ok, cnt = await check_full_link_ping(u, ping_mode)
                         if ok:
                             log.info(f"✅ Config OK: {u[:50]}... ping={ping}ms")
                             return u, True, ping, cnt
@@ -1824,7 +1845,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
             async def _check(u):
                 async with sem:
                     try:
-                        ping, ok, cnt = await check_full_link_ping(u)
+                        ping, ok, cnt = await check_full_link_ping(u, ping_mode)
                         if ok:
                             log.info(f"✅ Config OK: {u[:50]}... ping={ping}ms")
                             return u, True, ping, cnt
@@ -1855,7 +1876,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
                 sem = asyncio.Semaphore(max_concurrent)
                 async def check_proxy_instant(proxy_url):
                     async with sem:
-                        ping, ok, cnt = await check_full_link_ping(proxy_url)
+                        ping, ok, cnt = await check_full_link_ping(proxy_url, ping_mode)
                         host, _ = extract_host(proxy_url)
                         ip = await host_to_ip(host) if host else None
                         flag = "🌐"
@@ -1873,7 +1894,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
                 sem = asyncio.Semaphore(max_concurrent)
                 async def check_proxy(proxy_url):
                     async with sem:
-                        ping, ok, cnt = await check_full_link_ping(proxy_url)
+                        ping, ok, cnt = await check_full_link_ping(proxy_url, ping_mode)
                         host, _ = extract_host(proxy_url)
                         ip = await host_to_ip(host) if host else None
                         flag = "🌐"
@@ -2128,7 +2149,8 @@ T = {
         "welcome": "🤖 **بات جمع‌آوری کانفیگ و پروکسی**\n\n"
                   "📡 تعداد پروفایل‌ها: {profiles}\n"
                   "🔢 بعدی: #{next_n}\n"
-                  "⏰ بازه‌ها متغیر",
+                  "⏰ بازه‌ها متغیر\n"
+                  "💰 اعتبار: {credit}",
         "private": "🔒 خصوصیه.",
         "admin_panel": "🔐 **پنل مدیریت پروفایل**\n\n"
                        "📡 منابع: {srcs} | 🎯 مقصد: {dest}\n"
@@ -2142,7 +2164,8 @@ T = {
                        "📅 تاریخ کانفیگ: {date_cfg}\n"
                        "📅 تاریخ پروکسی: {date_prx}\n"
                        "⏰ کرون: {cron}\n"
-                       "⏱️ تایمر: {timer_status}",
+                       "⏱️ تایمر: {timer_status}\n"
+                       "📦 بک‌آپ هر {backup_interval} عدد",
         "btn_back": "🔙 برگشت",
         "btn_add_source": "➕ منبع",
         "btn_add_dest": "➕ مقصد جدید",
@@ -2278,6 +2301,12 @@ T = {
         "log_range_1h": "📅 ۱ ساعت",
         "log_range_6h": "📅 ۶ ساعت",
         "log_range_24h": "📅 ۲۴ ساعت",
+        "btn_set_backup_interval": "📦 تنظیم بازه بک‌آپ",
+        "backup_interval_prompt": "📦 تعداد کانفیگ در هر فایل بک‌آپ (پیش‌فرض ۱۰۰۰):",
+        "backup_interval_set": "✅ بازه بک‌آپ به {n} عدد تنظیم شد.",
+        "btn_balance": "💰 مانده اعتبار",
+        "balance_info": "💰 **مانده اعتبار:** {balance}",
+        "credit_low": "⚠️ اعتبار کمتر از {threshold} دلار است. بک‌آپ کامل دیتابیس ارسال شد."
     },
     "en": {
         "btn_timer": "⏱️ Timer",
@@ -2302,6 +2331,12 @@ T = {
         "log_range_1h": "📅 1 hour",
         "log_range_6h": "📅 6 hours",
         "log_range_24h": "📅 24 hours",
+        "btn_set_backup_interval": "📦 Set Backup Interval",
+        "backup_interval_prompt": "📦 Number of configs per backup file (default 1000):",
+        "backup_interval_set": "✅ Backup interval set to {n}.",
+        "btn_balance": "💰 Balance",
+        "balance_info": "💰 **Balance:** {balance}",
+        "credit_low": "⚠️ Credit below {threshold} USD. Full database backup sent."
     }
 }
 
@@ -2315,6 +2350,65 @@ def msg(key, **kwargs):
     return text
 
 # ======================================================================
+# توابع مربوط به اعتبار (Railway Credit)
+# ======================================================================
+CREDIT_CACHE = {"balance": None, "last_update": 0}
+CREDIT_LOCK = asyncio.Lock()
+CREDIT_THRESHOLD = float(os.getenv("CREDIT_THRESHOLD", "0.05"))
+
+async def get_credit_balance():
+    """
+    دریافت مانده اعتبار از API تعریف شده.
+    در صورت عدم تنظیم، None برمی‌گرداند.
+    """
+    if not CREDIT_API_URL:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            headers = {}
+            if CREDIT_API_TOKEN:
+                headers["Authorization"] = f"Bearer {CREDIT_API_TOKEN}"
+            resp = await client.get(CREDIT_API_URL, headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                # فرض می‌کنیم پاسخ JSON شامل فیلد balance است
+                balance = float(data.get("balance", 0))
+                return balance
+            else:
+                log.warning(f"Credit API returned {resp.status_code}")
+                return None
+    except Exception as e:
+        log.warning(f"Failed to fetch credit: {e}")
+        return None
+
+async def check_credit_and_backup():
+    """بررسی دوره‌ای اعتبار و در صورت کمتر از آستانه، بک‌آپ کامل دیتابیس"""
+    balance = await get_credit_balance()
+    if balance is None:
+        return
+    if balance < CREDIT_THRESHOLD:
+        log.info(f"Credit low: {balance} < {CREDIT_THRESHOLD}, sending full backup")
+        bot = BOT_REF
+        if bot:
+            try:
+                with open(DB_PATH, "rb") as f:
+                    await bot.send_document(
+                        ADMIN_ID,
+                        document=f,
+                        filename=f"full_db_backup_{get_tehran_date()}.db",
+                        caption=f"💾 بک‌آپ کامل دیتابیس (اعتبار: {balance} دلار)"
+                    )
+                log.info("✅ Full database backup sent due to low credit.")
+            except Exception as e:
+                log.error(f"Failed to send full backup: {e}")
+
+async def periodic_credit_check():
+    """هر ساعت یکبار اعتبار را چک کن"""
+    while True:
+        await check_credit_and_backup()
+        await asyncio.sleep(3600)  # هر ساعت
+
+# ======================================================================
 # کیبوردها
 # ======================================================================
 def profiles_kb():
@@ -2323,6 +2417,7 @@ def profiles_kb():
     for p in profiles:
         btns.append([InlineKeyboardButton(f"{p['dest_name']} (ID:{p['id']})", callback_data=f"prof_{p['id']}", style="primary")])
     btns.append([InlineKeyboardButton("➕ Add Profile", callback_data="prof_add", style="success")])
+    btns.append([InlineKeyboardButton("💰 Balance", callback_data="show_balance", style="primary")])
     btns.append([InlineKeyboardButton(msg("btn_back"), callback_data="back_home", style="primary")])
     return InlineKeyboardMarkup(btns)
 
@@ -2378,17 +2473,18 @@ def profile_admin_kb(profile_id):
          InlineKeyboardButton(f"📅 تاریخ پروکسی: {date_prx_status}", callback_data=f"tgl_date_prx_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_set_custom_query"), callback_data=f"setquery_{profile_id}", style="primary"),
          InlineKeyboardButton(msg("btn_stats"), callback_data=f"ast_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_test"), callback_data=f"sendtest_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_runnow"), callback_data=f"runnow_{profile_id}", style="success")],
-        [InlineKeyboardButton(msg("btn_instant"), callback_data=f"instant_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_manual_send"), callback_data=f"manual_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_blacklist"), callback_data=f"bl_list_{profile_id}", style="danger"),
-         InlineKeyboardButton(msg("btn_set_schedule_cron"), callback_data=f"setcron_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_backup"), callback_data=f"backup_{profile_id}", style="success"),
-         InlineKeyboardButton(msg("btn_backup_export"), callback_data=f"backup_export_menu_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_timer"), callback_data=f"timer_menu_{profile_id}", style="primary"),
-         InlineKeyboardButton(f"⏱️ {timer_status}", callback_data="dummy", style="primary")],
-        [InlineKeyboardButton(msg("btn_log_menu"), callback_data=f"log_menu_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_set_backup_interval"), callback_data=f"setbackupinterval_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_test"), callback_data=f"sendtest_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_runnow"), callback_data=f"runnow_{profile_id}", style="success"),
+         InlineKeyboardButton(msg("btn_instant"), callback_data=f"instant_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_manual_send"), callback_data=f"manual_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_blacklist"), callback_data=f"bl_list_{profile_id}", style="danger")],
+        [InlineKeyboardButton(msg("btn_set_schedule_cron"), callback_data=f"setcron_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_backup"), callback_data=f"backup_{profile_id}", style="success")],
+        [InlineKeyboardButton(msg("btn_backup_export"), callback_data=f"backup_export_menu_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_timer"), callback_data=f"timer_menu_{profile_id}", style="primary")],
+        [InlineKeyboardButton(f"⏱️ {timer_status}", callback_data="dummy", style="primary"),
+         InlineKeyboardButton(msg("btn_log_menu"), callback_data=f"log_menu_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_reset"), callback_data=f"rn_{profile_id}", style="primary"),
          InlineKeyboardButton(msg("btn_clear"), callback_data=f"cd1_{profile_id}", style="danger")],
         [InlineKeyboardButton("❌ Delete Profile", callback_data=f"delprof_{profile_id}", style="danger")],
@@ -2503,14 +2599,28 @@ async def cmd_start(u, ctx):
     if profiles:
         last_num = max(p["last_num"] for p in profiles)
         next_n = last_num + 1
-    txt = msg("welcome", profiles=total, next_n=next_n)
-    btns = [[InlineKeyboardButton("📋 Manage Profiles", callback_data="profiles_list", style="primary")]]
+    # دریافت اعتبار
+    balance = await get_credit_balance()
+    credit_str = f"${balance:.2f}" if balance is not None else "نامشخص"
+    txt = msg("welcome", profiles=total, next_n=next_n, credit=credit_str)
+    btns = [[InlineKeyboardButton("📋 Manage Profiles", callback_data="profiles_list", style="primary")],
+            [InlineKeyboardButton("💰 Check Balance", callback_data="show_balance", style="primary")]]
     await u.message.reply_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(btns))
 
 async def cmd_admin(u, ctx):
     if u.effective_user.id != ADMIN_ID:
         return
     await show_profiles_list(u.message)
+
+async def cmd_balance(u, ctx):
+    if u.effective_user.id != ADMIN_ID:
+        return
+    balance = await get_credit_balance()
+    if balance is not None:
+        txt = msg("balance_info", balance=f"${balance:.2f}")
+    else:
+        txt = "💰 اعتبار: نامشخص (API تنظیم نشده)"
+    await u.message.reply_text(txt, parse_mode="HTML")
 
 async def show_profiles_list(msg_or_q):
     profiles = get_profiles()
@@ -2614,6 +2724,36 @@ async def on_callback(u, ctx):
         log.info(f"📨 Callback data: {d}")
 
         if d == "dummy":
+            return
+
+        # نمایش اعتبار
+        if d == "show_balance":
+            balance = await get_credit_balance()
+            if balance is not None:
+                txt = msg("balance_info", balance=f"${balance:.2f}")
+            else:
+                txt = "💰 اعتبار: نامشخص (API تنظیم نشده)"
+            await q.edit_message_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="profiles_list", style="primary")]
+            ]))
+            return
+
+        # ===== تنظیم بازه بک‌آپ =====
+        if d.startswith("setbackupinterval_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                ctx.user_data["action"] = f"setbackupinterval_{profile_id}"
+                current = get_profile_backup_interval(profile_id)
+                await q.edit_message_text(f"بازه فعلی: {current}\n{msg('backup_interval_prompt')}", reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"prof_{profile_id}", style="primary")]
+                ]))
+            else:
+                await q.answer("⚠️ خطا در داده")
             return
 
         # ===== منوی لاگ =====
@@ -3722,6 +3862,7 @@ async def show_profile_admin(msg_or_q, profile_id):
     show_date_cfg = prof["show_date_config"] == 1
     show_date_prx = prof["show_date_proxy"] == 1
     cron = prof["schedule_cron"] or "خالی"
+    backup_interval = get_profile_backup_interval(profile_id)
     sponsor = get_sponsor(profile_id)
     sponsor_st = f"{sponsor['name']} ({'فعال' if sponsor['enabled'] else 'غیرفعال'})" if sponsor else "خالی"
     ping_mode = prof["ping_mode"]
@@ -3755,6 +3896,7 @@ async def show_profile_admin(msg_or_q, profile_id):
         date_prx=date_prx_status,
         cron=cron,
         timer_status=timer_status,
+        backup_interval=backup_interval,
     )
     kb = profile_admin_kb(profile_id)
     try:
@@ -3904,6 +4046,21 @@ async def on_text(u, ctx):
         return
 
     t = u.message.text.strip()
+
+    # تنظیم بازه بک‌آپ
+    if a.startswith("setbackupinterval_"):
+        profile_id = int(a.split("_")[1])
+        try:
+            interval = int(t)
+            if interval < 1:
+                raise ValueError
+            set_profile_backup_interval(profile_id, interval)
+            await u.message.reply_text(msg("backup_interval_set", n=interval))
+        except ValueError:
+            await u.message.reply_text("❌ لطفاً یک عدد صحیح بزرگتر از صفر وارد کنید.")
+        del ctx.user_data["action"]
+        await show_profile_admin(u.message, profile_id)
+        return
 
     if a.startswith("bl_add_"):
         profile_id = int(a.split("_")[2])
@@ -4318,6 +4475,13 @@ async def post_init(app):
     app.create_task(periodic_cleanup())
     log.info("🧹 Periodic cleanup task started")
 
+    # شروع چک اعتبار
+    if CREDIT_API_URL:
+        app.create_task(periodic_credit_check())
+        log.info("💰 Credit check task started")
+    else:
+        log.info("💰 Credit check disabled (no CREDIT_API_URL)")
+
 def cfg_get(k, default=""):
     r = c.execute("SELECT v FROM cfg WHERE k=?", (k,)).fetchone()
     return r[0] if r else default
@@ -4334,6 +4498,7 @@ def main():
     app.add_handler(CommandHandler("runall", cmd_runall))
     app.add_handler(CommandHandler("sendtest", cmd_sendtest))
     app.add_handler(CommandHandler("diag", cmd_diag))
+    app.add_handler(CommandHandler("balance", cmd_balance))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

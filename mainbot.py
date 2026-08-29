@@ -36,13 +36,12 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 if not ADMIN_ID:
     raise ValueError("ADMIN_ID environment variable not set")
 
-# Railway API (برای دریافت اعتبار)
 RAILWAY_TOKEN = os.getenv("RAILWAY_TOKEN", "")
 RAILWAY_PROJECT_ID = os.getenv("RAILWAY_PROJECT_ID", "")
 CREDIT_THRESHOLD = float(os.getenv("CREDIT_THRESHOLD", "0.05"))
 
 # ======================================================================
-# مسیر پایدار (ولوم ثابت /app/data)
+# مسیر پایدار
 # ======================================================================
 DATA_DIR = "/app/data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -82,9 +81,6 @@ conn.execute("PRAGMA journal_mode=WAL")
 conn.execute("PRAGMA synchronous=NORMAL")
 c = conn.cursor()
 
-# ======================================================================
-# توابع کمکی برای اطمینان از وجود ستون
-# ======================================================================
 def ensure_column(table, column, col_type, default=None):
     try:
         c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
@@ -96,7 +92,7 @@ def ensure_column(table, column, col_type, default=None):
         pass
 
 # ======================================================================
-# ایجاد جداول (با کلیدهای یکتای اصلاح‌شده)
+# ایجاد جداول
 # ======================================================================
 c.execute("""CREATE TABLE IF NOT EXISTS seen (
     uuid TEXT,
@@ -183,7 +179,12 @@ c.execute("""CREATE TABLE IF NOT EXISTS profiles (
     last_backup_count INTEGER DEFAULT 0,
     timer_expiry TEXT DEFAULT NULL,
     timer_duration INTEGER DEFAULT 0,
-    backup_interval INTEGER DEFAULT 1000)""")
+    backup_interval INTEGER DEFAULT 1000,
+    interval_config INTEGER DEFAULT 5,
+    interval_proxy INTEGER DEFAULT 5,
+    max_post_config INTEGER DEFAULT 8,
+    max_post_proxy INTEGER DEFAULT 10
+)""")
 conn.commit()
 
 ensure_column("profiles", "show_numbers", "INTEGER DEFAULT 1", 1)
@@ -195,6 +196,10 @@ ensure_column("profiles", "last_backup_count", "INTEGER DEFAULT 0", 0)
 ensure_column("profiles", "timer_expiry", "TEXT DEFAULT NULL", None)
 ensure_column("profiles", "timer_duration", "INTEGER DEFAULT 0", 0)
 ensure_column("profiles", "backup_interval", "INTEGER DEFAULT 1000", 1000)
+ensure_column("profiles", "interval_config", "INTEGER DEFAULT 5", 5)
+ensure_column("profiles", "interval_proxy", "INTEGER DEFAULT 5", 5)
+ensure_column("profiles", "max_post_config", "INTEGER DEFAULT 8", 8)
+ensure_column("profiles", "max_post_proxy", "INTEGER DEFAULT 10", 10)
 
 c.execute("""CREATE TABLE IF NOT EXISTS blacklist (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -236,7 +241,11 @@ def fix_column_types():
                     last_backup_count INTEGER DEFAULT 0,
                     timer_expiry TEXT DEFAULT NULL,
                     timer_duration INTEGER DEFAULT 0,
-                    backup_interval INTEGER DEFAULT 1000
+                    backup_interval INTEGER DEFAULT 1000,
+                    interval_config INTEGER DEFAULT 5,
+                    interval_proxy INTEGER DEFAULT 5,
+                    max_post_config INTEGER DEFAULT 8,
+                    max_post_proxy INTEGER DEFAULT 10
                 )
             """)
             c.execute("""
@@ -244,11 +253,13 @@ def fix_column_types():
                     (id, dest_name, sources, banner_config, banner_proxy, interval_min,
                      max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num,
                      created_at, show_numbers, custom_query, show_date_config, show_date_proxy,
-                     schedule_cron, last_backup_count, timer_expiry, timer_duration, backup_interval)
+                     schedule_cron, last_backup_count, timer_expiry, timer_duration, backup_interval,
+                     interval_config, interval_proxy, max_post_config, max_post_proxy)
                 SELECT id, dest_name, sources, banner_config, banner_proxy, interval_min,
                        max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num,
                        created_at, show_numbers, custom_query, show_date_config, show_date_proxy,
-                       schedule_cron, last_backup_count, timer_expiry, timer_duration, backup_interval
+                       schedule_cron, last_backup_count, timer_expiry, timer_duration, backup_interval,
+                       interval_config, interval_proxy, max_post_config, max_post_proxy
                 FROM profiles
             """)
             c.execute("DROP TABLE profiles")
@@ -401,19 +412,21 @@ def migrate_old_config():
             (dest_name, sources, banner_config, banner_proxy, interval_min,
              max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num, created_at,
              show_numbers, custom_query, show_date_config, show_date_proxy, schedule_cron, last_backup_count,
-             timer_expiry, timer_duration, backup_interval)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             timer_expiry, timer_duration, backup_interval,
+             interval_config, interval_proxy, max_post_config, max_post_proxy)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (dest, old_sources, old_banner_config, old_banner_proxy,
              old_interval, old_max_post, old_max_proxies,
              old_post_configs, old_post_proxies, old_ping_mode, old_last_num,
-             datetime.now().isoformat(), 1, "", 1, 1, "", 0, None, 0, 1000))
+             datetime.now().isoformat(), 1, "", 1, 1, "", 0, None, 0, 1000,
+             old_interval, old_interval, old_max_post, old_max_proxies))
     conn.commit()
     log.info(f"✅ Migrated {len(dest_list)} profiles.")
 
 migrate_old_config()
 
 # ======================================================================
-# توابع کمکی جدید برای پاکسازی نام کانال
+# توابع کمکی
 # ======================================================================
 def clean_source_name(name: str) -> str:
     if not name:
@@ -436,7 +449,7 @@ def normalize_channel_input(text: str) -> str:
     return clean_source_name(text)
 
 # ======================================================================
-# توابع پروفایل
+# توابع پروفایل با ستون‌های جدید
 # ======================================================================
 def get_profiles():
     c.execute("SELECT * FROM profiles ORDER BY id")
@@ -460,7 +473,8 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
                    interval_min=5, max_post=8, max_proxies=10,
                    post_configs=1, post_proxies=1, ping_mode="iran", last_num=0,
                    show_numbers=1, custom_query="",
-                   show_date_config=1, show_date_proxy=1, schedule_cron="", backup_interval=1000):
+                   show_date_config=1, show_date_proxy=1, schedule_cron="", backup_interval=1000,
+                   interval_config=5, interval_proxy=5, max_post_config=8, max_post_proxy=10):
     if not banner_config:
         banner_config = "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
     if not banner_proxy:
@@ -469,13 +483,15 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
         (dest_name, sources, banner_config, banner_proxy, interval_min,
          max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num, created_at,
          show_numbers, custom_query, show_date_config, show_date_proxy, schedule_cron, last_backup_count,
-         timer_expiry, timer_duration, backup_interval)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         timer_expiry, timer_duration, backup_interval,
+         interval_config, interval_proxy, max_post_config, max_post_proxy)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (dest_name, sources, banner_config, banner_proxy,
          interval_min, max_post, max_proxies,
          post_configs, post_proxies, ping_mode, last_num,
          get_tehran_time(), show_numbers, custom_query,
-         show_date_config, show_date_proxy, schedule_cron, 0, None, 0, backup_interval))
+         show_date_config, show_date_proxy, schedule_cron, 0, None, 0, backup_interval,
+         interval_config, interval_proxy, max_post_config, max_post_proxy))
     conn.commit()
     return c.lastrowid
 
@@ -485,7 +501,7 @@ def update_profile(profile_id, **kwargs):
                "post_proxies", "ping_mode", "last_num",
                "show_numbers", "custom_query", "show_date_config", "show_date_proxy",
                "schedule_cron", "last_backup_count", "timer_expiry", "timer_duration",
-               "backup_interval"]
+               "backup_interval", "interval_config", "interval_proxy", "max_post_config", "max_post_proxy"]
     for key, value in kwargs.items():
         if key in allowed:
             c.execute(f"UPDATE profiles SET {key}=? WHERE id=?", (value, profile_id))
@@ -502,6 +518,36 @@ def delete_profile(profile_id):
     c.execute("DELETE FROM blacklist WHERE profile_id=?", (profile_id,))
     conn.commit()
 
+# توابع دسترسی به تنظیمات جدید
+def get_profile_interval_config(profile_id):
+    prof = get_profile(profile_id)
+    return prof.get("interval_config", 5) if prof else 5
+
+def set_profile_interval_config(profile_id, val):
+    update_profile(profile_id, interval_config=val)
+
+def get_profile_interval_proxy(profile_id):
+    prof = get_profile(profile_id)
+    return prof.get("interval_proxy", 5) if prof else 5
+
+def set_profile_interval_proxy(profile_id, val):
+    update_profile(profile_id, interval_proxy=val)
+
+def get_profile_max_post_config(profile_id):
+    prof = get_profile(profile_id)
+    return prof.get("max_post_config", 8) if prof else 8
+
+def set_profile_max_post_config(profile_id, val):
+    update_profile(profile_id, max_post_config=val)
+
+def get_profile_max_post_proxy(profile_id):
+    prof = get_profile(profile_id)
+    return prof.get("max_post_proxy", 10) if prof else 10
+
+def set_profile_max_post_proxy(profile_id, val):
+    update_profile(profile_id, max_post_proxy=val)
+
+# سایر توابع کمکی
 def get_profile_sources(profile_id):
     prof = get_profile(profile_id)
     if not prof:
@@ -531,17 +577,23 @@ def get_profile_banner_proxy(profile_id):
     prof = get_profile(profile_id)
     return prof["banner_proxy"] if prof else ""
 
-def get_profile_interval(profile_id):
-    prof = get_profile(profile_id)
-    return prof["interval_min"] if prof else 5
+def get_profile_interval(profile_id):  # برای سازگاری با کد قدیمی
+    return get_profile_interval_config(profile_id)
+
+def set_profile_interval(profile_id, val):
+    set_profile_interval_config(profile_id, val)
 
 def get_profile_max_post(profile_id):
-    prof = get_profile(profile_id)
-    return prof["max_post"] if prof else 8
+    return get_profile_max_post_config(profile_id)
+
+def set_profile_max_post(profile_id, val):
+    set_profile_max_post_config(profile_id, val)
 
 def get_profile_max_proxies(profile_id):
-    prof = get_profile(profile_id)
-    return prof["max_proxies"] if prof else 10
+    return get_profile_max_post_proxy(profile_id)
+
+def set_profile_max_proxies(profile_id, val):
+    set_profile_max_post_proxy(profile_id, val)
 
 def get_profile_last_num(profile_id):
     prof = get_profile(profile_id)
@@ -750,7 +802,7 @@ def update_sponsor_color(profile_id, color):
     conn.commit()
 
 # ======================================================================
-# توابع کمکی
+# توابع کمکی (پینگ، استخراج لینک و ...)
 # ======================================================================
 def country_to_flag(code):
     if not code or len(code) != 2 or not code.isalpha():
@@ -924,88 +976,6 @@ def is_already_posted(profile_id, url):
         "SELECT 1 FROM seen WHERE uuid=? AND address=? AND profile_id=?",
         (uid, host, profile_id)).fetchone() is not None
 
-# قفل برای جلوگیری از هم‌پوشانی بک‌آپ‌ها
-backup_locks = {}
-
-async def check_and_auto_backup(profile_id):
-    """بک‌آپ خودکار با بازه‌ی قابل تنظیم (backup_interval) و قفل برای هر پروفایل"""
-    try:
-        profile = get_profile(profile_id)
-        if not profile:
-            return
-        profile_name = profile["dest_name"].replace("@", "").strip() or f"profile_{profile_id}"
-        backup_interval = get_profile_backup_interval(profile_id) or 1000
-
-        lock = backup_locks.get(profile_id)
-        if not lock:
-            lock = asyncio.Lock()
-            backup_locks[profile_id] = lock
-
-        async with lock:
-            total = c.execute(
-                "SELECT COUNT(*) FROM seen WHERE profile_id=? AND full_url != '' AND backup_num > 0",
-                (profile_id,)).fetchone()[0]
-            last_backup = get_profile_last_backup_count(profile_id)
-
-            last_backup_block = last_backup // backup_interval if backup_interval > 0 else 0
-            current_block = total // backup_interval if backup_interval > 0 else 0
-
-            if current_block <= last_backup_block:
-                return
-
-            for block in range(last_backup_block + 1, current_block + 1):
-                start_num = (block - 1) * backup_interval + 1
-                end_num = block * backup_interval
-
-                rows = c.execute(
-                    "SELECT full_url FROM seen WHERE profile_id=? AND full_url != '' AND backup_num BETWEEN ? AND ? ORDER BY backup_num",
-                    (profile_id, start_num, end_num)
-                ).fetchall()
-                links = [r[0] for r in rows if r[0]]
-                if not links:
-                    continue
-
-                filename = f"configs_backup_{get_tehran_date()}_{profile_name}_{start_num}_{end_num}.txt"
-                content = f"# Backup for {profile_name} (ID: {profile_id})\n# Range: {start_num} - {end_num}\n# Total: {len(links)}\n\n" + "\n".join(links)
-                filepath = os.path.join(DATA_DIR, filename)
-                with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(content)
-
-                bot = BOT_REF
-                if bot:
-                    with open(filepath, "rb") as f:
-                        await bot.send_document(
-                            ADMIN_ID,
-                            document=f,
-                            filename=filename,
-                            caption=f"📤 بک‌آپ خودکار پروفایل {profile_name} (ID:{profile_id}) - {start_num} تا {end_num} (تعداد: {len(links)})"
-                        )
-                    asyncio.create_task(delete_file_after_delay(filepath, 1800))
-                else:
-                    log.warning("BOT_REF is None, cannot send backup.")
-
-            set_profile_last_backup_count(profile_id, total)
-    except Exception as e:
-        log.error(f"Auto backup check error for profile {profile_id}: {e}")
-
-async def delete_file_after_delay(filepath, delay_seconds):
-    await asyncio.sleep(delay_seconds)
-    try:
-        if os.path.exists(filepath):
-            os.remove(filepath)
-            log.info(f"🗑️ Deleted file: {filepath}")
-    except Exception as e:
-        log.error(f"Error deleting file {filepath}: {e}")
-
-def is_message_processed(profile_id, source, message_id):
-    r = c.execute("SELECT 1 FROM processed_messages WHERE source=? AND message_id=? AND profile_id=?", (source, message_id, profile_id)).fetchone()
-    return r is not None
-
-def mark_message_processed(profile_id, source, message_id):
-    c.execute("INSERT OR REPLACE INTO processed_messages (source, message_id, profile_id) VALUES (?,?,?)",
-              (source, message_id, profile_id))
-    conn.commit()
-
 def is_proxy_posted(profile_id, proxy_url):
     r = c.execute("SELECT 1 FROM proxies_seen WHERE proxy_url=? AND profile_id=?", (proxy_url, profile_id)).fetchone()
     return r is not None
@@ -1014,6 +984,28 @@ def mark_proxy_posted(profile_id, proxy_url):
     now = get_tehran_time()
     c.execute("INSERT OR REPLACE INTO proxies_seen (proxy_url, first_seen, last_posted, profile_id) VALUES (?,?,?,?)",
               (proxy_url, now, now, profile_id))
+    conn.commit()
+
+def mark_as_posted(profile_id, url, source, full_url=""):
+    uid, host = extract_uuid_and_address(url)
+    if not uid or not host:
+        return
+    now = get_tehran_time()
+    max_bn = c.execute("SELECT COALESCE(MAX(backup_num),0) FROM seen WHERE profile_id=?", (profile_id,)).fetchone()[0]
+    new_bn = max_bn + 1 if full_url else 0
+    c.execute("""
+        INSERT OR REPLACE INTO seen (uuid, address, source, first_seen, last_posted, profile_id, full_url, backup_num)
+        VALUES (?,?,?,?,?,?,?,?)
+    """, (uid, host, source, now, now, profile_id, full_url or url, new_bn))
+    conn.commit()
+
+def is_message_processed(profile_id, source, message_id):
+    r = c.execute("SELECT 1 FROM processed_messages WHERE source=? AND message_id=? AND profile_id=?", (source, message_id, profile_id)).fetchone()
+    return r is not None
+
+def mark_message_processed(profile_id, source, message_id):
+    c.execute("INSERT OR REPLACE INTO processed_messages (source, message_id, profile_id) VALUES (?,?,?)",
+              (source, message_id, profile_id))
     conn.commit()
 
 def get_last_scrape_time(profile_id, source):
@@ -1136,10 +1128,6 @@ async def test_tcp_ping(host, port):
         return False, 0
 
 async def ping_from_iran_only(host, port=None, allow_tcp_fallback=True):
-    """
-    پینگ از طریق check-host.net با فیلتر ایران.
-    اگر allow_tcp_fallback=True و check-host.net جواب نداد، TCP fallback انجام می‌شود.
-    """
     ip = await host_to_ip(host)
     if not ip:
         ip = host
@@ -1187,12 +1175,10 @@ async def ping_from_iran_only(host, port=None, allow_tcp_fallback=True):
     except Exception as e:
         log.warning(f"check-host.net request failed: {e}")
 
-    # اگر fallback مجاز نبود، همینجا fail برگردان
     if not allow_tcp_fallback:
         log.info(f"❌ Iran ping failed and TCP fallback disabled for {target}")
         return 0, False, 0
 
-    # در غیر این صورت TCP fallback
     if port is not None:
         log.info(f"🔄 TCP fallback with config port: {host}:{port}")
         ok, ping = await test_tcp_ping(host, port)
@@ -1214,20 +1200,74 @@ async def ping_from_iran_only(host, port=None, allow_tcp_fallback=True):
     return 0, False, 0
 
 async def check_full_link_ping(url, ping_mode="iran"):
-    """
-    بر اساس حالت پینگ (iran یا global) عمل می‌کند.
-    در حالت iran، fallback TCP غیرفعال است.
-    """
     host, port = extract_host(url)
     if not host:
         return 0, False, 0
-    allow_tcp = (ping_mode != "iran")  # در حالت iran، fallback مجاز نیست
+    allow_tcp = (ping_mode != "iran")
     ping, ok, cnt = await ping_from_iran_only(host, port, allow_tcp_fallback=allow_tcp)
     return ping, ok, cnt
 
 # ======================================================================
-# اسکرپ
+# اسکرپ (همیشه همه لینک‌ها را برمی‌گرداند)
 # ======================================================================
+_scrape_cache = {}
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+]
+
+async def scrape_channel_with_retry(profile_id, channel, max_retries=2):
+    """
+    همیشه همه‌ی لینک‌ها را برمی‌گرداند (بدون فیلتر جدید).
+    """
+    try:
+        return await _scrape_channel_internal(profile_id, channel)
+    except Exception as e:
+        log.error(f"❌ scrape {channel} error: {e}")
+        return [], []
+
+async def _scrape_channel_internal(profile_id, channel):
+    import time as _t
+    current_time = _t.time()
+    clean_channel = normalize_channel_input(channel)
+    if not clean_channel:
+        log.warning(f"Invalid channel name: {channel}")
+        return [], []
+    url = f"https://t.me/s/{clean_channel.lstrip('@')}"
+    log.info(f"🔍 Scraping {clean_channel}...")
+    headers = {
+        "User-Agent": _USER_AGENTS[hash(datetime.now().timestamp()) % len(_USER_AGENTS)],
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,fa;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as cl:
+        r = await cl.get(url, headers=headers)
+        if r.status_code == 429:
+            log.warning(f"Rate limit for {clean_channel}, waiting 30s")
+            await asyncio.sleep(30)
+            r = await cl.get(url, headers=headers)
+        if r.status_code != 200:
+            log.warning(f"⚠️ {clean_channel} returned status {r.status_code}")
+            return [], []
+        html_text = r.text
+
+        config_links = extract_links_from_text(html_text)
+        proxy_links = extract_proxy_links_from_text(html_text)
+
+        log.info(f"📊 {clean_channel}: found {len(config_links)} configs, {len(proxy_links)} proxies")
+        update_last_scrape_time(profile_id, clean_channel, get_tehran_time())
+
+        # به‌روزرسانی کش (فقط برای سرعت)
+        _scrape_cache[(profile_id, clean_channel)] = (current_time, config_links, proxy_links)
+        return config_links, proxy_links
+
 def decrypt_subscription(data: bytes, passwords: list):
     protocols = ("vless://", "vmess://", "trojan://",
                   "hy2://", "tuic://")
@@ -1307,71 +1347,10 @@ async def fetch_files_from_channel(bot, profile_id, channel, source):
         log.warning(f"fetch_files_from_channel({channel}) error: {e}")
         return []
 
-_scrape_cache = {}
-_USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
-]
-
-async def scrape_channel_with_retry(profile_id, channel, only_new=True, max_retries=2):
-    try:
-        return await _scrape_channel_internal(profile_id, channel, only_new)
-    except Exception as e:
-        log.error(f"❌ scrape {channel} error: {e}")
-        return [], []
-
-async def _scrape_channel_internal(profile_id, channel, only_new=True):
-    import time as _t
-    current_time = _t.time()
-    clean_channel = normalize_channel_input(channel)
-    if not clean_channel:
-        log.warning(f"Invalid channel name: {channel}")
-        return [], []
-    url = f"https://t.me/s/{clean_channel.lstrip('@')}"
-    log.info(f"🔍 Scraping {clean_channel}...")
-    headers = {
-        "User-Agent": _USER_AGENTS[hash(datetime.now().timestamp()) % len(_USER_AGENTS)],
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9,fa;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-    }
-    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as cl:
-        r = await cl.get(url, headers=headers)
-        if r.status_code == 429:
-            log.warning(f"Rate limit for {clean_channel}, waiting 30s")
-            await asyncio.sleep(30)
-            r = await cl.get(url, headers=headers)
-        if r.status_code != 200:
-            log.warning(f"⚠️ {clean_channel} returned status {r.status_code}")
-            return [], []
-        html_text = r.text
-
-        config_links = extract_links_from_text(html_text)
-        proxy_links = extract_proxy_links_from_text(html_text)
-
-        log.info(f"📊 {clean_channel}: found {len(config_links)} configs, {len(proxy_links)} proxies")
-        update_last_scrape_time(profile_id, clean_channel, get_tehran_time())
-
-        cached = _scrape_cache.get((profile_id, clean_channel), (0, [], []))
-        old_configs = cached[1] if len(cached) > 1 else []
-        old_proxies = cached[2] if len(cached) > 2 else []
-        new_configs = [link for link in config_links if link not in old_configs]
-        new_proxies = [link for link in proxy_links if link not in old_proxies]
-        log.info(f"🆕 {clean_channel}: {len(new_configs)} new configs, {len(new_proxies)} new proxies")
-        _scrape_cache[(profile_id, clean_channel)] = (current_time, config_links, proxy_links)
-        return new_configs, new_proxies
-
 # ======================================================================
-# ارسال (با مدیریت Flood Control)
+# ارسال
 # ======================================================================
 async def send_with_retry(bot, chat_id, text, parse_mode="HTML", reply_markup=None, disable_web_page_preview=True, max_retries=5):
-    """ارسال پیام با مدیریت خطاهای Flood control و retry"""
     retry_count = 0
     last_error = None
     while retry_count < max_retries:
@@ -1473,13 +1452,13 @@ def split_text(text, max_len=4096):
     return chunks
 
 # ======================================================================
-# ارسال کانفیگ‌ها (با رفع مشکل ارسال تکی -> گروهی)
+# ارسال کانفیگ‌ها (فقط جدیدها)
 # ======================================================================
-async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplicate=False, is_instant=False):
+async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=False):
     if not working:
         return 0
 
-    max_post = get_profile_max_post(profile_id)
+    max_post = get_profile_max_post_config(profile_id)
     if is_instant:
         max_post = min(max_post, 5)
 
@@ -1498,7 +1477,6 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
     last_n = get_profile_last_num(profile_id)
     show_numbers = get_profile_show_numbers(profile_id)
     custom_query = get_profile_custom_query(profile_id)
-    log.info(f"🔧 Using custom_query: '{custom_query}'")
     dest = get_profile_dest(profile_id)
     banner_template = get_profile_banner_config(profile_id) or "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
 
@@ -1508,7 +1486,6 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
         btn_style = sponsor["color"] if sponsor["color"] in ["primary", "success", "danger"] else "primary"
         sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"], style=btn_style)
 
-    # ===== جمع‌آوری همه کانفیگ‌ها در یک لیست =====
     config_blocks = []
     for i, (url, ping, node_count) in enumerate(items, 1):
         n = last_n + i
@@ -1536,7 +1513,6 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
         block = f"<pre>{modified_url}</pre>"
         config_blocks.append(header + "\n" + block)
 
-    # ===== ساخت متن نهایی =====
     configs_text = "\n\n".join(config_blocks)
     try:
         full_text = banner_template.format(configs=configs_text)
@@ -1548,7 +1524,6 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
         buttons.append(sponsor_button)
     reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
 
-    # ===== ارسال یک پیام =====
     ok = await send_with_retry(
         bot, dest, full_text,
         parse_mode="HTML",
@@ -1557,7 +1532,6 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
         max_retries=5
     )
     if not ok:
-        # تلاش با متن ساده
         plain_text = re.sub(r'<[^>]+>', '', full_text)
         ok2 = await send_with_retry(
             bot, dest, plain_text,
@@ -1570,11 +1544,11 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
             log.error(f"❌ Failed to send configs after all retries")
             return 0
 
-    # ===== مارک کردن به‌عنوان ارسال‌شده و به‌روزرسانی شماره =====
     sent_count = len(items)
     for i, (url, ping, node_count) in enumerate(items, 1):
         modified_url = append_channel_and_flag_encoded(url, dest if dest else "@VaslZone", "🌐", custom_query)
-        if not skip_duplicate or not is_already_posted(profile_id, modified_url):
+        # فقط در صورتی که قبلاً پست نشده باشد، علامت بزن
+        if not is_already_posted(profile_id, modified_url):
             mark_as_posted(profile_id, modified_url, source_for_seen, full_url=modified_url)
 
     if sent_count > 0:
@@ -1583,32 +1557,42 @@ async def post_configs(bot, profile_id, working, source_for_seen="", skip_duplic
     log.info(f"✅ Sent {sent_count} configs in one message to {dest}")
     return sent_count
 
+# ======================================================================
+# ارسال پروکسی‌ها (فقط جدیدها)
+# ======================================================================
 async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False):
     if not proxies_with_ping:
         return 0, None
 
-    max_proxies = get_profile_max_proxies(profile_id)
+    max_proxies = get_profile_max_post_proxy(profile_id)
     if is_instant:
         max_proxies = min(max_proxies, 3)
 
     show_date = get_profile_show_date_proxy(profile_id)
     proxy_text = ""
+    count = 0
     for proxy_url, ping, flag in proxies_with_ping[:max_proxies]:
         if "t.me/proxy" not in proxy_url.lower():
+            continue
+        # فقط پروکسی‌هایی که قبلاً پست نشده‌اند
+        if is_proxy_posted(profile_id, proxy_url):
             continue
         normalized_url = normalize_telegram_proxy(proxy_url)
         clean_url = clean_proxy_link(normalized_url)
         safe_url = html.escape(clean_url, quote=False)
         proxy_text += f"• {flag} <a href=\"{safe_url}\">Telegram Proxy</a>\n"
         mark_proxy_posted(profile_id, clean_url)
+        count += 1
 
-    proxy_count = len(proxies_with_ping[:max_proxies])
+    if count == 0:
+        return 0, None
+
     banner_proxy = get_profile_banner_proxy(profile_id)
     date_str = get_tehran_date() if show_date else ""
     try:
         text = banner_proxy.format(
             date=date_str,
-            count=proxy_count,
+            count=count,
             proxies=proxy_text,
         )
     except KeyError:
@@ -1621,67 +1605,14 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False):
         btn_style = sponsor["color"] if sponsor["color"] in ["primary", "success", "danger"] else "primary"
         sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"], style=btn_style)
     buttons = [sponsor_button] if sponsor_button else None
-    return proxy_count, (text, buttons)
-
-async def post_working_configs(bot, profile_id, working, proxies_with_ping, source_for_seen="", force=False, skip_duplicate=False, is_instant=False):
-    dest = get_profile_dest(profile_id)
-    if not dest:
-        return 0, "❌ هیچ مقصدی تنظیم نشده!"
-
-    post_configs_enabled = get_profile_post_configs(profile_id) if not force else True
-    post_proxies_enabled = get_profile_post_proxies(profile_id) if not force else True
-
-    total_configs = 0
-    total_proxies = 0
-    results = []
-
-    if post_configs_enabled and working:
-        if skip_duplicate:
-            unique_working = working
-        else:
-            unique_working = []
-            seen_urls = set()
-            for url, ping, cnt in working:
-                if not is_already_posted(profile_id, url):
-                    unique_working.append((url, ping, cnt))
-                else:
-                    log.info(f"⏭️ Skipping duplicate: {url[:50]}...")
-        if not unique_working:
-            log.info("ℹ️ No new configs to post (all duplicates).")
-        else:
-            config_count = await post_configs(bot, profile_id, unique_working, source_for_seen, skip_duplicate=skip_duplicate, is_instant=is_instant)
-            if config_count > 0:
-                total_configs = config_count
-                results.append(f"{config_count} configs")
-
-    if post_proxies_enabled and proxies_with_ping:
-        valid_proxies = [p for p in proxies_with_ping if "t.me/proxy" in p[0].lower()]
-        if valid_proxies:
-            unique_proxies = []
-            for p in valid_proxies:
-                if skip_duplicate or not is_proxy_posted(profile_id, p[0]):
-                    unique_proxies.append(p)
-            if unique_proxies:
-                proxy_count, proxy_payload = await post_proxies(bot, profile_id, unique_proxies, is_instant=is_instant)
-                if proxy_count > 0 and proxy_payload:
-                    text, buttons = proxy_payload
-                    sent = await send_to_destination(bot, profile_id, text, buttons)
-                    if sent:
-                        total_proxies = proxy_count
-                        results.append(f"{proxy_count} proxies")
-
-    if not results:
-        return 0, "no new content to send"
-
-    result_msg = "posted " + " and ".join(results)
-    return total_configs, result_msg
+    return count, (text, buttons)
 
 # ======================================================================
-# سیکل کامل (با تست همه کانال‌ها در حالت لحظه‌ای)
+# چرخه اصلی (با جدا کردن کانفیگ و پروکسی)
 # ======================================================================
-async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=False):
+async def run_cycle_for_profile(bot, profile_id, post_configs=True, post_proxies=True, is_instant=False):
     log.info("=" * 50)
-    log.info(f"🔄 run_full_cycle for profile {profile_id} STARTED (instant={is_instant})")
+    log.info(f"🔄 run_cycle for profile {profile_id} (cfg={post_configs}, prx={post_proxies}, instant={is_instant})")
 
     profile = get_profile(profile_id)
     if not profile:
@@ -1691,7 +1622,7 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
     sources = get_profile_sources(profile_id)
     sources = [normalize_channel_input(s) for s in sources if normalize_channel_input(s)]
     if not sources:
-        log.error(f"❌ Profile {profile_id} has no valid sources after cleaning!")
+        log.error(f"❌ Profile {profile_id} has no valid sources!")
         return 0, "no valid sources"
 
     dest = get_profile_dest(profile_id)
@@ -1700,36 +1631,18 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
         return 0, "no destination"
 
     ping_mode = get_profile_ping_mode(profile_id)
+    log.info(f"📡 Sources: {len(sources)} | 🎯 {dest} | 🌍 Ping: {ping_mode}")
 
-    log.info(f"📡 Sources ({len(sources)}): {sources}")
-    log.info(f"🎯 Destination: {dest}")
-    log.info(f"🆕 only_new: {only_new}")
-    log.info(f"🌍 Ping mode: {ping_mode}")
-
+    # ==== اسکرپ همه منابع ====
     all_configs = []
     all_proxies = []
-    seen_configs = set()
-    seen_proxies = set()
     seen_urls = set()
 
-    # ========== تنظیمات بر اساس حالت ==========
-    max_post = get_profile_max_post(profile_id)
-    if is_instant:
-        test_limit = max(max_post, 10)
-        test_limit = min(test_limit, 30)
-        max_concurrent = 30
-    else:
-        test_limit = max(max_post, 20)
-        test_limit = min(test_limit, 200)  # افزایش حد برای تست همه
-        max_concurrent = 20
-    # ========== همه منابع را اسکرپ کن ==========
-    sources_to_scrape = sources  # دیگر محدودیت نداریم
-
     async def scrape_one(src):
-        config_links, proxy_links = await scrape_channel_with_retry(profile_id, src, only_new=True)
+        config_links, proxy_links = await scrape_channel_with_retry(profile_id, src)
         return src, config_links, proxy_links
 
-    scrape_tasks = [scrape_one(src) for src in sources_to_scrape]
+    scrape_tasks = [scrape_one(src) for src in sources]
     results = await asyncio.gather(*scrape_tasks, return_exceptions=True)
 
     for res in results:
@@ -1738,186 +1651,142 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
             continue
         src, config_links, proxy_links = res
         log.info(f"  {src}: {len(config_links)} configs, {len(proxy_links)} proxies from web")
-
         for link in config_links:
-            if link in seen_urls:
-                continue
-            seen_urls.add(link)
-            if link not in seen_configs:
-                seen_configs.add(link)
+            if link not in seen_urls:
+                seen_urls.add(link)
                 all_configs.append((link, src))
-
         for link in proxy_links:
-            if link in seen_urls:
-                continue
-            seen_urls.add(link)
-            norm = normalize_proxy_url(link)
-            if not norm:
-                continue
-            if norm not in seen_proxies and not is_proxy_posted(profile_id, norm):
-                seen_proxies.add(norm)
-                all_proxies.append(norm)
+            if link not in seen_urls:
+                seen_urls.add(link)
+                norm = normalize_proxy_url(link)
+                if norm:
+                    all_proxies.append(norm)
 
-    if not is_instant:
-        file_tasks = [fetch_files_from_channel(bot, profile_id, src, src) for src in sources_to_scrape]
-        file_results = await asyncio.gather(*file_tasks, return_exceptions=True)
-        for i, res in enumerate(file_results):
-            if isinstance(res, Exception):
-                log.warning(f"File fetch error for {sources_to_scrape[i]}: {res}")
-                continue
-            links = res
-            src = sources_to_scrape[i]
-            log.info(f"  {src}: {len(links)} links from files")
-            for link in links:
-                if link in seen_urls:
-                    continue
+    # ==== فایل‌ها ====
+    file_tasks = [fetch_files_from_channel(bot, profile_id, src, src) for src in sources]
+    file_results = await asyncio.gather(*file_tasks, return_exceptions=True)
+    for i, res in enumerate(file_results):
+        if isinstance(res, Exception):
+            log.warning(f"File fetch error for {sources[i]}: {res}")
+            continue
+        links = res
+        src = sources[i]
+        log.info(f"  {src}: {len(links)} links from files")
+        for link in links:
+            if link not in seen_urls:
                 seen_urls.add(link)
                 if "t.me/proxy" in link.lower():
                     norm = normalize_proxy_url(link)
-                    if norm and norm not in seen_proxies and not is_proxy_posted(profile_id, norm):
-                        seen_proxies.add(norm)
+                    if norm:
                         all_proxies.append(norm)
                 else:
-                    if link not in seen_configs:
-                        seen_configs.add(link)
-                        all_configs.append((link, src))
+                    all_configs.append((link, src))
 
-    new_configs = [u for u, src in all_configs if not is_already_posted(profile_id, u)]
-    log.info(f"📊 New configs: {len(new_configs)}, New proxies: {len(all_proxies)}")
+    # ==== فیلتر تکراری با دیتابیس ====
+    new_configs = [(u, s) for u, s in all_configs if not is_already_posted(profile_id, u)]
+    new_proxies = [p for p in all_proxies if not is_proxy_posted(profile_id, p)]
 
+    log.info(f"📊 New configs: {len(new_configs)}, New proxies: {len(new_proxies)}")
+
+    # ==== تست پینگ برای کانفیگ‌ها ====
     working = []
-    if is_instant:
-        if new_configs:
-            to_test = new_configs[:test_limit]
-            log.info(f"⚡ Testing {len(to_test)} configs instantly...")
-            sem = asyncio.Semaphore(max_concurrent)
-            async def _check(u):
-                async with sem:
-                    try:
-                        ping, ok, cnt = await check_full_link_ping(u, ping_mode)
-                        if ok:
-                            log.info(f"✅ Config OK: {u[:50]}... ping={ping}ms")
-                            return u, True, ping, cnt
-                        else:
-                            log.info(f"❌ Config FAIL: {u[:50]}...")
-                            return u, False, 0, 0
-                    except Exception as e:
-                        log.debug(f"ping failed for {u[:30]}: {e}")
-                        return u, False, 0, 0
-
-            rs = await asyncio.gather(*[_check(u) for u in to_test], return_exceptions=True)
-            for r in rs:
-                if isinstance(r, Exception):
-                    continue
-                if r[1]:
-                    working.append((r[0], r[2], r[3]))
-            log.info(f"📊 Working configs from instant test: {len(working)}")
+    if post_configs and new_configs:
+        test_limit = get_profile_max_post_config(profile_id) * 3
+        if is_instant:
+            test_limit = min(test_limit, 20)
         else:
-            log.info("ℹ️ No new configs to test")
+            test_limit = min(test_limit, 50)
+        to_test = new_configs[:test_limit]
+        log.info(f"📊 Testing {len(to_test)} configs...")
+        sem = asyncio.Semaphore(20)
+        async def _check(item):
+            u, src = item
+            async with sem:
+                try:
+                    ping, ok, cnt = await check_full_link_ping(u, ping_mode)
+                    if ok:
+                        log.info(f"✅ Config OK: {u[:50]}... ping={ping}ms")
+                        return u, True, ping, cnt, src
+                    else:
+                        log.info(f"❌ Config FAIL: {u[:50]}...")
+                        return u, False, 0, 0, src
+                except Exception as e:
+                    log.debug(f"ping failed for {u[:30]}: {e}")
+                    return u, False, 0, 0, src
+        rs = await asyncio.gather(*[_check(item) for item in to_test], return_exceptions=True)
+        for r in rs:
+            if isinstance(r, Exception):
+                continue
+            if r[1]:
+                working.append((r[0], r[2], r[3]))
+        log.info(f"📊 Working configs: {len(working)}")
     else:
-        if new_configs:
-            to_test = new_configs[:test_limit]
-            log.info(f"📊 Testing {len(to_test)} configs...")
-            sem = asyncio.Semaphore(max_concurrent)
-            async def _check(u):
-                async with sem:
-                    try:
-                        ping, ok, cnt = await check_full_link_ping(u, ping_mode)
-                        if ok:
-                            log.info(f"✅ Config OK: {u[:50]}... ping={ping}ms")
-                            return u, True, ping, cnt
-                        else:
-                            log.info(f"❌ Config FAIL: {u[:50]}...")
-                            return u, False, 0, 0
-                    except Exception as e:
-                        log.debug(f"ping failed for {u[:30]}: {e}")
-                        return u, False, 0, 0
+        log.info("ℹ️ No configs to test")
 
-            rs = await asyncio.gather(*[_check(u) for u in to_test], return_exceptions=True)
-            for r in rs:
-                if isinstance(r, Exception):
-                    continue
-                if r[1]:
-                    working.append((r[0], r[2], r[3]))
-            log.info(f"📊 Working configs: {len(working)}")
-        else:
-            log.info("ℹ️ No new configs to test")
-
-    # ===== پروکسی‌ها =====
+    # ==== پروکسی‌ها (بدون تست پینگ، فقط فلگ) ====
     proxy_with_ping = []
-    if all_proxies:
-        valid_proxies = [p for p in all_proxies if "t.me/proxy" in p.lower()]
+    if post_proxies and new_proxies:
+        valid_proxies = [p for p in new_proxies if "t.me/proxy" in p.lower()]
         if valid_proxies:
             log.info(f"📊 Processing {len(valid_proxies)} proxies...")
-            if is_instant:
-                sem = asyncio.Semaphore(max_concurrent)
-                async def check_proxy_instant(proxy_url):
-                    async with sem:
-                        ping, ok, cnt = await check_full_link_ping(proxy_url, ping_mode)
-                        host, _ = extract_host(proxy_url)
-                        ip = await host_to_ip(host) if host else None
-                        flag = "🌐"
-                        if ip:
-                            flag = await get_flag_for_ip(ip)
-                        return proxy_url, ping if ok else 0, flag
-                results = await asyncio.gather(
-                    *[check_proxy_instant(p) for p in valid_proxies[:10]], return_exceptions=True)
-                for r in results:
-                    if isinstance(r, Exception):
-                        continue
-                    proxy_with_ping.append(r)
-                log.info(f"⚡ Instant proxies with ping: {len(proxy_with_ping)}")
-            else:
-                sem = asyncio.Semaphore(max_concurrent)
-                async def check_proxy(proxy_url):
-                    async with sem:
-                        ping, ok, cnt = await check_full_link_ping(proxy_url, ping_mode)
-                        host, _ = extract_host(proxy_url)
-                        ip = await host_to_ip(host) if host else None
-                        flag = "🌐"
-                        if ip:
-                            flag = await get_flag_for_ip(ip)
-                        return proxy_url, ping if ok else 0, flag
-
-                results = await asyncio.gather(
-                    *[check_proxy(p) for p in valid_proxies[:20]], return_exceptions=True)
-                for r in results:
-                    if isinstance(r, Exception):
-                        continue
-                    proxy_with_ping.append(r)
-                log.info(f"📊 Proxies with ping: {len(proxy_with_ping)}")
+            sem = asyncio.Semaphore(20)
+            async def check_proxy(proxy_url):
+                async with sem:
+                    # تست پینگ (اختیاری) با حالت پینگ
+                    ping, ok, cnt = await check_full_link_ping(proxy_url, ping_mode)
+                    host, _ = extract_host(proxy_url)
+                    ip = await host_to_ip(host) if host else None
+                    flag = "🌐"
+                    if ip:
+                        flag = await get_flag_for_ip(ip)
+                    return proxy_url, ping if ok else 0, flag
+            results = await asyncio.gather(
+                *[check_proxy(p) for p in valid_proxies[:50]], return_exceptions=True)
+            for r in results:
+                if isinstance(r, Exception):
+                    continue
+                proxy_with_ping.append(r)
+            log.info(f"📊 Proxies with ping: {len(proxy_with_ping)}")
         else:
             log.info("ℹ️ No valid Telegram proxies found.")
-    else:
-        log.info("ℹ️ No proxies found in sources.")
 
-    if not working and not proxy_with_ping:
-        log.warning(f"⚠️ No working configs or proxies found for profile {profile_id}!")
-        return 0, "no working configs or proxies"
+    # ==== ارسال ====
+    total_configs = 0
+    total_proxies = 0
+    if working and post_configs:
+        total_configs = await post_configs(bot, profile_id, working, source_for_seen="auto", is_instant=is_instant)
 
-    log.info(f"📤 Posting {len(working)} configs and {len(proxy_with_ping)} proxies for profile {profile_id}...")
-    result = await post_working_configs(bot, profile_id, working, proxy_with_ping, source_for_seen="auto", force=False, skip_duplicate=True, is_instant=is_instant)
-    log.info(f"✅ Cycle result for profile {profile_id}: {result}")
+    if proxy_with_ping and post_proxies:
+        cnt, payload = await post_proxies(bot, profile_id, proxy_with_ping, is_instant=is_instant)
+        if cnt > 0 and payload:
+            text, buttons = payload
+            sent = await send_to_destination(bot, profile_id, text, buttons)
+            if sent:
+                total_proxies = cnt
+
+    result_msg = f"posted {total_configs} configs and {total_proxies} proxies"
+    if total_configs == 0 and total_proxies == 0:
+        result_msg = "no new content to send"
+
+    log.info(f"✅ Cycle result for profile {profile_id}: {result_msg}")
     log.info("=" * 50)
-    return result
+    return total_configs + total_proxies, result_msg
 
 # ======================================================================
-# حلقه خودکار
+# حلقه‌های خودکار جداگانه برای کانفیگ و پروکسی
 # ======================================================================
-async def profile_loop(bot, profile_id):
-    log.info(f"🔄 Starting auto loop for profile {profile_id}")
+async def profile_loop_config(bot, profile_id):
+    log.info(f"🔄 Starting config loop for profile {profile_id}")
     while True:
         try:
             profile = get_profile(profile_id)
             if not profile:
-                log.error(f"❌ Profile {profile_id} not found, stopping loop.")
+                log.error(f"❌ Profile {profile_id} not found, stopping config loop.")
                 break
 
-            interval = profile.get("interval_min", 5)
+            interval = get_profile_interval_config(profile_id)
             dest_name = profile.get("dest_name", "unknown")
             timer_expiry = profile.get("timer_expiry")
-            timer_duration = profile.get("timer_duration", 0)
-
             if timer_expiry:
                 try:
                     expiry = datetime.fromisoformat(timer_expiry)
@@ -1934,42 +1803,178 @@ async def profile_loop(bot, profile_id):
                             f"⏰ تایمر پروفایل {dest_name} (ID: {profile_id}) به پایان رسید. ارسال خودکار از سر گرفته شد."
                         )
                         log.info(f"✅ Timer expired for profile {profile_id}, running cycle immediately")
-                        n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=(interval==0))
-                        log.info(f"[auto profile {profile_id}] result: {n} - {m}")
+                        n, m = await run_cycle_for_profile(bot, profile_id, post_configs=True, post_proxies=False, is_instant=(interval==0))
+                        log.info(f"[config loop] result: {n} - {m}")
                         continue
                 except Exception as e:
-                    log.error(f"Error parsing timer for profile {profile_id}: {e}")
+                    log.error(f"Error parsing timer: {e}")
                     clear_profile_timer(profile_id)
 
             if interval == 0:
-                log.info(f"⚡ INSTANT UPDATE for profile {profile_id} ({dest_name})")
-                n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=True)
-                log.info(f"[instant profile {profile_id}] result: {n} - {m}")
+                log.info(f"⚡ INSTANT CONFIG UPDATE for profile {profile_id} ({dest_name})")
+                n, m = await run_cycle_for_profile(bot, profile_id, post_configs=True, post_proxies=False, is_instant=True)
+                log.info(f"[instant config] result: {n} - {m}")
                 await asyncio.sleep(5)
             else:
                 now = datetime.now(TEHRAN_TZ)
                 next_run = now + timedelta(minutes=interval)
                 sleep_seconds = (next_run - now).total_seconds()
                 if sleep_seconds > 0:
-                    log.info(f"⏳ Profile {profile_id} ({dest_name}) sleeping for {sleep_seconds:.0f} seconds until {next_run.strftime('%H:%M:%S')}")
+                    log.info(f"⏳ Config loop sleeping for {sleep_seconds:.0f}s until {next_run.strftime('%H:%M:%S')}")
                     await asyncio.sleep(sleep_seconds)
                 else:
                     await asyncio.sleep(1)
 
-                log.info(f"⏰ AUTO TICK for profile {profile_id} ({dest_name})")
-                n, m = await run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=False)
-                log.info(f"[auto profile {profile_id}] result: {n} - {m}")
+                log.info(f"⏰ CONFIG AUTO TICK for profile {profile_id}")
+                n, m = await run_cycle_for_profile(bot, profile_id, post_configs=True, post_proxies=False, is_instant=False)
+                log.info(f"[config auto] result: {n} - {m}")
 
         except asyncio.CancelledError:
-            log.info(f"🛑 Auto loop for profile {profile_id} cancelled.")
+            log.info(f"🛑 Config loop for profile {profile_id} cancelled.")
             break
         except Exception as e:
-            log.error(f"❌ profile_loop error for {profile_id}: {e}")
+            log.error(f"❌ profile_loop_config error: {e}")
+            log.error(traceback.format_exc())
+            await asyncio.sleep(60)
+
+async def profile_loop_proxy(bot, profile_id):
+    log.info(f"🔄 Starting proxy loop for profile {profile_id}")
+    while True:
+        try:
+            profile = get_profile(profile_id)
+            if not profile:
+                log.error(f"❌ Profile {profile_id} not found, stopping proxy loop.")
+                break
+
+            interval = get_profile_interval_proxy(profile_id)
+            dest_name = profile.get("dest_name", "unknown")
+            timer_expiry = profile.get("timer_expiry")
+            if timer_expiry:
+                try:
+                    expiry = datetime.fromisoformat(timer_expiry)
+                    now = datetime.now(TEHRAN_TZ)
+                    if expiry > now:
+                        remaining_seconds = (expiry - now).total_seconds()
+                        log.info(f"⏳ Timer active for profile {profile_id}: {remaining_seconds/60:.1f} minutes remaining")
+                        await asyncio.sleep(min(remaining_seconds, 60))
+                        continue
+                    else:
+                        clear_profile_timer(profile_id)
+                        await bot.send_message(
+                            ADMIN_ID,
+                            f"⏰ تایمر پروفایل {dest_name} (ID: {profile_id}) به پایان رسید. ارسال خودکار از سر گرفته شد."
+                        )
+                        log.info(f"✅ Timer expired for profile {profile_id}, running proxy cycle immediately")
+                        n, m = await run_cycle_for_profile(bot, profile_id, post_configs=False, post_proxies=True, is_instant=(interval==0))
+                        log.info(f"[proxy loop] result: {n} - {m}")
+                        continue
+                except Exception as e:
+                    log.error(f"Error parsing timer: {e}")
+                    clear_profile_timer(profile_id)
+
+            if interval == 0:
+                log.info(f"⚡ INSTANT PROXY UPDATE for profile {profile_id} ({dest_name})")
+                n, m = await run_cycle_for_profile(bot, profile_id, post_configs=False, post_proxies=True, is_instant=True)
+                log.info(f"[instant proxy] result: {n} - {m}")
+                await asyncio.sleep(5)
+            else:
+                now = datetime.now(TEHRAN_TZ)
+                next_run = now + timedelta(minutes=interval)
+                sleep_seconds = (next_run - now).total_seconds()
+                if sleep_seconds > 0:
+                    log.info(f"⏳ Proxy loop sleeping for {sleep_seconds:.0f}s until {next_run.strftime('%H:%M:%S')}")
+                    await asyncio.sleep(sleep_seconds)
+                else:
+                    await asyncio.sleep(1)
+
+                log.info(f"⏰ PROXY AUTO TICK for profile {profile_id}")
+                n, m = await run_cycle_for_profile(bot, profile_id, post_configs=False, post_proxies=True, is_instant=False)
+                log.info(f"[proxy auto] result: {n} - {m}")
+
+        except asyncio.CancelledError:
+            log.info(f"🛑 Proxy loop for profile {profile_id} cancelled.")
+            break
+        except Exception as e:
+            log.error(f"❌ profile_loop_proxy error: {e}")
             log.error(traceback.format_exc())
             await asyncio.sleep(60)
 
 # ======================================================================
-# توابع دریافت لاگ با بازه‌های زمانی
+# بک‌آپ خودکار
+# ======================================================================
+backup_locks = {}
+
+async def check_and_auto_backup(profile_id):
+    try:
+        profile = get_profile(profile_id)
+        if not profile:
+            return
+        profile_name = profile["dest_name"].replace("@", "").strip() or f"profile_{profile_id}"
+        backup_interval = get_profile_backup_interval(profile_id) or 1000
+
+        lock = backup_locks.get(profile_id)
+        if not lock:
+            lock = asyncio.Lock()
+            backup_locks[profile_id] = lock
+
+        async with lock:
+            total = c.execute(
+                "SELECT COUNT(*) FROM seen WHERE profile_id=? AND full_url != '' AND backup_num > 0",
+                (profile_id,)).fetchone()[0]
+            last_backup = get_profile_last_backup_count(profile_id)
+
+            last_backup_block = last_backup // backup_interval if backup_interval > 0 else 0
+            current_block = total // backup_interval if backup_interval > 0 else 0
+
+            if current_block <= last_backup_block:
+                return
+
+            for block in range(last_backup_block + 1, current_block + 1):
+                start_num = (block - 1) * backup_interval + 1
+                end_num = block * backup_interval
+
+                rows = c.execute(
+                    "SELECT full_url FROM seen WHERE profile_id=? AND full_url != '' AND backup_num BETWEEN ? AND ? ORDER BY backup_num",
+                    (profile_id, start_num, end_num)
+                ).fetchall()
+                links = [r[0] for r in rows if r[0]]
+                if not links:
+                    continue
+
+                filename = f"configs_backup_{get_tehran_date()}_{profile_name}_{start_num}_{end_num}.txt"
+                content = f"# Backup for {profile_name} (ID: {profile_id})\n# Range: {start_num} - {end_num}\n# Total: {len(links)}\n\n" + "\n".join(links)
+                filepath = os.path.join(DATA_DIR, filename)
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(content)
+
+                bot = BOT_REF
+                if bot:
+                    with open(filepath, "rb") as f:
+                        await bot.send_document(
+                            ADMIN_ID,
+                            document=f,
+                            filename=filename,
+                            caption=f"📤 بک‌آپ خودکار پروفایل {profile_name} (ID:{profile_id}) - {start_num} تا {end_num} (تعداد: {len(links)})"
+                        )
+                    asyncio.create_task(delete_file_after_delay(filepath, 1800))
+                else:
+                    log.warning("BOT_REF is None, cannot send backup.")
+
+            set_profile_last_backup_count(profile_id, total)
+    except Exception as e:
+        log.error(f"Auto backup check error for profile {profile_id}: {e}")
+
+async def delete_file_after_delay(filepath, delay_seconds):
+    await asyncio.sleep(delay_seconds)
+    try:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+            log.info(f"🗑️ Deleted file: {filepath}")
+    except Exception as e:
+        log.error(f"Error deleting file {filepath}: {e}")
+
+# ======================================================================
+# توابع دریافت لاگ و گزارش روزانه
 # ======================================================================
 async def get_logs(update, context, profile_id, log_type="full", time_range_minutes=30):
     log_file_path = os.path.join(DATA_DIR, "bot.log")
@@ -2030,9 +2035,6 @@ async def get_logs(update, context, profile_id, log_type="full", time_range_minu
         )
     os.remove(filepath)
 
-# ======================================================================
-# گزارش روزانه
-# ======================================================================
 async def send_daily_report(app):
     try:
         profiles = get_profiles()
@@ -2054,11 +2056,12 @@ async def send_daily_report(app):
         for p in profiles:
             src_count = len(get_profile_sources(p['id']))
             last_num = p['last_num']
-            interval = p['interval_min']
+            interval_cfg = p.get('interval_config', 5)
+            interval_prx = p.get('interval_proxy', 5)
             timer = ""
             if p.get('timer_expiry'):
                 timer = " (⏳ تایمر فعال)"
-            lines.append(f"• {p['dest_name']} (ID:{p['id']}) – {src_count} منبع, بازه {interval}m, #{last_num+1}{timer}")
+            lines.append(f"• {p['dest_name']} (ID:{p['id']}) – {src_count} منبع, بازه کانفیگ:{interval_cfg}m, بازه پروکسی:{interval_prx}m, #{last_num+1}{timer}")
 
         msg = "\n".join(lines)
         await app.bot.send_message(ADMIN_ID, msg, parse_mode="HTML")
@@ -2067,56 +2070,166 @@ async def send_daily_report(app):
         log.error(f"❌ Failed to send daily report: {e}")
 
 # ======================================================================
-# بک‌آپ کانفیگ/پروکسی (دستی)
+# توابع Railway Credit
 # ======================================================================
-async def export_backup(update, context, profile_id, backup_type, count=None):
+async def get_railway_credit():
+    if not RAILWAY_TOKEN:
+        return None
     try:
-        profile = get_profile(profile_id)
-        profile_name = profile["dest_name"].replace("@", "").strip() if profile else f"profile_{profile_id}"
-
-        if backup_type == "configs":
-            if count is None or count == -1:
-                rows = c.execute("SELECT full_url FROM seen WHERE profile_id=? AND full_url != '' ORDER BY last_posted DESC", (profile_id,)).fetchall()
+        project_id = RAILWAY_PROJECT_ID
+        query = """
+        query {
+            me {
+                projects {
+                    edges {
+                        node {
+                            id
+                            name
+                            credit
+                        }
+                    }
+                }
+            }
+        }
+        """
+        if project_id:
+            query = f"""
+            query {{
+                project(id: "{project_id}") {{
+                    id
+                    name
+                    credit
+                }}
+            }}
+            """
+        async with httpx.AsyncClient(timeout=10) as client:
+            headers = {
+                "Authorization": f"Bearer {RAILWAY_TOKEN}",
+                "Content-Type": "application/json"
+            }
+            resp = await client.post(
+                "https://api.railway.app/graphql",
+                json={"query": query},
+                headers=headers
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if "errors" in data:
+                    log.warning(f"Railway API errors: {data['errors']}")
+                    return None
+                if project_id:
+                    credit = data.get("data", {}).get("project", {}).get("credit")
+                    if credit is not None:
+                        return float(credit)
+                else:
+                    projects = data.get("data", {}).get("me", {}).get("projects", {}).get("edges", [])
+                    if projects:
+                        node = projects[0].get("node", {})
+                        credit = node.get("credit")
+                        if credit is not None:
+                            return float(credit)
             else:
-                rows = c.execute("SELECT full_url FROM seen WHERE profile_id=? AND full_url != '' ORDER BY last_posted DESC LIMIT ?", (profile_id, count)).fetchall()
-            links = [row[0] for row in rows if row[0]]
-            if not links:
-                await update.message.reply_text("❌ هیچ کانفیگی برای بک‌آپ یافت نشد.")
-                return
-            filename = f"configs_backup_{profile_name}_{get_tehran_date()}.txt"
-            content = f"# Backup for {profile_name} (ID: {profile_id})\n# Total: {len(links)}\n\n" + "\n".join(links)
-            with open(os.path.join(DATA_DIR, filename), "w", encoding="utf-8") as f:
-                f.write(content)
-            with open(os.path.join(DATA_DIR, filename), "rb") as f:
-                await update.message.reply_document(document=f, filename=filename, caption=f"📤 {len(links)} کانفیگ - {profile_name}")
-            os.remove(os.path.join(DATA_DIR, filename))
-            return
-
-        elif backup_type == "proxies":
-            if count is None or count == -1:
-                rows = c.execute("SELECT proxy_url FROM proxies_seen WHERE profile_id=? ORDER BY last_posted DESC", (profile_id,)).fetchall()
-            else:
-                rows = c.execute("SELECT proxy_url FROM proxies_seen WHERE profile_id=? ORDER BY last_posted DESC LIMIT ?", (profile_id, count)).fetchall()
-            links = [row[0] for row in rows if row[0]]
-            if not links:
-                await update.message.reply_text("❌ هیچ پروکسی برای بک‌آپ یافت نشد.")
-                return
-            filename = f"proxies_backup_{profile_name}_{get_tehran_date()}.txt"
-            content = f"# Backup for {profile_name} (ID: {profile_id})\n# Total: {len(links)}\n\n" + "\n".join(links)
-            with open(os.path.join(DATA_DIR, filename), "w", encoding="utf-8") as f:
-                f.write(content)
-            with open(os.path.join(DATA_DIR, filename), "rb") as f:
-                await update.message.reply_document(document=f, filename=filename, caption=f"📤 {len(links)} پروکسی - {profile_name}")
-            os.remove(os.path.join(DATA_DIR, filename))
-            return
-        else:
-            await update.message.reply_text("❌ نوع نامعتبر.")
+                log.warning(f"Railway API returned {resp.status_code}")
+                return None
     except Exception as e:
-        log.error(f"Backup export error: {e}")
-        await update.message.reply_text(f"❌ خطا در بک‌آپ: {str(e)[:100]}")
+        log.warning(f"Failed to fetch railway credit: {e}")
+        return None
+    return None
+
+async def check_credit_and_backup():
+    balance = await get_railway_credit()
+    if balance is None:
+        return
+    if balance < CREDIT_THRESHOLD:
+        log.info(f"Credit low: {balance} < {CREDIT_THRESHOLD}, sending full backup")
+        bot = BOT_REF
+        if bot:
+            try:
+                with open(DB_PATH, "rb") as f:
+                    await bot.send_document(
+                        ADMIN_ID,
+                        document=f,
+                        filename=f"full_db_backup_{get_tehran_date()}.db",
+                        caption=f"💾 بک‌آپ کامل دیتابیس (اعتبار: {balance} دلار)"
+                    )
+                log.info("✅ Full database backup sent due to low credit.")
+            except Exception as e:
+                log.error(f"Failed to send full backup: {e}")
+
+async def periodic_credit_check():
+    while True:
+        await check_credit_and_backup()
+        await asyncio.sleep(3600)
 
 # ======================================================================
-# کیبوردها و پیام‌ها
+# پاکسازی دوره‌ای فایل‌ها
+# ======================================================================
+async def periodic_cleanup():
+    while True:
+        try:
+            log_file_path = os.path.join(DATA_DIR, "bot.log")
+            if os.path.exists(log_file_path):
+                now_utc = datetime.utcnow()
+                cutoff_utc = now_utc - timedelta(minutes=30)
+                lines_to_keep = []
+                with open(log_file_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        match = re.match(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', line)
+                        if match:
+                            ts_str = match.group(1)
+                            try:
+                                ts = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')
+                                if ts >= cutoff_utc:
+                                    lines_to_keep.append(line)
+                            except:
+                                lines_to_keep.append(line)
+                        else:
+                            lines_to_keep.append(line)
+                if len(lines_to_keep) > 0:
+                    with open(log_file_path, 'w', encoding='utf-8') as f:
+                        f.writelines(lines_to_keep)
+                else:
+                    with open(log_file_path, 'w', encoding='utf-8') as f:
+                        pass
+
+            now_ts = time.time()
+            for fname in os.listdir(DATA_DIR):
+                if fname == "bot.db":
+                    continue
+                filepath = os.path.join(DATA_DIR, fname)
+                if os.path.isfile(filepath):
+                    if fname == "bot.log":
+                        continue
+                    if (fname.startswith("configs_backup_") or 
+                        fname.startswith("proxies_backup_") or 
+                        fname.startswith("logs_") or 
+                        fname.startswith("bot_backup_")):
+                        try:
+                            mtime = os.path.getmtime(filepath)
+                            if now_ts - mtime > 3600:
+                                os.remove(filepath)
+                                log.info(f"🗑️ Cleanup: deleted old file {fname}")
+                        except Exception as e:
+                            log.warning(f"Could not delete {fname}: {e}")
+
+            if os.path.exists(BACKUP_DIR):
+                for fname in os.listdir(BACKUP_DIR):
+                    filepath = os.path.join(BACKUP_DIR, fname)
+                    if os.path.isfile(filepath):
+                        try:
+                            mtime = os.path.getmtime(filepath)
+                            if now_ts - mtime > 3600:
+                                os.remove(filepath)
+                                log.info(f"🗑️ Cleanup: deleted old backup file {fname}")
+                        except Exception as e:
+                            log.warning(f"Could not delete {fname}: {e}")
+
+        except Exception as e:
+            log.error(f"Error in periodic_cleanup: {e}")
+        await asyncio.sleep(300)
+
+# ======================================================================
+# کیبوردها و پیام‌ها (با دکمه‌های جدید)
 # ======================================================================
 BOT_REF = None
 BOT_LANG = "fa"
@@ -2126,13 +2239,12 @@ T = {
         "welcome": "🤖 **بات جمع‌آوری کانفیگ و پروکسی**\n\n"
                   "📡 تعداد پروفایل‌ها: {profiles}\n"
                   "🔢 بعدی: #{next_n}\n"
-                  "⏰ بازه‌ها متغیر\n"
                   "💰 اعتبار: {credit}",
-        "private": "🔒 خصوصیه.",
         "admin_panel": "🔐 **پنل مدیریت پروفایل**\n\n"
                        "📡 منابع: {srcs} | 🎯 مقصد: {dest}\n"
                        "🎨 نام: {name} | 🔢 #{num}\n"
-                       "⏰ {interval}m | 🎯 max:{max_post}\n"
+                       "⏰ بازه کانفیگ: {cfg_interval}m | بازه پروکسی: {prx_interval}m\n"
+                       "📊 حداکثر کانفیگ: {max_cfg} | حداکثر پروکسی: {max_prx}\n"
                        "📢 اسپانسر: {sponsor}\n"
                        "🌍 حالت پینگ: {ping_mode}\n"
                        "📡 کانفیگ: {cfg_status} | 🌐 پروکسی: {prx_status}\n"
@@ -2155,12 +2267,10 @@ T = {
         "btn_set_banner_proxy": "📝 بنر پروکسی",
         "btn_set_time": "⏰ زمان‌بندی",
         "btn_set_max": "🎯 حداکثر پست",
-        "btn_private": "🔒 خصوصی",
         "btn_stats": "📊 آمار",
         "btn_test": "🧪 تست",
         "btn_clear": "🗑 پاک DB",
         "btn_reset": "🔢 ریست شماره",
-        "btn_lang": "🌐 English",
         "btn_ping_mode": "🌍 ایران‌فقط",
         "btn_runnow": "▶️ اجرا کن",
         "btn_instant": "⚡ اپدیت لحظه‌ای",
@@ -2188,7 +2298,6 @@ T = {
         "src_title": "📡 منابع ({n}):",
         "src_none": "خالی",
         "reset_ok": "✅ ریست شد (#۱)",
-        "lang_ok": "✅ فارسی شد",
         "sp_prompt": "📢 اسپانسر:\nفرمت: نام|url|متن دکمه|رنگ\nرنگ‌ها: primary (آبی), success (سبز), danger (قرمز)",
         "sp_added": "✅ '{name}' اضافه شد",
         "sp_removed": "✅ حذف شد",
@@ -2327,110 +2436,6 @@ def msg(key, **kwargs):
     return text
 
 # ======================================================================
-# توابع مربوط به اعتبار (Railway Credit)
-# ======================================================================
-CREDIT_CACHE = {"balance": None, "last_update": 0}
-CREDIT_LOCK = asyncio.Lock()
-
-async def get_railway_credit():
-    """
-    دریافت مانده اعتبار از Railway GraphQL API با استفاده از توکن.
-    نیاز به متغیر محیطی RAILWAY_TOKEN (و اختیاری RAILWAY_PROJECT_ID)
-    """
-    if not RAILWAY_TOKEN:
-        return None
-    try:
-        # اگر پروژه‌آیدی داده نشده، لیست پروژه‌ها را بگیر و اولین را انتخاب کن
-        project_id = RAILWAY_PROJECT_ID
-        query = """
-        query {
-            me {
-                projects {
-                    edges {
-                        node {
-                            id
-                            name
-                            credit
-                        }
-                    }
-                }
-            }
-        }
-        """
-        # اگر project_id مشخص است، مستقیماً آن را کوئری کن
-        if project_id:
-            query = f"""
-            query {{
-                project(id: "{project_id}") {{
-                    id
-                    name
-                    credit
-                }}
-            }}
-            """
-        async with httpx.AsyncClient(timeout=10) as client:
-            headers = {
-                "Authorization": f"Bearer {RAILWAY_TOKEN}",
-                "Content-Type": "application/json"
-            }
-            resp = await client.post(
-                "https://api.railway.app/graphql",
-                json={"query": query},
-                headers=headers
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                if "errors" in data:
-                    log.warning(f"Railway API errors: {data['errors']}")
-                    return None
-                if project_id:
-                    credit = data.get("data", {}).get("project", {}).get("credit")
-                    if credit is not None:
-                        return float(credit)
-                else:
-                    projects = data.get("data", {}).get("me", {}).get("projects", {}).get("edges", [])
-                    if projects:
-                        # اولین پروژه را بگیر
-                        node = projects[0].get("node", {})
-                        credit = node.get("credit")
-                        if credit is not None:
-                            return float(credit)
-            else:
-                log.warning(f"Railway API returned {resp.status_code}")
-                return None
-    except Exception as e:
-        log.warning(f"Failed to fetch railway credit: {e}")
-        return None
-    return None
-
-async def check_credit_and_backup():
-    """بررسی دوره‌ای اعتبار و در صورت کمتر از آستانه، بک‌آپ کامل دیتابیس"""
-    balance = await get_railway_credit()
-    if balance is None:
-        return
-    if balance < CREDIT_THRESHOLD:
-        log.info(f"Credit low: {balance} < {CREDIT_THRESHOLD}, sending full backup")
-        bot = BOT_REF
-        if bot:
-            try:
-                with open(DB_PATH, "rb") as f:
-                    await bot.send_document(
-                        ADMIN_ID,
-                        document=f,
-                        filename=f"full_db_backup_{get_tehran_date()}.db",
-                        caption=f"💾 بک‌آپ کامل دیتابیس (اعتبار: {balance} دلار)"
-                    )
-                log.info("✅ Full database backup sent due to low credit.")
-            except Exception as e:
-                log.error(f"Failed to send full backup: {e}")
-
-async def periodic_credit_check():
-    """هر ساعت یکبار اعتبار را چک کن"""
-    while True:
-        await check_credit_and_backup()
-        await asyncio.sleep(3600)
-
-# ======================================================================
 # کیبوردها
 # ======================================================================
 def profiles_kb():
@@ -2485,8 +2490,10 @@ def profile_admin_kb(profile_id):
          InlineKeyboardButton(msg("btn_set_name"), callback_data=f"ac_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_set_banner_config"), callback_data=f"ab_config_{profile_id}", style="primary"),
          InlineKeyboardButton(msg("btn_set_banner_proxy"), callback_data=f"ab_proxy_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_set_time"), callback_data=f"ai_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_set_max"), callback_data=f"setmax_{profile_id}", style="primary")],
+        [InlineKeyboardButton("⏰ بازه کانفیگ", callback_data=f"set_cfg_interval_{profile_id}", style="primary"),
+         InlineKeyboardButton("⏰ بازه پروکسی", callback_data=f"set_prx_interval_{profile_id}", style="primary")],
+        [InlineKeyboardButton("📊 تعداد کانفیگ", callback_data=f"set_cfg_max_{profile_id}", style="primary"),
+         InlineKeyboardButton("📊 تعداد پروکسی", callback_data=f"set_prx_max_{profile_id}", style="primary")],
         [InlineKeyboardButton(ping_label, callback_data=f"tglping_{profile_id}", style="primary"),
          InlineKeyboardButton(cfg_btn, callback_data=f"tglcfg_{profile_id}", style="primary")],
         [InlineKeyboardButton(prx_btn, callback_data=f"tglproxy_{profile_id}", style="primary"),
@@ -2621,7 +2628,6 @@ async def cmd_start(u, ctx):
     if profiles:
         last_num = max(p["last_num"] for p in profiles)
         next_n = last_num + 1
-    # دریافت اعتبار
     balance = await get_railway_credit()
     credit_str = f"${balance:.2f}" if balance is not None else "نامشخص"
     txt = msg("welcome", profiles=total, next_n=next_n, credit=credit_str)
@@ -2651,7 +2657,7 @@ async def show_profiles_list(msg_or_q):
     else:
         lines = []
         for p in profiles:
-            lines.append(f"• `{p['dest_name']}` (ID: {p['id']}) – {len(get_profile_sources(p['id']))} منبع, {p['interval_min']}m")
+            lines.append(f"• `{p['dest_name']}` (ID: {p['id']}) – {len(get_profile_sources(p['id']))} منبع, بازه کانفیگ:{p.get('interval_config',5)}m, بازه پروکسی:{p.get('interval_proxy',5)}m")
         txt = msg("profile_list", list="\n".join(lines))
     kb = profiles_kb()
     try:
@@ -2674,7 +2680,7 @@ async def cmd_runnow(u, ctx):
         results = []
         for prof in profiles:
             log.info(f"🚀 /runnow for profile {prof['id']}")
-            n, m = await run_full_cycle_for_profile(u.get_bot(), prof['id'], only_new=True, is_instant=False)
+            n, m = await run_cycle_for_profile(u.get_bot(), prof['id'], post_configs=True, post_proxies=True, is_instant=False)
             results.append(f"{prof['dest_name']}: {n} - {m}")
         await p.edit_text("✅ Done:\n" + "\n".join(results))
     except Exception as e:
@@ -2691,7 +2697,7 @@ async def cmd_runall(u, ctx):
         results = []
         for prof in profiles:
             log.info(f"🚀 /runall for profile {prof['id']}")
-            n, m = await run_full_cycle_for_profile(u.get_bot(), prof['id'], only_new=False, is_instant=False)
+            n, m = await run_cycle_for_profile(u.get_bot(), prof['id'], post_configs=True, post_proxies=True, is_instant=False)
             results.append(f"{prof['dest_name']}: {n} - {m}")
         await p.edit_text("✅ Done:\n" + "\n".join(results))
     except Exception as e:
@@ -2723,7 +2729,7 @@ async def cmd_diag(update: Update, context):
     msg_lines.append(f"📌 تعداد پروفایل‌ها: {len(profiles)}")
     for prof in profiles:
         timer_status = "⏳ فعال" if prof.get("timer_expiry") else "⏹ غیرفعال"
-        msg_lines.append(f"  • {prof['dest_name']} (ID:{prof['id']}) - {len(get_profile_sources(prof['id']))} منبع, بازه {prof['interval_min']}m, پینگ {prof['ping_mode']}, تایمر: {timer_status}")
+        msg_lines.append(f"  • {prof['dest_name']} (ID:{prof['id']}) - {len(get_profile_sources(prof['id']))} منبع, بازه کانفیگ:{prof.get('interval_config',5)}m, بازه پروکسی:{prof.get('interval_proxy',5)}m, پینگ {prof['ping_mode']}, تایمر: {timer_status}")
     msg_lines.append("")
     seen_cfg = c.execute("SELECT COUNT(*) FROM seen").fetchone()[0]
     seen_prx = c.execute("SELECT COUNT(*) FROM proxies_seen").fetchone()[0]
@@ -2748,7 +2754,6 @@ async def on_callback(u, ctx):
         if d == "dummy":
             return
 
-        # نمایش اعتبار
         if d == "show_balance":
             balance = await get_railway_credit()
             if balance is not None:
@@ -3074,7 +3079,124 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # ===== بقیه =====
+        # ===== تنظیم بازه و تعداد جدید =====
+        if d.startswith("set_cfg_interval_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                ctx.user_data["action"] = f"set_cfg_interval_{profile_id}"
+                current = get_profile_interval_config(profile_id)
+                await q.edit_message_text(f"بازه فعلی کانفیگ: {current} دقیقه\n\nعدد جدید (۰ تا ۱۴۴۰) یا دکمه خالی:", reply_markup=empty_button_kb(profile_id, f"empty_cfg_interval_{profile_id}"))
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("empty_cfg_interval_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                await q.answer("✅ بدون تغییر.")
+                await show_profile_admin(q.message, profile_id)
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("set_prx_interval_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                ctx.user_data["action"] = f"set_prx_interval_{profile_id}"
+                current = get_profile_interval_proxy(profile_id)
+                await q.edit_message_text(f"بازه فعلی پروکسی: {current} دقیقه\n\nعدد جدید (۰ تا ۱۴۴۰) یا دکمه خالی:", reply_markup=empty_button_kb(profile_id, f"empty_prx_interval_{profile_id}"))
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("empty_prx_interval_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                await q.answer("✅ بدون تغییر.")
+                await show_profile_admin(q.message, profile_id)
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("set_cfg_max_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                ctx.user_data["action"] = f"set_cfg_max_{profile_id}"
+                current = get_profile_max_post_config(profile_id)
+                await q.edit_message_text(f"حداکثر تعداد کانفیگ فعلی: {current}\n\nعدد جدید (۱ تا ۵۰) یا دکمه خالی:", reply_markup=empty_button_kb(profile_id, f"empty_cfg_max_{profile_id}"))
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("empty_cfg_max_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                await q.answer("✅ بدون تغییر.")
+                await show_profile_admin(q.message, profile_id)
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("set_prx_max_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                ctx.user_data["action"] = f"set_prx_max_{profile_id}"
+                current = get_profile_max_post_proxy(profile_id)
+                await q.edit_message_text(f"حداکثر تعداد پروکسی فعلی: {current}\n\nعدد جدید (۱ تا ۵۰) یا دکمه خالی:", reply_markup=empty_button_kb(profile_id, f"empty_prx_max_{profile_id}"))
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("empty_prx_max_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                await q.answer("✅ بدون تغییر.")
+                await show_profile_admin(q.message, profile_id)
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        # ===== بقیه دکمه‌های قبلی =====
         if d == "profiles_list":
             await show_profiles_list(q.message)
             return
@@ -3096,8 +3218,10 @@ async def on_callback(u, ctx):
                 except ValueError:
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
-                update_profile(profile_id, interval_min=0)
-                await q.answer("⚡ حالت اپدیت لحظه‌ای فعال شد (هر ۳ ثانیه)")
+                # فعال‌سازی لحظه‌ای برای هر دو نوع (با تنظیم بازه‌های صفر)
+                set_profile_interval_config(profile_id, 0)
+                set_profile_interval_proxy(profile_id, 0)
+                await q.answer("⚡ حالت اپدیت لحظه‌ای برای کانفیگ و پروکسی فعال شد")
                 await show_profile_admin(q.message, profile_id)
             else:
                 await q.answer("⚠️ خطا در داده")
@@ -3529,6 +3653,7 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
+        # دکمه‌های قدیمی interval و max (برای سازگاری) – ما آن‌ها را به تنظیمات جدید نگاشت می‌دهیم
         if d.startswith("ai_"):
             parts = d.split("_")
             if len(parts) >= 2:
@@ -3537,23 +3662,10 @@ async def on_callback(u, ctx):
                 except ValueError:
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
-                ctx.user_data["action"] = f"ai_{profile_id}"
-                current = get_profile_interval(profile_id)
-                await q.edit_message_text(f"Now: {current}m\nSend 0-1440 (0 for instant):", reply_markup=empty_button_kb(profile_id, f"empty_ai_{profile_id}"))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("empty_ai_"):
-            parts = d.split("_")
-            if len(parts) >= 3:
-                try:
-                    profile_id = int(parts[2])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                await q.answer("✅ بدون تغییر.")
-                await show_profile_admin(q.message, profile_id)
+                # اینجا بازه کانفیگ را تنظیم می‌کنیم
+                ctx.user_data["action"] = f"set_cfg_interval_{profile_id}"
+                current = get_profile_interval_config(profile_id)
+                await q.edit_message_text(f"بازه فعلی کانفیگ: {current} دقیقه\n\nعدد جدید (۰ تا ۱۴۴۰) یا دکمه خالی:", reply_markup=empty_button_kb(profile_id, f"empty_cfg_interval_{profile_id}"))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -3566,23 +3678,10 @@ async def on_callback(u, ctx):
                 except ValueError:
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
-                ctx.user_data["action"] = f"setmax_{profile_id}"
-                current = get_profile_max_post(profile_id)
-                await q.edit_message_text(f"Now: {current}\nSend 1-50 (یا دکمه خالی):", reply_markup=empty_button_kb(profile_id, f"empty_setmax_{profile_id}"))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("empty_setmax_"):
-            parts = d.split("_")
-            if len(parts) >= 3:
-                try:
-                    profile_id = int(parts[2])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                await q.answer("✅ بدون تغییر.")
-                await show_profile_admin(q.message, profile_id)
+                # اینجا تعداد کانفیگ را تنظیم می‌کنیم
+                ctx.user_data["action"] = f"set_cfg_max_{profile_id}"
+                current = get_profile_max_post_config(profile_id)
+                await q.edit_message_text(f"حداکثر تعداد کانفیگ فعلی: {current}\n\nعدد جدید (۱ تا ۵۰) یا دکمه خالی:", reply_markup=empty_button_kb(profile_id, f"empty_cfg_max_{profile_id}"))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -3599,7 +3698,7 @@ async def on_callback(u, ctx):
                 n_sp = c.execute("SELECT COUNT(*) FROM sponsors WHERE profile_id=?", (profile_id,)).fetchone()[0]
                 next_n = get_profile_last_num(profile_id) + 1
                 dest = get_profile_dest(profile_id)
-                txt = f"📊 مقصد: {dest}\nمنابع: {len(get_profile_sources(profile_id))}\nاسپانسر: {n_sp}\nبعدی: #{next_n}\nحداکثر: {get_profile_max_post(profile_id)}"
+                txt = f"📊 مقصد: {dest}\nمنابع: {len(get_profile_sources(profile_id))}\nاسپانسر: {n_sp}\nبعدی: #{next_n}\nحداکثر کانفیگ: {get_profile_max_post_config(profile_id)}\nحداکثر پروکسی: {get_profile_max_post_proxy(profile_id)}"
                 await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
@@ -3636,7 +3735,7 @@ async def on_callback(u, ctx):
                     return
                 p = await q.edit_message_text("⏳ در حال اجرا...")
                 try:
-                    n, m = await run_full_cycle_for_profile(u.get_bot(), profile_id, only_new=True, is_instant=False)
+                    n, m = await run_cycle_for_profile(u.get_bot(), profile_id, post_configs=True, post_proxies=True, is_instant=False)
                     await p.edit_text(f"✅ Done: {n} - {m}")
                 except Exception as e:
                     log.error(f"❌ runnow error: {e}")
@@ -3877,8 +3976,10 @@ async def show_profile_admin(msg_or_q, profile_id):
     srcs = get_profile_sources(profile_id)
     dest = prof["dest_name"] or "تنظیم نشده"
     last_num = prof["last_num"]
-    interval = prof["interval_min"]
-    max_post = prof["max_post"]
+    interval_cfg = prof.get("interval_config", 5)
+    interval_prx = prof.get("interval_proxy", 5)
+    max_cfg = prof.get("max_post_config", 8)
+    max_prx = prof.get("max_post_proxy", 10)
     show_num = prof["show_numbers"] == 1
     custom_query = prof["custom_query"] or "خالی"
     show_date_cfg = prof["show_date_config"] == 1
@@ -3907,7 +4008,8 @@ async def show_profile_admin(msg_or_q, profile_id):
         "admin_panel",
         srcs=len(srcs), dest=dest,
         name=dest, num=last_num,
-        interval=interval, max_post=max_post,
+        cfg_interval=interval_cfg, prx_interval=interval_prx,
+        max_cfg=max_cfg, max_prx=max_prx,
         sponsor=sponsor_st,
         ping_mode=ping_display,
         cfg_status=cfg_status,
@@ -3939,6 +4041,7 @@ async def on_text(u, ctx):
     if u.effective_user.id != ADMIN_ID:
         return
 
+    # مدیریت تایمر سفارشی
     if ctx.user_data.get("action", "").startswith("timer_custom_"):
         profile_id = int(ctx.user_data["action"].split("_")[2])
         try:
@@ -3954,6 +4057,7 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
+    # بک‌آپ export custom
     if ctx.user_data.get("backup_export_custom"):
         data = ctx.user_data["backup_export_custom"]
         profile_id = data["profile_id"]
@@ -3970,6 +4074,7 @@ async def on_text(u, ctx):
         await u.message.reply_text("✅ بک‌آپ ارسال شد.")
         return
 
+    # ویرایش اسپانسر
     if ctx.user_data.get("sponsor_edit_field"):
         field = ctx.user_data["sponsor_edit_field"]
         profile_id = ctx.user_data.get("sponsor_edit_profile_id")
@@ -4084,6 +4189,7 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
+    # لیست سیاه
     if a.startswith("bl_add_"):
         profile_id = int(a.split("_")[2])
         if not t:
@@ -4108,6 +4214,7 @@ async def on_text(u, ctx):
         await u.message.reply_text(txt, parse_mode="HTML", reply_markup=blacklist_kb(profile_id))
         return
 
+    # کرون
     if a.startswith("setcron_"):
         profile_id = int(a.split("_")[1])
         cron = t.strip()
@@ -4125,6 +4232,7 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
+    # افزودن پروفایل
     if a == "prof_add":
         dest_name = t if t else None
         if not dest_name:
@@ -4143,11 +4251,13 @@ async def on_text(u, ctx):
         del ctx.user_data["action"]
         if ENABLE_AUTO:
             app = u.get_bot()
-            app.create_task(profile_loop(app, new_id))
-            log.info(f"⏰ Started auto loop for new profile {new_id}")
+            app.create_task(profile_loop_config(app, new_id))
+            app.create_task(profile_loop_proxy(app, new_id))
+            log.info(f"⏰ Started auto loops for new profile {new_id}")
         await show_profiles_list(u.message)
         return
 
+    # افزودن منبع
     if a.startswith("sa_"):
         profile_id = int(a.split("_")[1])
         if not t:
@@ -4177,6 +4287,7 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
+    # تنظیم مقصد
     if a.startswith("da_"):
         profile_id = int(a.split("_")[1])
         dest = t if t else None
@@ -4194,6 +4305,7 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
+    # تنظیم نام
     if a.startswith("ac_"):
         profile_id = int(a.split("_")[1])
         name = t if t else ""
@@ -4205,6 +4317,7 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
+    # بنر کانفیگ
     if a.startswith("ab_config_"):
         profile_id = int(a.split("_")[2])
         if not t:
@@ -4219,6 +4332,7 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
+    # بنر پروکسی
     if a.startswith("ab_proxy_"):
         profile_id = int(a.split("_")[2])
         if not t:
@@ -4233,8 +4347,9 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    if a.startswith("ai_"):
-        profile_id = int(a.split("_")[1])
+    # تنظیم بازه کانفیگ
+    if a.startswith("set_cfg_interval_"):
+        profile_id = int(a.split("_")[3])
         if not t:
             await u.message.reply_text("✅ بدون تغییر.")
             del ctx.user_data["action"]
@@ -4245,7 +4360,7 @@ async def on_text(u, ctx):
         except:
             return await u.message.reply_text(msg("interval_wrong"))
         if 0 <= n <= 1440:
-            update_profile(profile_id, interval_min=n)
+            set_profile_interval_config(profile_id, n)
             await u.message.reply_text(msg("interval_ok", n=n))
         else:
             return await u.message.reply_text(msg("interval_err"))
@@ -4253,8 +4368,30 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    if a.startswith("setmax_"):
-        profile_id = int(a.split("_")[1])
+    # تنظیم بازه پروکسی
+    if a.startswith("set_prx_interval_"):
+        profile_id = int(a.split("_")[3])
+        if not t:
+            await u.message.reply_text("✅ بدون تغییر.")
+            del ctx.user_data["action"]
+            await show_profile_admin(u.message, profile_id)
+            return
+        try:
+            n = int(t)
+        except:
+            return await u.message.reply_text(msg("interval_wrong"))
+        if 0 <= n <= 1440:
+            set_profile_interval_proxy(profile_id, n)
+            await u.message.reply_text(msg("interval_ok", n=n))
+        else:
+            return await u.message.reply_text(msg("interval_err"))
+        del ctx.user_data["action"]
+        await show_profile_admin(u.message, profile_id)
+        return
+
+    # تنظیم تعداد کانفیگ
+    if a.startswith("set_cfg_max_"):
+        profile_id = int(a.split("_")[3])
         if not t:
             await u.message.reply_text("✅ بدون تغییر.")
             del ctx.user_data["action"]
@@ -4265,7 +4402,7 @@ async def on_text(u, ctx):
         except:
             return await u.message.reply_text(msg("interval_wrong"))
         if 1 <= n <= 50:
-            update_profile(profile_id, max_post=n)
+            set_profile_max_post_config(profile_id, n)
             await u.message.reply_text(msg("max_ok", n=n))
         else:
             return await u.message.reply_text(msg("max_err"))
@@ -4273,12 +4410,35 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
+    # تنظیم تعداد پروکسی
+    if a.startswith("set_prx_max_"):
+        profile_id = int(a.split("_")[3])
+        if not t:
+            await u.message.reply_text("✅ بدون تغییر.")
+            del ctx.user_data["action"]
+            await show_profile_admin(u.message, profile_id)
+            return
+        try:
+            n = int(t)
+        except:
+            return await u.message.reply_text(msg("interval_wrong"))
+        if 1 <= n <= 50:
+            set_profile_max_post_proxy(profile_id, n)
+            await u.message.reply_text(msg("max_ok", n=n))
+        else:
+            return await u.message.reply_text(msg("max_err"))
+        del ctx.user_data["action"]
+        await show_profile_admin(u.message, profile_id)
+        return
+
+    # ارسال دستی
     if a.startswith("manual_"):
         profile_id = int(a.split("_")[1])
         await process_manual_text(u, u.message, profile_id, is_document=False)
         del ctx.user_data["action"]
         return
 
+    # کوئری سفارشی
     if a.startswith("setquery_"):
         profile_id = int(a.split("_")[1])
         query = t if t else ""
@@ -4347,15 +4507,16 @@ async def process_manual_text(u, message, profile_id, is_document=False):
         if not config_links and not proxy_links:
             return await p.edit_text("❌ هیچ لینک معتبری یافت نشد.")
 
-        new_configs = config_links
+        # فیلتر تکراری
+        new_configs = [link for link in config_links if not is_already_posted(profile_id, link)]
         new_proxies = []
         for pl in proxy_links:
             norm = normalize_proxy_url(pl)
-            if norm:
+            if norm and not is_proxy_posted(profile_id, norm):
                 new_proxies.append(norm)
 
         if not new_configs and not new_proxies:
-            return await p.edit_text("❌ هیچ لینک معتبری برای ارسال وجود ندارد.")
+            return await p.edit_text("❌ هیچ لینک جدیدی برای ارسال وجود ندارد.")
 
         await p.edit_text(f"⏳ آماده‌سازی {len(new_configs)} کانفیگ و {len(new_proxies)} پروکسی...")
 
@@ -4370,112 +4531,94 @@ async def process_manual_text(u, message, profile_id, is_document=False):
                     flag = await get_flag_for_ip(ip)
             proxy_with_ping.append((proxy_url, 0, flag))
 
-        if not working and not proxy_with_ping:
-            return await p.edit_text("⚠️ هیچ لینک جدیدی برای ارسال وجود ندارد.")
-
         dest = get_profile_dest(profile_id)
         if not dest:
             return await p.edit_text("❌ مقصد تنظیم نشده است.")
 
-        old_max = get_profile_max_post(profile_id)
-        if len(working) > 0:
-            update_profile(profile_id, max_post=len(working))
-        try:
-            n, m = await post_working_configs(u.get_bot(), profile_id, working, proxy_with_ping, source_for_seen="manual", force=True, skip_duplicate=True, is_instant=True)
-        finally:
-            update_profile(profile_id, max_post=old_max)
-
+        # ارسال با force=True و skip_duplicate=True (قبلاً فیلتر شده‌اند)
+        n, m = await post_working_configs(u.get_bot(), profile_id, working, proxy_with_ping, force=True, skip_duplicate=True)
         await p.edit_text(msg("doc_done", n=n, p=len(proxy_with_ping)))
     except Exception as e:
         log.error(f"manual send error: {e}")
         await p.edit_text(f"❌ {str(e)[:200]}")
 
-# ======================================================================
-# پاکسازی دوره‌ای فایل‌ها و لاگ‌ها
-# ======================================================================
-async def periodic_cleanup():
-    while True:
-        try:
-            log_file_path = os.path.join(DATA_DIR, "bot.log")
-            if os.path.exists(log_file_path):
-                now_utc = datetime.utcnow()
-                cutoff_utc = now_utc - timedelta(minutes=30)
-                lines_to_keep = []
-                with open(log_file_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        match = re.match(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', line)
-                        if match:
-                            ts_str = match.group(1)
-                            try:
-                                ts = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')
-                                if ts >= cutoff_utc:
-                                    lines_to_keep.append(line)
-                            except:
-                                lines_to_keep.append(line)
-                        else:
-                            lines_to_keep.append(line)
-                if len(lines_to_keep) > 0:
-                    with open(log_file_path, 'w', encoding='utf-8') as f:
-                        f.writelines(lines_to_keep)
-                else:
-                    with open(log_file_path, 'w', encoding='utf-8') as f:
-                        pass
+async def post_working_configs(bot, profile_id, working, proxies_with_ping, force=False, skip_duplicate=False):
+    total_configs = 0
+    total_proxies = 0
+    if working:
+        total_configs = await post_configs(bot, profile_id, working, source_for_seen="manual", skip_duplicate=skip_duplicate)
+    if proxies_with_ping:
+        cnt, payload = await post_proxies(bot, profile_id, proxies_with_ping)
+        if cnt > 0 and payload:
+            text, buttons = payload
+            sent = await send_to_destination(bot, profile_id, text, buttons)
+            if sent:
+                total_proxies = cnt
+    return total_configs, total_proxies
 
-            now_ts = time.time()
-            for fname in os.listdir(DATA_DIR):
-                if fname == "bot.db":
-                    continue
-                filepath = os.path.join(DATA_DIR, fname)
-                if os.path.isfile(filepath):
-                    if fname == "bot.log":
-                        continue
-                    if (fname.startswith("configs_backup_") or 
-                        fname.startswith("proxies_backup_") or 
-                        fname.startswith("logs_") or 
-                        fname.startswith("bot_backup_")):
-                        try:
-                            mtime = os.path.getmtime(filepath)
-                            if now_ts - mtime > 3600:
-                                os.remove(filepath)
-                                log.info(f"🗑️ Cleanup: deleted old file {fname}")
-                        except Exception as e:
-                            log.warning(f"Could not delete {fname}: {e}")
+async def export_backup(update, context, profile_id, backup_type, count=None):
+    try:
+        profile = get_profile(profile_id)
+        profile_name = profile["dest_name"].replace("@", "").strip() if profile else f"profile_{profile_id}"
 
-            if os.path.exists(BACKUP_DIR):
-                for fname in os.listdir(BACKUP_DIR):
-                    filepath = os.path.join(BACKUP_DIR, fname)
-                    if os.path.isfile(filepath):
-                        try:
-                            mtime = os.path.getmtime(filepath)
-                            if now_ts - mtime > 3600:
-                                os.remove(filepath)
-                                log.info(f"🗑️ Cleanup: deleted old backup file {fname}")
-                        except Exception as e:
-                            log.warning(f"Could not delete {fname}: {e}")
+        if backup_type == "configs":
+            if count is None or count == -1:
+                rows = c.execute("SELECT full_url FROM seen WHERE profile_id=? AND full_url != '' ORDER BY last_posted DESC", (profile_id,)).fetchall()
+            else:
+                rows = c.execute("SELECT full_url FROM seen WHERE profile_id=? AND full_url != '' ORDER BY last_posted DESC LIMIT ?", (profile_id, count)).fetchall()
+            links = [row[0] for row in rows if row[0]]
+            if not links:
+                await update.message.reply_text("❌ هیچ کانفیگی برای بک‌آپ یافت نشد.")
+                return
+            filename = f"configs_backup_{profile_name}_{get_tehran_date()}.txt"
+            content = f"# Backup for {profile_name} (ID: {profile_id})\n# Total: {len(links)}\n\n" + "\n".join(links)
+            with open(os.path.join(DATA_DIR, filename), "w", encoding="utf-8") as f:
+                f.write(content)
+            with open(os.path.join(DATA_DIR, filename), "rb") as f:
+                await update.message.reply_document(document=f, filename=filename, caption=f"📤 {len(links)} کانفیگ - {profile_name}")
+            os.remove(os.path.join(DATA_DIR, filename))
+            return
 
-        except Exception as e:
-            log.error(f"Error in periodic_cleanup: {e}")
-        await asyncio.sleep(300)
+        elif backup_type == "proxies":
+            if count is None or count == -1:
+                rows = c.execute("SELECT proxy_url FROM proxies_seen WHERE profile_id=? ORDER BY last_posted DESC", (profile_id,)).fetchall()
+            else:
+                rows = c.execute("SELECT proxy_url FROM proxies_seen WHERE profile_id=? ORDER BY last_posted DESC LIMIT ?", (profile_id, count)).fetchall()
+            links = [row[0] for row in rows if row[0]]
+            if not links:
+                await update.message.reply_text("❌ هیچ پروکسی برای بک‌آپ یافت نشد.")
+                return
+            filename = f"proxies_backup_{profile_name}_{get_tehran_date()}.txt"
+            content = f"# Backup for {profile_name} (ID: {profile_id})\n# Total: {len(links)}\n\n" + "\n".join(links)
+            with open(os.path.join(DATA_DIR, filename), "w", encoding="utf-8") as f:
+                f.write(content)
+            with open(os.path.join(DATA_DIR, filename), "rb") as f:
+                await update.message.reply_document(document=f, filename=filename, caption=f"📤 {len(links)} پروکسی - {profile_name}")
+            os.remove(os.path.join(DATA_DIR, filename))
+            return
+        else:
+            await update.message.reply_text("❌ نوع نامعتبر.")
+    except Exception as e:
+        log.error(f"Backup export error: {e}")
+        await update.message.reply_text(f"❌ خطا در بک‌آپ: {str(e)[:100]}")
 
 # ======================================================================
 # راه‌اندازی
 # ======================================================================
+BOT_REF = None
 ENABLE_AUTO = True
-PRIVATE_MODE = True
 
 async def post_init(app):
-    global BOT_REF, BOT_LANG
+    global BOT_REF
     BOT_REF = app.bot
-    saved = cfg_get("lang", "fa")
-    if saved in ("fa", "en"):
-        BOT_LANG = saved
     profiles = get_profiles()
     if not profiles:
         new_id = create_profile("@VaslZone", sources="@Cfox_Server")
         log.info(f"✅ Created default profile with id {new_id}.")
         profiles = get_profiles()
-    log.info(f"✅ INIT done: {len(profiles)} profiles, AUTO={ENABLE_AUTO}, LANG={BOT_LANG}")
+    log.info(f"✅ INIT done: {len(profiles)} profiles, AUTO={ENABLE_AUTO}")
 
+    # زمان‌بندی گزارش روزانه
     job_queue = app.job_queue
     if job_queue:
         now = datetime.now(TEHRAN_TZ)
@@ -4490,27 +4633,22 @@ async def post_init(app):
 
     if ENABLE_AUTO:
         for prof in profiles:
-            log.info(f"⏰ Creating auto loop task for profile {prof['id']} ({prof['dest_name']})")
-            app.create_task(profile_loop(app.bot, prof["id"]))
-        log.info("⏰ Scheduler started for all profiles")
+            log.info(f"⏰ Creating config loop for profile {prof['id']} ({prof['dest_name']})")
+            app.create_task(profile_loop_config(app.bot, prof["id"]))
+            log.info(f"⏰ Creating proxy loop for profile {prof['id']} ({prof['dest_name']})")
+            app.create_task(profile_loop_proxy(app.bot, prof["id"]))
+        log.info("⏰ Scheduler started for all profiles (config and proxy loops)")
 
+    # پاکسازی دوره‌ای
     app.create_task(periodic_cleanup())
     log.info("🧹 Periodic cleanup task started")
 
-    # شروع چک اعتبار
+    # چک اعتبار
     if RAILWAY_TOKEN:
         app.create_task(periodic_credit_check())
         log.info("💰 Credit check task started (Railway)")
     else:
         log.info("💰 Credit check disabled (no RAILWAY_TOKEN)")
-
-def cfg_get(k, default=""):
-    r = c.execute("SELECT v FROM cfg WHERE k=?", (k,)).fetchone()
-    return r[0] if r else default
-
-def cfg_set(k, v):
-    c.execute("INSERT OR REPLACE INTO cfg VALUES (?,?)", (k, str(v)))
-    conn.commit()
 
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()

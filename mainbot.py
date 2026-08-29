@@ -36,10 +36,10 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 if not ADMIN_ID:
     raise ValueError("ADMIN_ID environment variable not set")
 
-# تنظیمات مربوط به دریافت کردیت از Railway (اختیاری)
-CREDIT_API_URL = os.getenv("CREDIT_API_URL", "")    # مثلاً: https://api.example.com/balance
-CREDIT_API_TOKEN = os.getenv("CREDIT_API_TOKEN", "")
-CREDIT_THRESHOLD = float(os.getenv("CREDIT_THRESHOLD", "0.05"))  # آستانه ارسال بک‌آپ
+# Railway API (برای دریافت اعتبار)
+RAILWAY_TOKEN = os.getenv("RAILWAY_TOKEN", "")
+RAILWAY_PROJECT_ID = os.getenv("RAILWAY_PROJECT_ID", "")
+CREDIT_THRESHOLD = float(os.getenv("CREDIT_THRESHOLD", "0.05"))
 
 # ======================================================================
 # مسیر پایدار (ولوم ثابت /app/data)
@@ -264,117 +264,105 @@ fix_column_types()
 # مهاجرت جداول برای ایزوله‌سازی کامل پروفایل‌ها
 # ======================================================================
 def migrate_tables_for_profile_isolation():
-    # 1. seen table: ensure UNIQUE(uuid, address, profile_id)
     try:
         c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='seen'")
         row = c.fetchone()
-        if row:
-            sql = row[0]
-            if "UNIQUE(uuid, address, profile_id)" not in sql:
-                log.warning("Migrating seen table to include profile_id in UNIQUE...")
-                c.execute("ALTER TABLE seen RENAME TO seen_old")
-                c.execute("""
-                    CREATE TABLE seen (
-                        uuid TEXT,
-                        address TEXT,
-                        source TEXT DEFAULT '',
-                        first_seen TEXT,
-                        last_posted TEXT,
-                        profile_id INTEGER DEFAULT 1,
-                        full_url TEXT DEFAULT '',
-                        backup_num INTEGER DEFAULT 0,
-                        UNIQUE(uuid, address, profile_id)
-                    )
-                """)
-                c.execute("""
-                    INSERT INTO seen (uuid, address, source, first_seen, last_posted, profile_id, full_url, backup_num)
-                    SELECT uuid, address, source, first_seen, last_posted, profile_id, full_url, backup_num FROM seen_old
-                """)
-                c.execute("DROP TABLE seen_old")
-                conn.commit()
-                log.info("✅ seen table migrated.")
+        if row and "UNIQUE(uuid, address, profile_id)" not in row[0]:
+            log.warning("Migrating seen table...")
+            c.execute("ALTER TABLE seen RENAME TO seen_old")
+            c.execute("""
+                CREATE TABLE seen (
+                    uuid TEXT,
+                    address TEXT,
+                    source TEXT DEFAULT '',
+                    first_seen TEXT,
+                    last_posted TEXT,
+                    profile_id INTEGER DEFAULT 1,
+                    full_url TEXT DEFAULT '',
+                    backup_num INTEGER DEFAULT 0,
+                    UNIQUE(uuid, address, profile_id)
+                )
+            """)
+            c.execute("""
+                INSERT INTO seen (uuid, address, source, first_seen, last_posted, profile_id, full_url, backup_num)
+                SELECT uuid, address, source, first_seen, last_posted, profile_id, full_url, backup_num FROM seen_old
+            """)
+            c.execute("DROP TABLE seen_old")
+            conn.commit()
+            log.info("✅ seen table migrated.")
     except Exception as e:
         log.error(f"seen migration failed: {e}")
 
-    # 2. proxies_seen: UNIQUE(proxy_url, profile_id)
     try:
         c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='proxies_seen'")
         row = c.fetchone()
-        if row:
-            sql = row[0]
-            if "UNIQUE(proxy_url, profile_id)" not in sql:
-                log.warning("Migrating proxies_seen table...")
-                c.execute("ALTER TABLE proxies_seen RENAME TO proxies_seen_old")
-                c.execute("""
-                    CREATE TABLE proxies_seen (
-                        proxy_url TEXT,
-                        first_seen TEXT,
-                        last_posted TEXT,
-                        profile_id INTEGER DEFAULT 1,
-                        UNIQUE(proxy_url, profile_id)
-                    )
-                """)
-                c.execute("""
-                    INSERT INTO proxies_seen (proxy_url, first_seen, last_posted, profile_id)
-                    SELECT proxy_url, first_seen, last_posted, profile_id FROM proxies_seen_old
-                """)
-                c.execute("DROP TABLE proxies_seen_old")
-                conn.commit()
-                log.info("✅ proxies_seen table migrated.")
+        if row and "UNIQUE(proxy_url, profile_id)" not in row[0]:
+            log.warning("Migrating proxies_seen table...")
+            c.execute("ALTER TABLE proxies_seen RENAME TO proxies_seen_old")
+            c.execute("""
+                CREATE TABLE proxies_seen (
+                    proxy_url TEXT,
+                    first_seen TEXT,
+                    last_posted TEXT,
+                    profile_id INTEGER DEFAULT 1,
+                    UNIQUE(proxy_url, profile_id)
+                )
+            """)
+            c.execute("""
+                INSERT INTO proxies_seen (proxy_url, first_seen, last_posted, profile_id)
+                SELECT proxy_url, first_seen, last_posted, profile_id FROM proxies_seen_old
+            """)
+            c.execute("DROP TABLE proxies_seen_old")
+            conn.commit()
+            log.info("✅ proxies_seen table migrated.")
     except Exception as e:
         log.error(f"proxies_seen migration failed: {e}")
 
-    # 3. processed_messages: PRIMARY KEY(source, message_id, profile_id)
     try:
         c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='processed_messages'")
         row = c.fetchone()
-        if row:
-            sql = row[0]
-            if "PRIMARY KEY(source, message_id, profile_id)" not in sql:
-                log.warning("Migrating processed_messages table...")
-                c.execute("ALTER TABLE processed_messages RENAME TO processed_messages_old")
-                c.execute("""
-                    CREATE TABLE processed_messages (
-                        source TEXT,
-                        message_id INTEGER,
-                        profile_id INTEGER DEFAULT 1,
-                        PRIMARY KEY(source, message_id, profile_id)
-                    )
-                """)
-                c.execute("""
-                    INSERT INTO processed_messages (source, message_id, profile_id)
-                    SELECT source, message_id, profile_id FROM processed_messages_old
-                """)
-                c.execute("DROP TABLE processed_messages_old")
-                conn.commit()
-                log.info("✅ processed_messages table migrated.")
+        if row and "PRIMARY KEY(source, message_id, profile_id)" not in row[0]:
+            log.warning("Migrating processed_messages table...")
+            c.execute("ALTER TABLE processed_messages RENAME TO processed_messages_old")
+            c.execute("""
+                CREATE TABLE processed_messages (
+                    source TEXT,
+                    message_id INTEGER,
+                    profile_id INTEGER DEFAULT 1,
+                    PRIMARY KEY(source, message_id, profile_id)
+                )
+            """)
+            c.execute("""
+                INSERT INTO processed_messages (source, message_id, profile_id)
+                SELECT source, message_id, profile_id FROM processed_messages_old
+            """)
+            c.execute("DROP TABLE processed_messages_old")
+            conn.commit()
+            log.info("✅ processed_messages table migrated.")
     except Exception as e:
         log.error(f"processed_messages migration failed: {e}")
 
-    # 4. last_scrape: UNIQUE(source, profile_id)
     try:
         c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='last_scrape'")
         row = c.fetchone()
-        if row:
-            sql = row[0]
-            if "UNIQUE(source, profile_id)" not in sql:
-                log.warning("Migrating last_scrape table...")
-                c.execute("ALTER TABLE last_scrape RENAME TO last_scrape_old")
-                c.execute("""
-                    CREATE TABLE last_scrape (
-                        source TEXT,
-                        last_scrape_time TEXT,
-                        profile_id INTEGER DEFAULT 1,
-                        UNIQUE(source, profile_id)
-                    )
-                """)
-                c.execute("""
-                    INSERT INTO last_scrape (source, last_scrape_time, profile_id)
-                    SELECT source, last_scrape_time, profile_id FROM last_scrape_old
-                """)
-                c.execute("DROP TABLE last_scrape_old")
-                conn.commit()
-                log.info("✅ last_scrape table migrated.")
+        if row and "UNIQUE(source, profile_id)" not in row[0]:
+            log.warning("Migrating last_scrape table...")
+            c.execute("ALTER TABLE last_scrape RENAME TO last_scrape_old")
+            c.execute("""
+                CREATE TABLE last_scrape (
+                    source TEXT,
+                    last_scrape_time TEXT,
+                    profile_id INTEGER DEFAULT 1,
+                    UNIQUE(source, profile_id)
+                )
+            """)
+            c.execute("""
+                INSERT INTO last_scrape (source, last_scrape_time, profile_id)
+                SELECT source, last_scrape_time, profile_id FROM last_scrape_old
+            """)
+            c.execute("DROP TABLE last_scrape_old")
+            conn.commit()
+            log.info("✅ last_scrape table migrated.")
     except Exception as e:
         log.error(f"last_scrape migration failed: {e}")
 
@@ -948,7 +936,6 @@ async def check_and_auto_backup(profile_id):
         profile_name = profile["dest_name"].replace("@", "").strip() or f"profile_{profile_id}"
         backup_interval = get_profile_backup_interval(profile_id) or 1000
 
-        # قفل مخصوص هر پروفایل
         lock = backup_locks.get(profile_id)
         if not lock:
             lock = asyncio.Lock()
@@ -960,14 +947,12 @@ async def check_and_auto_backup(profile_id):
                 (profile_id,)).fetchone()[0]
             last_backup = get_profile_last_backup_count(profile_id)
 
-            # محاسبه آخرین بلاک بک‌آپ شده
             last_backup_block = last_backup // backup_interval if backup_interval > 0 else 0
             current_block = total // backup_interval if backup_interval > 0 else 0
 
             if current_block <= last_backup_block:
                 return
 
-            # برای هر بلاک جدید یک فایل ارسال کن
             for block in range(last_backup_block + 1, current_block + 1):
                 start_num = (block - 1) * backup_interval + 1
                 end_num = block * backup_interval
@@ -1730,27 +1715,19 @@ async def run_full_cycle_for_profile(bot, profile_id, only_new=True, is_instant=
     # ========== تنظیمات بر اساس حالت ==========
     max_post = get_profile_max_post(profile_id)
     if is_instant:
-        scrape_limit = len(sources)
         test_limit = max(max_post, 10)
         test_limit = min(test_limit, 30)
-        ping_timeout = 3
         max_concurrent = 30
     else:
-        scrape_limit = 10
         test_limit = max(max_post, 20)
-        test_limit = min(test_limit, 50)
-        ping_timeout = 10
+        test_limit = min(test_limit, 200)  # افزایش حد برای تست همه
         max_concurrent = 20
-    # ==========================================
+    # ========== همه منابع را اسکرپ کن ==========
+    sources_to_scrape = sources  # دیگر محدودیت نداریم
 
     async def scrape_one(src):
         config_links, proxy_links = await scrape_channel_with_retry(profile_id, src, only_new=True)
         return src, config_links, proxy_links
-
-    if is_instant:
-        sources_to_scrape = sources[:scrape_limit]
-    else:
-        sources_to_scrape = sources
 
     scrape_tasks = [scrape_one(src) for src in sources_to_scrape]
     results = await asyncio.gather(*scrape_tasks, return_exceptions=True)
@@ -2354,36 +2331,81 @@ def msg(key, **kwargs):
 # ======================================================================
 CREDIT_CACHE = {"balance": None, "last_update": 0}
 CREDIT_LOCK = asyncio.Lock()
-CREDIT_THRESHOLD = float(os.getenv("CREDIT_THRESHOLD", "0.05"))
 
-async def get_credit_balance():
+async def get_railway_credit():
     """
-    دریافت مانده اعتبار از API تعریف شده.
-    در صورت عدم تنظیم، None برمی‌گرداند.
+    دریافت مانده اعتبار از Railway GraphQL API با استفاده از توکن.
+    نیاز به متغیر محیطی RAILWAY_TOKEN (و اختیاری RAILWAY_PROJECT_ID)
     """
-    if not CREDIT_API_URL:
+    if not RAILWAY_TOKEN:
         return None
     try:
+        # اگر پروژه‌آیدی داده نشده، لیست پروژه‌ها را بگیر و اولین را انتخاب کن
+        project_id = RAILWAY_PROJECT_ID
+        query = """
+        query {
+            me {
+                projects {
+                    edges {
+                        node {
+                            id
+                            name
+                            credit
+                        }
+                    }
+                }
+            }
+        }
+        """
+        # اگر project_id مشخص است، مستقیماً آن را کوئری کن
+        if project_id:
+            query = f"""
+            query {{
+                project(id: "{project_id}") {{
+                    id
+                    name
+                    credit
+                }}
+            }}
+            """
         async with httpx.AsyncClient(timeout=10) as client:
-            headers = {}
-            if CREDIT_API_TOKEN:
-                headers["Authorization"] = f"Bearer {CREDIT_API_TOKEN}"
-            resp = await client.get(CREDIT_API_URL, headers=headers)
+            headers = {
+                "Authorization": f"Bearer {RAILWAY_TOKEN}",
+                "Content-Type": "application/json"
+            }
+            resp = await client.post(
+                "https://api.railway.app/graphql",
+                json={"query": query},
+                headers=headers
+            )
             if resp.status_code == 200:
                 data = resp.json()
-                # فرض می‌کنیم پاسخ JSON شامل فیلد balance است
-                balance = float(data.get("balance", 0))
-                return balance
+                if "errors" in data:
+                    log.warning(f"Railway API errors: {data['errors']}")
+                    return None
+                if project_id:
+                    credit = data.get("data", {}).get("project", {}).get("credit")
+                    if credit is not None:
+                        return float(credit)
+                else:
+                    projects = data.get("data", {}).get("me", {}).get("projects", {}).get("edges", [])
+                    if projects:
+                        # اولین پروژه را بگیر
+                        node = projects[0].get("node", {})
+                        credit = node.get("credit")
+                        if credit is not None:
+                            return float(credit)
             else:
-                log.warning(f"Credit API returned {resp.status_code}")
+                log.warning(f"Railway API returned {resp.status_code}")
                 return None
     except Exception as e:
-        log.warning(f"Failed to fetch credit: {e}")
+        log.warning(f"Failed to fetch railway credit: {e}")
         return None
+    return None
 
 async def check_credit_and_backup():
     """بررسی دوره‌ای اعتبار و در صورت کمتر از آستانه، بک‌آپ کامل دیتابیس"""
-    balance = await get_credit_balance()
+    balance = await get_railway_credit()
     if balance is None:
         return
     if balance < CREDIT_THRESHOLD:
@@ -2406,7 +2428,7 @@ async def periodic_credit_check():
     """هر ساعت یکبار اعتبار را چک کن"""
     while True:
         await check_credit_and_backup()
-        await asyncio.sleep(3600)  # هر ساعت
+        await asyncio.sleep(3600)
 
 # ======================================================================
 # کیبوردها
@@ -2600,7 +2622,7 @@ async def cmd_start(u, ctx):
         last_num = max(p["last_num"] for p in profiles)
         next_n = last_num + 1
     # دریافت اعتبار
-    balance = await get_credit_balance()
+    balance = await get_railway_credit()
     credit_str = f"${balance:.2f}" if balance is not None else "نامشخص"
     txt = msg("welcome", profiles=total, next_n=next_n, credit=credit_str)
     btns = [[InlineKeyboardButton("📋 Manage Profiles", callback_data="profiles_list", style="primary")],
@@ -2615,11 +2637,11 @@ async def cmd_admin(u, ctx):
 async def cmd_balance(u, ctx):
     if u.effective_user.id != ADMIN_ID:
         return
-    balance = await get_credit_balance()
+    balance = await get_railway_credit()
     if balance is not None:
         txt = msg("balance_info", balance=f"${balance:.2f}")
     else:
-        txt = "💰 اعتبار: نامشخص (API تنظیم نشده)"
+        txt = "💰 اعتبار: نامشخص (توکن Railway تنظیم نشده یا خطا در دریافت)"
     await u.message.reply_text(txt, parse_mode="HTML")
 
 async def show_profiles_list(msg_or_q):
@@ -2728,11 +2750,11 @@ async def on_callback(u, ctx):
 
         # نمایش اعتبار
         if d == "show_balance":
-            balance = await get_credit_balance()
+            balance = await get_railway_credit()
             if balance is not None:
                 txt = msg("balance_info", balance=f"${balance:.2f}")
             else:
-                txt = "💰 اعتبار: نامشخص (API تنظیم نشده)"
+                txt = "💰 اعتبار: نامشخص (توکن Railway تنظیم نشده یا خطا در دریافت)"
             await q.edit_message_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 بازگشت", callback_data="profiles_list", style="primary")]
             ]))
@@ -4476,11 +4498,11 @@ async def post_init(app):
     log.info("🧹 Periodic cleanup task started")
 
     # شروع چک اعتبار
-    if CREDIT_API_URL:
+    if RAILWAY_TOKEN:
         app.create_task(periodic_credit_check())
-        log.info("💰 Credit check task started")
+        log.info("💰 Credit check task started (Railway)")
     else:
-        log.info("💰 Credit check disabled (no CREDIT_API_URL)")
+        log.info("💰 Credit check disabled (no RAILWAY_TOKEN)")
 
 def cfg_get(k, default=""):
     r = c.execute("SELECT v FROM cfg WHERE k=?", (k,)).fetchone()

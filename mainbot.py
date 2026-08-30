@@ -12,7 +12,7 @@ import sys
 import html
 import random
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, unquote, urlparse, parse_qs, urlencode, urlunparse
 import httpx
 import pytz
@@ -472,7 +472,8 @@ def normalize_channel_input(text: str) -> str:
 # ======================================================================
 def get_profiles():
     rows = conn.execute("SELECT * FROM profiles ORDER BY id").fetchall()
-    cols = [d[0] for d in conn.execute("PRAGMA table_info(profiles)").fetchall()]
+    # دریافت نام ستون‌ها از PRAGMA (ستون دوم = name)
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(profiles)").fetchall()]
     profiles = []
     for row in rows:
         prof = dict(zip(cols, row))
@@ -483,7 +484,7 @@ def get_profile(profile_id):
     row = conn.execute("SELECT * FROM profiles WHERE id=?", (profile_id,)).fetchone()
     if not row:
         return None
-    cols = [d[0] for d in conn.execute("PRAGMA table_info(profiles)").fetchall()]
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(profiles)").fetchall()]
     return dict(zip(cols, row))
 
 def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
@@ -2127,7 +2128,7 @@ async def delete_file_after_delay(filepath, delay_seconds):
 # ======================================================================
 # متغیر سراسری
 # ======================================================================
-BOT_START_TIME = datetime.utcnow()
+BOT_START_TIME = datetime.now(timezone.UTC)
 
 # ======================================================================
 # توابع دریافت لاگ و گزارش روزانه
@@ -2138,7 +2139,7 @@ async def get_logs(update, context, profile_id, log_type="full", time_range_minu
         await update.message.reply_text("❌ فایل لاگ وجود ندارد.")
         return
 
-    now_utc = datetime.utcnow()
+    now_utc = datetime.now(timezone.UTC)
     cutoff_utc = now_utc - timedelta(minutes=time_range_minutes)
     start_cutoff = BOT_START_TIME
 
@@ -2305,7 +2306,7 @@ async def periodic_cleanup():
         try:
             log_file_path = os.path.join(DATA_DIR, "bot.log")
             if os.path.exists(log_file_path):
-                now_utc = datetime.utcnow()
+                now_utc = datetime.now(timezone.UTC)
                 cutoff_utc = now_utc - timedelta(minutes=30)
                 lines_to_keep = []
                 with open(log_file_path, 'r', encoding='utf-8') as f:
@@ -5773,7 +5774,7 @@ ENABLE_AUTO = True
 async def post_init(app):
     global BOT_REF, BOT_START_TIME
     BOT_REF = app.bot
-    BOT_START_TIME = datetime.utcnow()
+    BOT_START_TIME = datetime.now(timezone.UTC)
     # پاک کردن تایمرهای منقضی شده
     for prof in get_profiles():
         expiry_str = prof.get("timer_expiry")

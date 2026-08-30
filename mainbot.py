@@ -445,7 +445,7 @@ def migrate_old_config():
 migrate_old_config()
 
 # ======================================================================
-# توابع کمکی (بدون تغییر)
+# توابع کمکی
 # ======================================================================
 def clean_source_name(name: str) -> str:
     if not name:
@@ -821,7 +821,7 @@ def update_sponsor_color(profile_id, color):
     conn.commit()
 
 # ======================================================================
-# توابع کمکی (پینگ، استخراج لینک و ...) بدون تغییر
+# توابع کمکی (پینگ، استخراج لینک و ...) - اصلاح شده برای تشخیص درست
 # ======================================================================
 def country_to_flag(code):
     if not code or len(code) != 2 or not code.isalpha():
@@ -883,9 +883,14 @@ def clean_config_url(url: str) -> str:
     return url
 
 def extract_links_from_text(text):
+    """
+    استخراج لینک‌های کانفیگ (vless, vmess, trojan, hy2, tuic, ss, socks, hysteria2, wireguard)
+    لینک‌های http/https معمولی (مانند cdn) و لینک‌های تصویر و svg نادیده گرفته می‌شوند.
+    """
     results = []
+    # فقط پروتکل‌های کانفیگ را بگیر، http/https را حذف کن
     pattern = re.compile(
-        r'(vless|vmess|trojan|hy2|tuic|ss|socks|hysteria2|wireguard|wireguard://|http|https?)://[^\s<>"\'{}()\[\]]+',
+        r'(vless|vmess|trojan|hy2|tuic|ss|socks|hysteria2|wireguard)://[^\s<>"\'{}()\[\]]+',
         re.IGNORECASE
     )
     for m in pattern.finditer(text):
@@ -894,13 +899,10 @@ def extract_links_from_text(text):
         if len(link) > 10:
             results.append(link)
 
-    if not results:
-        telegram_msg_pattern = r'https?://t\.me/([^/\s?]+)/(\d+)(?:\?[^\s]*)?(?:#.*)?'
-        for m in re.finditer(telegram_msg_pattern, text, re.IGNORECASE):
-            link = m.group(0).strip()
-            if link and "proxy" not in link.lower():
-                results.append(link)
+    # اگر لینک مستقیم پیدا نشد، لینک‌های t.me که پیام هستند را نادیده می‌گیریم (چون پروکسی نیستند)
+    # دیگر telegram_msg_pattern را اضافه نمی‌کنیم چون باعث اسکرپ اضافی می‌شود
 
+    # اگر باز هم چیزی نبود، base64 decoding را امتحان کن (فقط برای کانفیگ)
     if not results:
         text_clean = text.replace('\n', '').replace('\r', '').strip()
         if re.match(r'^[A-Za-z0-9+/=]+$', text_clean):
@@ -950,6 +952,7 @@ def normalize_proxy_url(url):
 
 def extract_proxy_links_from_text(text):
     results = []
+    # الگوی https://t.me/proxy
     telegram_proxy_pattern = r'https?://t\.me/proxy\?[^\s<>"\']+'
     for m in re.finditer(telegram_proxy_pattern, text, re.IGNORECASE):
         link = m.group().strip()
@@ -958,6 +961,7 @@ def extract_proxy_links_from_text(text):
         if link and link not in results:
             results.append(link)
 
+    # الگوی tg://proxy
     tg_proxy_pattern = r'tg://proxy\?[^\s<>"\']+'
     for m in re.finditer(tg_proxy_pattern, text, re.IGNORECASE):
         link = m.group().strip()
@@ -1236,7 +1240,7 @@ async def check_full_link_ping(url, ping_mode="iran"):
     return ping, ok, cnt
 
 # ======================================================================
-# اسکرپ (بهینه‌شده: حداکثر ۲ صفحه، بدون اسکرپ لینک‌های پیام)
+# اسکرپ (بهینه‌شده: فقط ۲ صفحه، بدون اسکرپ لینک‌های پیام)
 # ======================================================================
 _USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -1248,7 +1252,7 @@ _USER_AGENTS = [
 async def scrape_channel_paginated(profile_id, channel, max_pages=2):
     """
     فقط حداکثر max_pages صفحه اسکرپ می‌کند.
-    لینک‌های t.me/... که پروکسی نیستند نادیده گرفته می‌شوند (فقط کانفیگ و پروکسی مستقیم).
+    لینک‌های کانفیگ و پروکسی را جداگانه استخراج می‌کند.
     """
     clean_channel = normalize_channel_input(channel)
     if not clean_channel:
@@ -1313,13 +1317,14 @@ async def _scrape_single_page(url, channel):
             return [], [], []
         html_text = r.text
 
+        # استخراج لینک‌های کانفیگ (فقط پروتکل‌های مشخص)
         config_links = extract_links_from_text(html_text)
+        # استخراج لینک‌های پروکسی تلگرام
         proxy_links = extract_proxy_links_from_text(html_text)
 
-        # لینک‌های t.me که پروکسی نیستند را از config_links حذف می‌کنیم
-        config_links = [c for c in config_links if not c.startswith("https://t.me/") or "proxy" in c.lower()]
-        # پروکسی‌ها فقط https://t.me/proxy و tg://proxy
-        proxy_links = [p for p in proxy_links if p.startswith("https://t.me/proxy") or p.startswith("tg://proxy")]
+        # لینک‌های تکراری را حذف می‌کنیم
+        config_links = list(set(config_links))
+        proxy_links = list(set(proxy_links))
 
         msg_ids = re.findall(r'data-post="([^"]+)"', html_text)
         if not msg_ids:
@@ -1625,7 +1630,7 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
     return count, (text, reply_markup)
 
 # ======================================================================
-# چرخه اصلی (بهینه‌شده: بدون اسکرپ لینک‌های پیام، محدودیت صفحات)
+# چرخه اصلی (بدون تغییر)
 # ======================================================================
 async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_proxies=True, is_instant=False):
     log.info("=" * 50)

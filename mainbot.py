@@ -79,14 +79,13 @@ def get_tehran_date() -> str:
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 conn.execute("PRAGMA journal_mode=WAL")
 conn.execute("PRAGMA synchronous=NORMAL")
-c = conn.cursor()
 
 def ensure_column(table, column, col_type, default=None):
     try:
-        c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
         conn.commit()
         if default is not None:
-            c.execute(f"UPDATE {table} SET {column}=?", (default,))
+            conn.execute(f"UPDATE {table} SET {column}=?", (default,))
             conn.commit()
     except sqlite3.OperationalError:
         pass
@@ -94,7 +93,7 @@ def ensure_column(table, column, col_type, default=None):
 # ======================================================================
 # ایجاد جداول
 # ======================================================================
-c.execute("""CREATE TABLE IF NOT EXISTS seen (
+conn.execute("""CREATE TABLE IF NOT EXISTS seen (
     uuid TEXT,
     address TEXT,
     source TEXT DEFAULT '',
@@ -105,11 +104,11 @@ c.execute("""CREATE TABLE IF NOT EXISTS seen (
     backup_num INTEGER DEFAULT 0,
     UNIQUE(uuid, address, profile_id))""")
 
-c.execute("""CREATE TABLE IF NOT EXISTS cfg (
+conn.execute("""CREATE TABLE IF NOT EXISTS cfg (
     k TEXT PRIMARY KEY,
     v TEXT)""")
 
-c.execute("""CREATE TABLE IF NOT EXISTS posts (
+conn.execute("""CREATE TABLE IF NOT EXISTS posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content TEXT,
     count INTEGER,
@@ -120,12 +119,12 @@ ensure_column("seen", "profile_id", "INTEGER DEFAULT 1", 1)
 ensure_column("seen", "full_url", "TEXT DEFAULT ''", "")
 ensure_column("seen", "backup_num", "INTEGER DEFAULT 0", 0)
 
-c.execute("""CREATE TABLE IF NOT EXISTS country_cache (
+conn.execute("""CREATE TABLE IF NOT EXISTS country_cache (
     ip TEXT PRIMARY KEY,
     country TEXT,
     flag TEXT)""")
 
-c.execute("""CREATE TABLE IF NOT EXISTS sponsors (
+conn.execute("""CREATE TABLE IF NOT EXISTS sponsors (
     profile_id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
     url TEXT NOT NULL,
@@ -135,7 +134,7 @@ c.execute("""CREATE TABLE IF NOT EXISTS sponsors (
     created_at TEXT)""")
 ensure_column("sponsors", "color", "TEXT DEFAULT 'primary'", "primary")
 
-c.execute("""CREATE TABLE IF NOT EXISTS last_scrape (
+conn.execute("""CREATE TABLE IF NOT EXISTS last_scrape (
     source TEXT,
     last_scrape_time TEXT,
     profile_id INTEGER DEFAULT 1,
@@ -143,14 +142,14 @@ c.execute("""CREATE TABLE IF NOT EXISTS last_scrape (
     UNIQUE(source, profile_id))""")
 ensure_column("last_scrape", "last_message_id", "TEXT DEFAULT ''", "")
 
-c.execute("""CREATE TABLE IF NOT EXISTS processed_messages (
+conn.execute("""CREATE TABLE IF NOT EXISTS processed_messages (
     source TEXT,
     message_id INTEGER,
     profile_id INTEGER DEFAULT 1,
     PRIMARY KEY(source, message_id, profile_id))""")
 ensure_column("processed_messages", "profile_id", "INTEGER DEFAULT 1", 1)
 
-c.execute("""CREATE TABLE IF NOT EXISTS proxies_seen (
+conn.execute("""CREATE TABLE IF NOT EXISTS proxies_seen (
     proxy_url TEXT,
     first_seen TEXT,
     last_posted TEXT,
@@ -158,7 +157,7 @@ c.execute("""CREATE TABLE IF NOT EXISTS proxies_seen (
     UNIQUE(proxy_url, profile_id))""")
 ensure_column("proxies_seen", "profile_id", "INTEGER DEFAULT 1", 1)
 
-c.execute("""CREATE TABLE IF NOT EXISTS profiles (
+conn.execute("""CREATE TABLE IF NOT EXISTS profiles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     dest_name TEXT UNIQUE NOT NULL,
     sources TEXT DEFAULT '',
@@ -210,14 +209,14 @@ ensure_column("profiles", "channel_link", "TEXT DEFAULT ''", "")
 ensure_column("profiles", "ping_enabled", "INTEGER DEFAULT 1", 1)
 ensure_column("profiles", "profile_enabled", "INTEGER DEFAULT 1", 1)
 
-c.execute("""CREATE TABLE IF NOT EXISTS blacklist (
+conn.execute("""CREATE TABLE IF NOT EXISTS blacklist (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     profile_id INTEGER,
     word TEXT NOT NULL,
     created_at TEXT,
     UNIQUE(profile_id, word))""")
 
-c.execute("""CREATE TABLE IF NOT EXISTS admins (
+conn.execute("""CREATE TABLE IF NOT EXISTS admins (
     user_id INTEGER PRIMARY KEY,
     added_by INTEGER,
     added_at TEXT)""")
@@ -229,12 +228,11 @@ conn.commit()
 # تعمیر نوع ستون custom_query
 # ======================================================================
 def fix_column_types():
-    c.execute("PRAGMA table_info(profiles)")
-    cols = c.fetchall()
+    cols = conn.execute("PRAGMA table_info(profiles)").fetchall()
     for col in cols:
         if col[1] == "custom_query" and "TEXT" not in col[2].upper():
             log.warning("custom_query column is not TEXT, fixing...")
-            c.execute("""
+            conn.execute("""
                 CREATE TABLE profiles_new (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     dest_name TEXT UNIQUE NOT NULL,
@@ -268,7 +266,7 @@ def fix_column_types():
                     profile_enabled INTEGER DEFAULT 1
                 )
             """)
-            c.execute("""
+            conn.execute("""
                 INSERT INTO profiles_new
                     (id, dest_name, sources, banner_config, banner_proxy, interval_min,
                      max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num,
@@ -284,8 +282,8 @@ def fix_column_types():
                        naming_template, channel_link, ping_enabled, profile_enabled
                 FROM profiles
             """)
-            c.execute("DROP TABLE profiles")
-            c.execute("ALTER TABLE profiles_new RENAME TO profiles")
+            conn.execute("DROP TABLE profiles")
+            conn.execute("ALTER TABLE profiles_new RENAME TO profiles")
             conn.commit()
             log.info("✅ custom_query column fixed to TEXT.")
             return
@@ -294,16 +292,15 @@ def fix_column_types():
 fix_column_types()
 
 # ======================================================================
-# مهاجرت جداول
+# مهاجرت جداول (برای ایزوله‌سازی پروفایل)
 # ======================================================================
 def migrate_tables_for_profile_isolation():
     try:
-        c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='seen'")
-        row = c.fetchone()
+        row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='seen'").fetchone()
         if row and "UNIQUE(uuid, address, profile_id)" not in row[0]:
             log.warning("Migrating seen table...")
-            c.execute("ALTER TABLE seen RENAME TO seen_old")
-            c.execute("""
+            conn.execute("ALTER TABLE seen RENAME TO seen_old")
+            conn.execute("""
                 CREATE TABLE seen (
                     uuid TEXT,
                     address TEXT,
@@ -316,23 +313,22 @@ def migrate_tables_for_profile_isolation():
                     UNIQUE(uuid, address, profile_id)
                 )
             """)
-            c.execute("""
+            conn.execute("""
                 INSERT INTO seen (uuid, address, source, first_seen, last_posted, profile_id, full_url, backup_num)
                 SELECT uuid, address, source, first_seen, last_posted, profile_id, full_url, backup_num FROM seen_old
             """)
-            c.execute("DROP TABLE seen_old")
+            conn.execute("DROP TABLE seen_old")
             conn.commit()
             log.info("✅ seen table migrated.")
     except Exception as e:
         log.error(f"seen migration failed: {e}")
 
     try:
-        c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='proxies_seen'")
-        row = c.fetchone()
+        row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='proxies_seen'").fetchone()
         if row and "UNIQUE(proxy_url, profile_id)" not in row[0]:
             log.warning("Migrating proxies_seen table...")
-            c.execute("ALTER TABLE proxies_seen RENAME TO proxies_seen_old")
-            c.execute("""
+            conn.execute("ALTER TABLE proxies_seen RENAME TO proxies_seen_old")
+            conn.execute("""
                 CREATE TABLE proxies_seen (
                     proxy_url TEXT,
                     first_seen TEXT,
@@ -341,23 +337,22 @@ def migrate_tables_for_profile_isolation():
                     UNIQUE(proxy_url, profile_id)
                 )
             """)
-            c.execute("""
+            conn.execute("""
                 INSERT INTO proxies_seen (proxy_url, first_seen, last_posted, profile_id)
                 SELECT proxy_url, first_seen, last_posted, profile_id FROM proxies_seen_old
             """)
-            c.execute("DROP TABLE proxies_seen_old")
+            conn.execute("DROP TABLE proxies_seen_old")
             conn.commit()
             log.info("✅ proxies_seen table migrated.")
     except Exception as e:
         log.error(f"proxies_seen migration failed: {e}")
 
     try:
-        c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='processed_messages'")
-        row = c.fetchone()
+        row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='processed_messages'").fetchone()
         if row and "PRIMARY KEY(source, message_id, profile_id)" not in row[0]:
             log.warning("Migrating processed_messages table...")
-            c.execute("ALTER TABLE processed_messages RENAME TO processed_messages_old")
-            c.execute("""
+            conn.execute("ALTER TABLE processed_messages RENAME TO processed_messages_old")
+            conn.execute("""
                 CREATE TABLE processed_messages (
                     source TEXT,
                     message_id INTEGER,
@@ -365,23 +360,22 @@ def migrate_tables_for_profile_isolation():
                     PRIMARY KEY(source, message_id, profile_id)
                 )
             """)
-            c.execute("""
+            conn.execute("""
                 INSERT INTO processed_messages (source, message_id, profile_id)
                 SELECT source, message_id, profile_id FROM processed_messages_old
             """)
-            c.execute("DROP TABLE processed_messages_old")
+            conn.execute("DROP TABLE processed_messages_old")
             conn.commit()
             log.info("✅ processed_messages table migrated.")
     except Exception as e:
         log.error(f"processed_messages migration failed: {e}")
 
     try:
-        c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='last_scrape'")
-        row = c.fetchone()
+        row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='last_scrape'").fetchone()
         if row and "UNIQUE(source, profile_id)" not in row[0]:
             log.warning("Migrating last_scrape table...")
-            c.execute("ALTER TABLE last_scrape RENAME TO last_scrape_old")
-            c.execute("""
+            conn.execute("ALTER TABLE last_scrape RENAME TO last_scrape_old")
+            conn.execute("""
                 CREATE TABLE last_scrape (
                     source TEXT,
                     last_scrape_time TEXT,
@@ -390,11 +384,11 @@ def migrate_tables_for_profile_isolation():
                     UNIQUE(source, profile_id)
                 )
             """)
-            c.execute("""
+            conn.execute("""
                 INSERT INTO last_scrape (source, last_scrape_time, profile_id, last_message_id)
                 SELECT source, last_scrape_time, profile_id, '' FROM last_scrape_old
             """)
-            c.execute("DROP TABLE last_scrape_old")
+            conn.execute("DROP TABLE last_scrape_old")
             conn.commit()
             log.info("✅ last_scrape table migrated.")
     except Exception as e:
@@ -406,12 +400,12 @@ migrate_tables_for_profile_isolation()
 # مهاجرت از تنظیمات قدیمی
 # ======================================================================
 def migrate_old_config():
-    existing = c.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
+    existing = conn.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
     if existing > 0:
         return
 
     def old_cfg(k, default=""):
-        r = c.execute("SELECT v FROM cfg WHERE k=?", (k,)).fetchone()
+        r = conn.execute("SELECT v FROM cfg WHERE k=?", (k,)).fetchone()
         return r[0] if r else default
 
     old_dests = old_cfg("destinations", "@VaslZone")
@@ -431,7 +425,7 @@ def migrate_old_config():
         dest_list = ["@VaslZone"]
 
     for dest in dest_list:
-        c.execute("""INSERT INTO profiles
+        conn.execute("""INSERT INTO profiles
             (dest_name, sources, banner_config, banner_proxy, interval_min,
              max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num, created_at,
              show_numbers, custom_query, show_date_config, show_date_proxy, schedule_cron, last_backup_count,
@@ -477,9 +471,8 @@ def normalize_channel_input(text: str) -> str:
 # توابع پروفایل
 # ======================================================================
 def get_profiles():
-    c.execute("SELECT * FROM profiles ORDER BY id")
-    rows = c.fetchall()
-    cols = [d[0] for d in c.description]
+    rows = conn.execute("SELECT * FROM profiles ORDER BY id").fetchall()
+    cols = [d[0] for d in conn.execute("PRAGMA table_info(profiles)").fetchall()]
     profiles = []
     for row in rows:
         prof = dict(zip(cols, row))
@@ -487,11 +480,10 @@ def get_profiles():
     return profiles
 
 def get_profile(profile_id):
-    c.execute("SELECT * FROM profiles WHERE id=?", (profile_id,))
-    row = c.fetchone()
+    row = conn.execute("SELECT * FROM profiles WHERE id=?", (profile_id,)).fetchone()
     if not row:
         return None
-    cols = [d[0] for d in c.description]
+    cols = [d[0] for d in conn.execute("PRAGMA table_info(profiles)").fetchall()]
     return dict(zip(cols, row))
 
 def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
@@ -506,7 +498,7 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
         banner_config = "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
     if not banner_proxy:
         banner_proxy = "🌐 <b>Proxies</b>\n━━━━━━━━━━━━━━━━━━\n📅 {date}\n✅ {count} proxies\n━━━━━━━━━━━━━━━━━━\n\n{proxies}\n━━━━━━━━━━━━━━━━━━"
-    c.execute("""INSERT INTO profiles
+    conn.execute("""INSERT INTO profiles
         (dest_name, sources, banner_config, banner_proxy, interval_min,
          max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num, created_at,
          show_numbers, custom_query, show_date_config, show_date_proxy, schedule_cron, last_backup_count,
@@ -522,7 +514,7 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
          interval_config, interval_proxy, max_post_config, max_post_proxy,
          naming_template, channel_link, ping_enabled, profile_enabled))
     conn.commit()
-    return c.lastrowid
+    return conn.lastrowid
 
 def update_profile(profile_id, **kwargs):
     allowed = ["dest_name", "sources", "banner_config", "banner_proxy",
@@ -534,18 +526,18 @@ def update_profile(profile_id, **kwargs):
                "naming_template", "channel_link", "ping_enabled", "profile_enabled"]
     for key, value in kwargs.items():
         if key in allowed:
-            c.execute(f"UPDATE profiles SET {key}=? WHERE id=?", (value, profile_id))
+            conn.execute(f"UPDATE profiles SET {key}=? WHERE id=?", (value, profile_id))
     conn.commit()
     log.info(f"Updated profile {profile_id}: {kwargs}")
 
 def delete_profile(profile_id):
-    c.execute("DELETE FROM profiles WHERE id=?", (profile_id,))
-    c.execute("DELETE FROM sponsors WHERE profile_id=?", (profile_id,))
-    c.execute("DELETE FROM seen WHERE profile_id=?", (profile_id,))
-    c.execute("DELETE FROM proxies_seen WHERE profile_id=?", (profile_id,))
-    c.execute("DELETE FROM last_scrape WHERE profile_id=?", (profile_id,))
-    c.execute("DELETE FROM processed_messages WHERE profile_id=?", (profile_id,))
-    c.execute("DELETE FROM blacklist WHERE profile_id=?", (profile_id,))
+    conn.execute("DELETE FROM profiles WHERE id=?", (profile_id,))
+    conn.execute("DELETE FROM sponsors WHERE profile_id=?", (profile_id,))
+    conn.execute("DELETE FROM seen WHERE profile_id=?", (profile_id,))
+    conn.execute("DELETE FROM proxies_seen WHERE profile_id=?", (profile_id,))
+    conn.execute("DELETE FROM last_scrape WHERE profile_id=?", (profile_id,))
+    conn.execute("DELETE FROM processed_messages WHERE profile_id=?", (profile_id,))
+    conn.execute("DELETE FROM blacklist WHERE profile_id=?", (profile_id,))
     conn.commit()
 
 def get_profile_interval_config(profile_id):
@@ -660,8 +652,7 @@ def get_profile_custom_query(profile_id):
 
 def set_profile_custom_query(profile_id, query):
     query = query.strip()
-    c.execute("UPDATE profiles SET custom_query=? WHERE id=?", (query, profile_id))
-    conn.commit()
+    update_profile(profile_id, custom_query=query)
 
 def get_profile_show_date_config(profile_id):
     prof = get_profile(profile_id)
@@ -748,7 +739,7 @@ def get_profile_timer(profile_id):
 # توابع لیست سیاه
 # ======================================================================
 def get_blacklist(profile_id):
-    rows = c.execute("SELECT word FROM blacklist WHERE profile_id=? ORDER BY id", (profile_id,)).fetchall()
+    rows = conn.execute("SELECT word FROM blacklist WHERE profile_id=? ORDER BY id", (profile_id,)).fetchall()
     return [r[0] for r in rows]
 
 def add_blacklist_word(profile_id, word):
@@ -756,8 +747,8 @@ def add_blacklist_word(profile_id, word):
     if not word:
         return False
     try:
-        c.execute("INSERT INTO blacklist (profile_id, word, created_at) VALUES (?,?,?)",
-                  (profile_id, word, get_tehran_time()))
+        conn.execute("INSERT INTO blacklist (profile_id, word, created_at) VALUES (?,?,?)",
+                     (profile_id, word, get_tehran_time()))
         conn.commit()
         return True
     except sqlite3.IntegrityError:
@@ -765,12 +756,12 @@ def add_blacklist_word(profile_id, word):
 
 def remove_blacklist_word(profile_id, word):
     word = word.strip().lower()
-    c.execute("DELETE FROM blacklist WHERE profile_id=? AND word=?", (profile_id, word))
+    conn.execute("DELETE FROM blacklist WHERE profile_id=? AND word=?", (profile_id, word))
     conn.commit()
-    return c.rowcount > 0
+    return conn.rowcount > 0
 
 def clear_blacklist(profile_id):
-    c.execute("DELETE FROM blacklist WHERE profile_id=?", (profile_id,))
+    conn.execute("DELETE FROM blacklist WHERE profile_id=?", (profile_id,))
     conn.commit()
 
 def is_word_blacklisted(profile_id, text):
@@ -789,7 +780,7 @@ def is_word_blacklisted(profile_id, text):
 # توابع اسپانسر
 # ======================================================================
 def get_sponsor(profile_id):
-    row = c.execute(
+    row = conn.execute(
         "SELECT name, url, button_text, color, enabled FROM sponsors WHERE profile_id=?",
         (profile_id,)
     ).fetchone()
@@ -805,28 +796,28 @@ def get_sponsor(profile_id):
 
 def set_sponsor(profile_id, name, url, button_text="Advertisement", color="primary", enabled=1):
     now = get_tehran_time()
-    c.execute("DELETE FROM sponsors WHERE profile_id=?", (profile_id,))
-    c.execute(
+    conn.execute("DELETE FROM sponsors WHERE profile_id=?", (profile_id,))
+    conn.execute(
         "INSERT INTO sponsors (profile_id, name, url, button_text, enabled, color, created_at) VALUES (?,?,?,?,?,?,?)",
         (profile_id, name, url, button_text, enabled, color, now)
     )
     conn.commit()
 
 def clear_sponsor(profile_id):
-    c.execute("DELETE FROM sponsors WHERE profile_id=?", (profile_id,))
+    conn.execute("DELETE FROM sponsors WHERE profile_id=?", (profile_id,))
     conn.commit()
 
 def toggle_sponsor(profile_id):
-    row = c.execute("SELECT enabled FROM sponsors WHERE profile_id=?", (profile_id,)).fetchone()
+    row = conn.execute("SELECT enabled FROM sponsors WHERE profile_id=?", (profile_id,)).fetchone()
     if row:
         new_enabled = 0 if row[0] else 1
-        c.execute("UPDATE sponsors SET enabled=? WHERE profile_id=?", (new_enabled, profile_id))
+        conn.execute("UPDATE sponsors SET enabled=? WHERE profile_id=?", (new_enabled, profile_id))
         conn.commit()
         return new_enabled
     return None
 
 def update_sponsor_color(profile_id, color):
-    c.execute("UPDATE sponsors SET color=? WHERE profile_id=?", (color, profile_id))
+    conn.execute("UPDATE sponsors SET color=? WHERE profile_id=?", (color, profile_id))
     conn.commit()
 
 # ======================================================================
@@ -838,7 +829,7 @@ def country_to_flag(code):
     return chr(ord(code[0]) + 127397) + chr(ord(code[1]) + 127397)
 
 async def get_flag_for_ip(ip):
-    cached = c.execute(
+    cached = conn.execute(
         "SELECT country, flag FROM country_cache WHERE ip=?", (ip,)
     ).fetchone()
     if cached and len(cached[1]) > 1:
@@ -855,7 +846,7 @@ async def get_flag_for_ip(ip):
                 country = data.get("countryCode", "").upper()
                 if country:
                     flag = country_to_flag(country)
-                    c.execute(
+                    conn.execute(
                         "INSERT OR REPLACE INTO country_cache VALUES (?,?,?)",
                         (ip, country, flag))
                     conn.commit()
@@ -1010,18 +1001,18 @@ def is_already_posted(profile_id, url):
     if not uid or not host:
         uid = url[:200]
         host = ""
-    return c.execute(
+    return conn.execute(
         "SELECT 1 FROM seen WHERE uuid=? AND address=? AND profile_id=?",
         (uid, host, profile_id)).fetchone() is not None
 
 def is_proxy_posted(profile_id, proxy_url):
-    r = c.execute("SELECT 1 FROM proxies_seen WHERE proxy_url=? AND profile_id=?", (proxy_url, profile_id)).fetchone()
+    r = conn.execute("SELECT 1 FROM proxies_seen WHERE proxy_url=? AND profile_id=?", (proxy_url, profile_id)).fetchone()
     return r is not None
 
 def mark_proxy_posted(profile_id, proxy_url):
     now = get_tehran_time()
-    c.execute("INSERT OR REPLACE INTO proxies_seen (proxy_url, first_seen, last_posted, profile_id) VALUES (?,?,?,?)",
-              (proxy_url, now, now, profile_id))
+    conn.execute("INSERT OR REPLACE INTO proxies_seen (proxy_url, first_seen, last_posted, profile_id) VALUES (?,?,?,?)",
+                 (proxy_url, now, now, profile_id))
     conn.commit()
 
 def mark_as_posted(profile_id, url, source, full_url=""):
@@ -1030,38 +1021,38 @@ def mark_as_posted(profile_id, url, source, full_url=""):
         uid = url[:200]
         host = ""
     now = get_tehran_time()
-    max_bn = c.execute("SELECT COALESCE(MAX(backup_num),0) FROM seen WHERE profile_id=?", (profile_id,)).fetchone()[0]
+    max_bn = conn.execute("SELECT COALESCE(MAX(backup_num),0) FROM seen WHERE profile_id=?", (profile_id,)).fetchone()[0]
     new_bn = max_bn + 1 if full_url else 0
-    c.execute("""
+    conn.execute("""
         INSERT OR REPLACE INTO seen (uuid, address, source, first_seen, last_posted, profile_id, full_url, backup_num)
         VALUES (?,?,?,?,?,?,?,?)
     """, (uid, host, source, now, now, profile_id, full_url or url, new_bn))
     conn.commit()
 
 def is_message_processed(profile_id, source, message_id):
-    r = c.execute("SELECT 1 FROM processed_messages WHERE source=? AND message_id=? AND profile_id=?", (source, message_id, profile_id)).fetchone()
+    r = conn.execute("SELECT 1 FROM processed_messages WHERE source=? AND message_id=? AND profile_id=?", (source, message_id, profile_id)).fetchone()
     return r is not None
 
 def mark_message_processed(profile_id, source, message_id):
-    c.execute("INSERT OR REPLACE INTO processed_messages (source, message_id, profile_id) VALUES (?,?,?)",
-              (source, message_id, profile_id))
+    conn.execute("INSERT OR REPLACE INTO processed_messages (source, message_id, profile_id) VALUES (?,?,?)",
+                 (source, message_id, profile_id))
     conn.commit()
 
 def get_last_scrape_time(profile_id, source):
-    r = c.execute("SELECT last_scrape_time FROM last_scrape WHERE source=? AND profile_id=?", (source, profile_id)).fetchone()
+    r = conn.execute("SELECT last_scrape_time FROM last_scrape WHERE source=? AND profile_id=?", (source, profile_id)).fetchone()
     return r[0] if r else None
 
 def update_last_scrape_time(profile_id, source, time_str, last_message_id=""):
-    c.execute("INSERT OR REPLACE INTO last_scrape (source, last_scrape_time, profile_id, last_message_id) VALUES (?,?,?,?)",
-              (source, time_str, profile_id, last_message_id))
+    conn.execute("INSERT OR REPLACE INTO last_scrape (source, last_scrape_time, profile_id, last_message_id) VALUES (?,?,?,?)",
+                 (source, time_str, profile_id, last_message_id))
     conn.commit()
 
 def get_last_message_id(profile_id, source):
-    r = c.execute("SELECT last_message_id FROM last_scrape WHERE source=? AND profile_id=?", (source, profile_id)).fetchone()
+    r = conn.execute("SELECT last_message_id FROM last_scrape WHERE source=? AND profile_id=?", (source, profile_id)).fetchone()
     return r[0] if r else ""
 
 def update_last_message_id(profile_id, source, msg_id):
-    c.execute("UPDATE last_scrape SET last_message_id=? WHERE source=? AND profile_id=?", (msg_id, source, profile_id))
+    conn.execute("UPDATE last_scrape SET last_message_id=? WHERE source=? AND profile_id=?", (msg_id, source, profile_id))
     conn.commit()
 
 def strip_url_fragment(url):
@@ -1352,7 +1343,7 @@ async def _scrape_single_page(url, channel):
         return config_links, proxy_links, msg_ids
 
 # ======================================================================
-# اسکرپ لینک پیام تلگرام (بهبود یافته)
+# اسکرپ لینک پیام تلگرام (بدون فایل)
 # ======================================================================
 async def scrape_single_message_link(profile_id, url):
     try:
@@ -1367,24 +1358,7 @@ async def scrape_single_message_link(profile_id, url):
             configs = extract_links_from_text(html)
             proxies = extract_proxy_links_from_text(html)
 
-            file_links = re.findall(r'https?://cdn\d+\.telesco\.pe/file/[^\s<>"\']+', html)
-            for file_url in file_links:
-                try:
-                    log.info(f"📥 Downloading file from {file_url}")
-                    file_r = await cl.get(file_url, headers=headers)
-                    if file_r.status_code == 200:
-                        data = file_r.content
-                        text = decrypt_subscription(data, [])
-                        if not text:
-                            text = data.decode('utf-8', errors='ignore')
-                        new_configs = extract_links_from_text(text)
-                        new_proxies = extract_proxy_links_from_text(text)
-                        configs.extend(new_configs)
-                        proxies.extend(new_proxies)
-                        log.info(f"✅ Extracted {len(new_configs)} configs and {len(new_proxies)} proxies from file")
-                except Exception as e:
-                    log.warning(f"Error downloading file {file_url}: {e}")
-
+            # حذف بخش فایل‌ها
             configs = [c for c in configs if not c.startswith("https://t.me/") or "proxy" in c.lower()]
             proxies = [p for p in proxies if p.startswith("https://t.me/proxy") or p.startswith("tg://proxy")]
 
@@ -1395,87 +1369,8 @@ async def scrape_single_message_link(profile_id, url):
         return [], []
 
 # ======================================================================
-# فایل‌ها
+# حذف کامل توابع مربوط به فایل‌ها
 # ======================================================================
-async def fetch_files_from_channel(bot, profile_id, channel, source):
-    try:
-        chat_id = channel if channel.startswith('@') else '@' + channel
-        messages = await bot.get_chat_history(chat_id, limit=50)
-        new_links = []
-        for msg in messages:
-            if is_message_processed(profile_id, source, msg.message_id):
-                continue
-            doc = msg.document
-            if not doc:
-                continue
-            try:
-                file_obj = await doc.get_file()
-                data = await file_obj.download_as_bytearray()
-            except Exception as e:
-                log.warning(f"Download file from {source} failed: {e}")
-                continue
-
-            text = decrypt_subscription(bytes(data), [])
-            if not text:
-                text = bytes(data).decode('utf-8', errors='ignore')
-
-            links = get_v2ray_links_from_text(text)
-            if not links:
-                links = extract_links_from_text(text)
-
-            if links:
-                new_links.extend(links)
-                log.info(f"✅ Extracted {len(links)} links from file in {source} (msg {msg.message_id})")
-
-            mark_message_processed(profile_id, source, msg.message_id)
-
-        return new_links
-    except Exception as e:
-        log.warning(f"fetch_files_from_channel({channel}) error: {e}")
-        return []
-
-def decrypt_subscription(data: bytes, passwords: list):
-    protocols = ("vless://", "vmess://", "trojan://",
-                  "hy2://", "tuic://", "hysteria2://")
-    try:
-        text = data.decode('utf-8', errors='ignore')
-        if any(p in text for p in protocols):
-            return text
-    except Exception:
-        pass
-    try:
-        decoded = base64.b64decode(data + b'=' * (-len(data) % 4))
-        text = decoded.decode('utf-8', errors='ignore')
-        if any(p in text for p in protocols):
-            return text
-    except Exception:
-        pass
-    try:
-        decoded = base64.b64decode(data + b'=' * (-len(data) % 4)) \
-            .decode('utf-8', errors='ignore')
-        text = unquote(decoded)
-        if any(p in text for p in protocols):
-            return text
-    except Exception:
-        pass
-    return None
-
-def get_v2ray_links_from_text(text):
-    results = []
-    patterns = [
-        r'vless://[^\s<>"\']+',
-        r'vmess://[^\s<>"\']+',
-        r'trojan://[^\s<>"\']+',
-        r'hy2://[^\s<>"\']+',
-        r'tuic://[^\s<>"\']+',
-        r'hysteria2://[^\s<>"\']+'
-    ]
-    for pattern in patterns:
-        for m in re.finditer(pattern, text):
-            link = m.group().strip()
-            if len(link) > 10:
-                results.append(link)
-    return list(set(results))
 
 # ======================================================================
 # ارسال
@@ -1580,7 +1475,7 @@ def split_text(text, max_len=4096):
     return chunks
 
 # ======================================================================
-# ارسال کانفیگ‌ها (با دکمه‌ی کانال)
+# ارسال کانفیگ‌ها
 # ======================================================================
 async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=False, max_post_override=None):
     if not working:
@@ -1660,7 +1555,6 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
     buttons = []
     if sponsor_button:
         buttons.append(sponsor_button)
-    # دکمه‌ی لینک کانال
     if channel_link:
         if channel_link.startswith("@"):
             channel_url = f"https://t.me/{channel_link[1:]}"
@@ -1716,7 +1610,7 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
     return sent_count
 
 # ======================================================================
-# ارسال پروکسی‌ها (با دکمه‌ی کانال)
+# ارسال پروکسی‌ها
 # ======================================================================
 async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max_proxies_override=None):
     if not proxies_with_ping:
@@ -1761,7 +1655,6 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
         btn_style = sponsor["color"] if sponsor["color"] in ["primary", "success", "danger"] else "primary"
         sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"], style=btn_style)
 
-    # دکمه‌ی کانال
     channel_link = get_profile_channel_link(profile_id)
     channel_button = None
     if channel_link:
@@ -1825,7 +1718,6 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     ping_enabled = get_profile_ping_enabled(profile_id)
     log.info(f"📡 Sources: {len(sources)} | 🎯 {dest} | 🌍 Ping: {ping_mode} | Ping enabled: {ping_enabled}")
 
-    # اجرای با timeout 120 ثانیه
     try:
         return await asyncio.wait_for(
             _run_cycle_internal(bot, profile_id, sources, dest, ping_mode, ping_enabled, enable_configs, enable_proxies, is_instant),
@@ -1834,12 +1726,14 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     except asyncio.TimeoutError:
         log.error(f"⏰ Cycle for profile {profile_id} timed out after 120 seconds.")
         return 0, "timeout"
+    except asyncio.CancelledError:
+        log.error(f"🔄 Cycle for profile {profile_id} was cancelled.")
+        return 0, "cancelled"
     except Exception as e:
         log.error(f"❌ Cycle for profile {profile_id} failed: {e}\n{traceback.format_exc()}")
         return 0, f"error: {str(e)[:100]}"
 
 async def _run_cycle_internal(bot, profile_id, sources, dest, ping_mode, ping_enabled, enable_configs, enable_proxies, is_instant):
-    # این تابع همان بدنه‌ی قبلی run_cycle_for_profile است (بدون timeout)
     all_configs = []
     all_proxies = []
     seen_urls = set()
@@ -1872,26 +1766,7 @@ async def _run_cycle_internal(bot, profile_id, sources, dest, ping_mode, ping_en
                 if norm:
                     all_proxies.append(norm)
 
-    file_tasks = [fetch_files_from_channel(bot, profile_id, src, src) for src in sources]
-    file_results = await asyncio.gather(*file_tasks, return_exceptions=True)
-    for i, res in enumerate(file_results):
-        if isinstance(res, Exception):
-            log.warning(f"File fetch error for {sources[i]}: {res}")
-            continue
-        links = res
-        src = sources[i]
-        log.info(f"  {src}: {len(links)} links from files")
-        for link in links:
-            if link not in seen_urls:
-                seen_urls.add(link)
-                if "t.me/proxy" in link.lower() or link.startswith("tg://proxy"):
-                    norm = normalize_proxy_url(link)
-                    if norm:
-                        all_proxies.append(norm)
-                elif link.startswith("https://t.me/") and "proxy" not in link.lower():
-                    message_links_to_scrape.add(link)
-                else:
-                    all_configs.append((link, src))
+    # حذف بخش فایل‌ها
 
     if message_links_to_scrape:
         log.info(f"🔍 Scraping {len(message_links_to_scrape)} message links...")
@@ -2021,7 +1896,7 @@ async def _run_cycle_internal(bot, profile_id, sources, dest, ping_mode, ping_en
     return total_configs + total_proxies, result_msg
 
 # ======================================================================
-# حلقه‌های خودکار (با لاگ‌های بیشتر و مقاوم‌سازی)
+# حلقه‌های خودکار (با چک تایمر هر ۶۰ ثانیه)
 # ======================================================================
 async def profile_loop_config(bot, profile_id):
     log.info(f"🔄 Starting config loop for profile {profile_id}")
@@ -2049,14 +1924,14 @@ async def profile_loop_config(bot, profile_id):
                 await asyncio.sleep(60)
                 continue
 
+            # بررسی تایمر
             if timer_expiry:
                 try:
                     expiry = datetime.fromisoformat(timer_expiry)
                     now = datetime.now(TEHRAN_TZ)
                     if expiry > now:
-                        remaining_seconds = (expiry - now).total_seconds()
-                        log.info(f"⏳ Timer active for profile {profile_id}: {remaining_seconds/60:.1f} minutes remaining")
-                        await asyncio.sleep(min(remaining_seconds, 60))
+                        log.info(f"⏳ Timer active for profile {profile_id}, remaining {(expiry - now).total_seconds()/60:.1f} min")
+                        await asyncio.sleep(60)
                         continue
                     else:
                         clear_profile_timer(profile_id)
@@ -2067,11 +1942,13 @@ async def profile_loop_config(bot, profile_id):
                         log.info(f"✅ Timer expired for profile {profile_id}, running cycle immediately")
                         n, m = await run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_proxies=False, is_instant=(interval == 0))
                         log.info(f"[config loop] result: {n} - {m}")
+                        await asyncio.sleep(5)
                         continue
                 except Exception as e:
                     log.error(f"Error parsing timer: {e}")
                     clear_profile_timer(profile_id)
 
+            # اجرای سیکل
             if interval == 0:
                 log.info(f"⚡ INSTANT CONFIG UPDATE for profile {profile_id} ({dest_name})")
                 n, m = await run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_proxies=False, is_instant=True)
@@ -2129,9 +2006,8 @@ async def profile_loop_proxy(bot, profile_id):
                     expiry = datetime.fromisoformat(timer_expiry)
                     now = datetime.now(TEHRAN_TZ)
                     if expiry > now:
-                        remaining_seconds = (expiry - now).total_seconds()
-                        log.info(f"⏳ Timer active for profile {profile_id}: {remaining_seconds/60:.1f} minutes remaining")
-                        await asyncio.sleep(min(remaining_seconds, 60))
+                        log.info(f"⏳ Timer active for profile {profile_id}, remaining {(expiry - now).total_seconds()/60:.1f} min")
+                        await asyncio.sleep(60)
                         continue
                     else:
                         clear_profile_timer(profile_id)
@@ -2142,6 +2018,7 @@ async def profile_loop_proxy(bot, profile_id):
                         log.info(f"✅ Timer expired for profile {profile_id}, running proxy cycle immediately")
                         n, m = await run_cycle_for_profile(bot, profile_id, enable_configs=False, enable_proxies=True, is_instant=(interval == 0))
                         log.info(f"[proxy loop] result: {n} - {m}")
+                        await asyncio.sleep(5)
                         continue
                 except Exception as e:
                     log.error(f"Error parsing timer: {e}")
@@ -2192,7 +2069,7 @@ async def check_and_auto_backup(profile_id):
             backup_locks[profile_id] = lock
 
         async with lock:
-            total = c.execute(
+            total = conn.execute(
                 "SELECT COUNT(*) FROM seen WHERE profile_id=? AND full_url != '' AND backup_num > 0",
                 (profile_id,)).fetchone()[0]
             last_backup = get_profile_last_backup_count(profile_id)
@@ -2207,7 +2084,7 @@ async def check_and_auto_backup(profile_id):
                 start_num = (block - 1) * backup_interval + 1
                 end_num = block * backup_interval
 
-                rows = c.execute(
+                rows = conn.execute(
                     "SELECT full_url FROM seen WHERE profile_id=? AND full_url != '' AND backup_num BETWEEN ? AND ? ORDER BY backup_num",
                     (profile_id, start_num, end_num)
                 ).fetchall()
@@ -2319,9 +2196,9 @@ async def send_daily_report(app):
     try:
         profiles = get_profiles()
         total_profiles = len(profiles)
-        total_seen = c.execute("SELECT COUNT(*) FROM seen").fetchone()[0]
-        total_proxies = c.execute("SELECT COUNT(*) FROM proxies_seen").fetchone()[0]
-        total_blacklist = c.execute("SELECT COUNT(*) FROM blacklist").fetchone()[0]
+        total_seen = conn.execute("SELECT COUNT(*) FROM seen").fetchone()[0]
+        total_proxies = conn.execute("SELECT COUNT(*) FROM proxies_seen").fetchone()[0]
+        total_blacklist = conn.execute("SELECT COUNT(*) FROM blacklist").fetchone()[0]
 
         lines = []
         lines.append("📊 **گزارش روزانه بات**")
@@ -2493,23 +2370,23 @@ async def periodic_cleanup():
 def is_admin(user_id: int) -> bool:
     if user_id == MAIN_ADMIN_ID:
         return True
-    row = c.execute("SELECT 1 FROM admins WHERE user_id=?", (user_id,)).fetchone()
+    row = conn.execute("SELECT 1 FROM admins WHERE user_id=?", (user_id,)).fetchone()
     return row is not None
 
 def add_admin(user_id: int, added_by: int):
-    c.execute("INSERT OR IGNORE INTO admins (user_id, added_by, added_at) VALUES (?,?,?)",
-              (user_id, added_by, get_tehran_time()))
+    conn.execute("INSERT OR IGNORE INTO admins (user_id, added_by, added_at) VALUES (?,?,?)",
+                 (user_id, added_by, get_tehran_time()))
     conn.commit()
 
 def remove_admin(user_id: int):
     if user_id == MAIN_ADMIN_ID:
         return False
-    c.execute("DELETE FROM admins WHERE user_id=?", (user_id,))
+    conn.execute("DELETE FROM admins WHERE user_id=?", (user_id,))
     conn.commit()
     return True
 
 def list_admins():
-    rows = c.execute("SELECT user_id, added_by, added_at FROM admins ORDER BY added_at").fetchall()
+    rows = conn.execute("SELECT user_id, added_by, added_at FROM admins ORDER BY added_at").fetchall()
     admins = []
     for row in rows:
         admins.append({"user_id": row[0], "added_by": row[1], "added_at": row[2]})
@@ -2519,7 +2396,7 @@ def list_admins():
 # مدیریت زبان
 # ======================================================================
 def get_lang() -> str:
-    row = c.execute("SELECT v FROM cfg WHERE k='lang'").fetchone()
+    row = conn.execute("SELECT v FROM cfg WHERE k='lang'").fetchone()
     if row and row[0] in ['fa', 'en']:
         return row[0]
     return 'fa'
@@ -2527,7 +2404,7 @@ def get_lang() -> str:
 def set_lang(lang: str):
     if lang not in ['fa', 'en']:
         return
-    c.execute("INSERT OR REPLACE INTO cfg (k, v) VALUES ('lang', ?)", (lang,))
+    conn.execute("INSERT OR REPLACE INTO cfg (k, v) VALUES ('lang', ?)", (lang,))
     conn.commit()
 
 # ======================================================================
@@ -2630,7 +2507,7 @@ T = {
         "profile_added": "✅ پروفایل '{name}' ساخته شد.",
         "profile_deleted": "❌ پروفایل حذف شد.",
         "profile_not_found": "❌ پروفایل یافت نشد.",
-        "manual_send_prompt": "📤 لطفاً پیام (متن یا فایل) حاوی لینک‌های کانفیگ/پروکسی را ارسال کنید.\n\n⏳ بات به‌طور خودکار تشخیص داده و با بنر مناسب ارسال می‌کند.\n\n⚠️ **توجه:** در حالت دستی، تست پینگ انجام نمی‌شود و همه لینک‌ها حتی اگر قبلاً پست شده باشند، دوباره ارسال می‌شوند.",
+        "manual_send_prompt": "📤 لطفاً پیام (متن) حاوی لینک‌های کانفیگ/پروکسی را ارسال کنید.\n\n⏳ بات به‌طور خودکار تشخیص داده و با بنر مناسب ارسال می‌کند.\n\n⚠️ **توجه:** در حالت دستی، تست پینگ انجام نمی‌شود و همه لینک‌ها حتی اگر قبلاً پست شده باشند، دوباره ارسال می‌شوند.",
         "manual_send_cancel": "❌ ارسال دستی لغو شد.",
         "manual_send_processing": "⏳ در حال پردازش...",
         "manual_send_done": "✅ ارسال دستی کامل شد.",
@@ -2820,7 +2697,7 @@ T = {
         "profile_added": "✅ Profile '{name}' created.",
         "profile_deleted": "❌ Profile deleted.",
         "profile_not_found": "❌ Profile not found.",
-        "manual_send_prompt": "📤 Please send a message (text or file) containing config/proxy links.\n\n⏳ The bot will automatically detect and send with appropriate banner.\n\n⚠️ **Note:** In manual mode, ping test is skipped and all links are posted even if already posted.",
+        "manual_send_prompt": "📤 Please send a message (text) containing config/proxy links.\n\n⏳ The bot will automatically detect and send with appropriate banner.\n\n⚠️ **Note:** In manual mode, ping test is skipped and all links are posted even if already posted.",
         "manual_send_cancel": "❌ Manual send cancelled.",
         "manual_send_processing": "⏳ Processing...",
         "manual_send_done": "✅ Manual send complete.",
@@ -2929,7 +2806,7 @@ def msg(key, **kwargs):
     return text
 
 # ======================================================================
-# کیبوردها
+# کیبوردها (همان‌های قبل)
 # ======================================================================
 def main_menu_kb():
     return InlineKeyboardMarkup([
@@ -3306,8 +3183,8 @@ async def cmd_diag(update: Update, context):
         ping_enabled = "✅" if get_profile_ping_enabled(prof['id']) else "❌"
         msg_lines.append(f"  • {prof['dest_name']} (ID:{prof['id']}) - {len(get_profile_sources(prof['id']))} منبع, بازه کانفیگ:{prof.get('interval_config',5)}m, بازه پروکسی:{prof.get('interval_proxy',5)}m, پینگ {prof['ping_mode']}, پینگ فعال:{ping_enabled}, تایمر: {timer_status}, وضعیت:{enabled_status}")
     msg_lines.append("")
-    seen_cfg = c.execute("SELECT COUNT(*) FROM seen").fetchone()[0]
-    seen_prx = c.execute("SELECT COUNT(*) FROM proxies_seen").fetchone()[0]
+    seen_cfg = conn.execute("SELECT COUNT(*) FROM seen").fetchone()[0]
+    seen_prx = conn.execute("SELECT COUNT(*) FROM proxies_seen").fetchone()[0]
     msg_lines.append("💾 **دیتابیس:**")
     msg_lines.append(f"• کانفیگ‌های دیده‌شده: {seen_cfg}")
     msg_lines.append(f"• پروکسی‌های دیده‌شده: {seen_prx}")
@@ -3315,7 +3192,7 @@ async def cmd_diag(update: Update, context):
     await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
 
 # ======================================================================
-# کالبک (با مدیریت خطای Query is too old)
+# کالبک (بسیار طولانی، همان‌های قبل با تغییرات جزئی)
 # ======================================================================
 async def on_callback(u, ctx):
     q = u.callback_query
@@ -3893,8 +3770,8 @@ async def on_callback(u, ctx):
                     except:
                         pass
                     return
-                n_seen = c.execute("SELECT COUNT(*) FROM seen WHERE profile_id=?", (profile_id,)).fetchone()[0]
-                n_sp = c.execute("SELECT COUNT(*) FROM sponsors WHERE profile_id=?", (profile_id,)).fetchone()[0]
+                n_seen = conn.execute("SELECT COUNT(*) FROM seen WHERE profile_id=?", (profile_id,)).fetchone()[0]
+                n_sp = conn.execute("SELECT COUNT(*) FROM sponsors WHERE profile_id=?", (profile_id,)).fetchone()[0]
                 next_n = get_profile_last_num(profile_id) + 1
                 dest = get_profile_dest(profile_id)
                 txt = f"📊 مقصد: {dest}\nمنابع: {len(get_profile_sources(profile_id))}\nاسپانسر: {n_sp}\nبعدی: #{next_n}\nحداکثر کانفیگ: {get_profile_max_post_config(profile_id)}\nحداکثر پروکسی: {get_profile_max_post_proxy(profile_id)}"
@@ -4309,14 +4186,14 @@ async def on_callback(u, ctx):
                     except:
                         pass
                     return
-                c.execute("DELETE FROM seen WHERE profile_id=?", (profile_id,))
-                c.execute("DELETE FROM posts")
-                c.execute("DELETE FROM country_cache")
-                c.execute("DELETE FROM last_scrape WHERE profile_id=?", (profile_id,))
-                c.execute("DELETE FROM processed_messages WHERE profile_id=?", (profile_id,))
-                c.execute("DELETE FROM proxies_seen WHERE profile_id=?", (profile_id,))
-                c.execute("DELETE FROM sponsors WHERE profile_id=?", (profile_id,))
-                c.execute("DELETE FROM blacklist WHERE profile_id=?", (profile_id,))
+                conn.execute("DELETE FROM seen WHERE profile_id=?", (profile_id,))
+                conn.execute("DELETE FROM posts")
+                conn.execute("DELETE FROM country_cache")
+                conn.execute("DELETE FROM last_scrape WHERE profile_id=?", (profile_id,))
+                conn.execute("DELETE FROM processed_messages WHERE profile_id=?", (profile_id,))
+                conn.execute("DELETE FROM proxies_seen WHERE profile_id=?", (profile_id,))
+                conn.execute("DELETE FROM sponsors WHERE profile_id=?", (profile_id,))
+                conn.execute("DELETE FROM blacklist WHERE profile_id=?", (profile_id,))
                 set_profile_last_num(profile_id, 0)
                 conn.commit()
                 try:
@@ -5760,42 +5637,18 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-async def on_document(u, ctx):
-    if not is_admin(u.effective_user.id):
-        return
-    a = ctx.user_data.get("action")
-    if not a:
-        return
-
-    if a.startswith("manual_"):
-        profile_id = int(a.split("_")[1])
-        await process_manual_text(u, u.message, profile_id, is_document=True)
-        del ctx.user_data["action"]
-        return
-
 # ======================================================================
-# ارسال دستی
+# ارسال دستی (فقط متن)
 # ======================================================================
 async def process_manual_text(u, message, profile_id, is_document=False):
+    # در صورت دریافت فایل، به کاربر اخطار دهید و لغو کنید
+    if is_document:
+        await message.reply_text("❌ ارسال فایل پشتیبانی نمی‌شود. لطفاً فقط متن ارسال کنید.")
+        return
+
     p = await message.reply_text(msg("manual_send_processing"))
     try:
-        if is_document:
-            doc = message.document
-            if doc.file_size and doc.file_size > 3 * 1024 * 1024:
-                return await p.edit_text(">3MB")
-            file = await doc.get_file()
-            data = await file.download_as_bytearray()
-            text = data.decode('utf-8', errors='ignore')
-            if re.match(r'^[A-Za-z0-9+/=\s]+$', text):
-                try:
-                    decoded = base64.b64decode(text.strip(), validate=True).decode('utf-8', errors='ignore')
-                    if decoded:
-                        text = decoded
-                except:
-                    pass
-        else:
-            text = message.text or ""
-
+        text = message.text or ""
         config_links = extract_links_from_text(text)
         proxy_links = extract_proxy_links_from_text(text)
 
@@ -5812,15 +5665,14 @@ async def process_manual_text(u, message, profile_id, is_document=False):
         if not config_links and not proxy_links:
             return await p.edit_text("❌ هیچ لینک معتبری یافت نشد.")
 
-        new_configs = [link for link in config_links if not is_already_posted(profile_id, link)]
+        # در حالت دستی، همه‌ی لینک‌ها را بدون در نظر گرفتن تکراری بودن ارسال می‌کنیم
+        # اما برای جلوگیری از ارسال تکراری، بهتر است که پس از ارسال، آن‌ها را مارک کنیم
+        new_configs = config_links  # در حالت دستی همه را ارسال می‌کنیم
         new_proxies = []
         for pl in proxy_links:
             norm = normalize_proxy_url(pl)
-            if norm and not is_proxy_posted(profile_id, norm):
+            if norm:
                 new_proxies.append(norm)
-
-        if not new_configs and not new_proxies:
-            return await p.edit_text("❌ هیچ لینک جدیدی برای ارسال وجود ندارد.")
 
         max_post_cfg = get_profile_max_post_config(profile_id)
         max_post_prx = get_profile_max_post_proxy(profile_id)
@@ -5836,6 +5688,7 @@ async def process_manual_text(u, message, profile_id, is_document=False):
         total_proxies_sent = 0
 
         for chunk in config_chunks:
+            # در حالت دستی پینگ انجام نمی‌شود، همه را بدون پینگ ارسال می‌کنیم
             working = [(url, 0, 0) for url in chunk]
             sent = await post_configs(u.get_bot(), profile_id, working, source_for_seen="manual", is_instant=False, max_post_override=len(chunk))
             if sent > 0:
@@ -5865,20 +5718,6 @@ async def process_manual_text(u, message, profile_id, is_document=False):
         log.error(f"manual send error: {e}")
         await p.edit_text(f"❌ {str(e)[:200]}")
 
-async def post_working_configs(bot, profile_id, working, proxies_with_ping, force=False, skip_duplicate=False):
-    total_configs = 0
-    total_proxies = 0
-    if working:
-        total_configs = await post_configs(bot, profile_id, working, source_for_seen="manual", is_instant=False)
-    if proxies_with_ping:
-        cnt, payload = await post_proxies(bot, profile_id, proxies_with_ping)
-        if cnt > 0 and payload:
-            text, reply_markup = payload
-            sent = await send_to_destination(bot, profile_id, text, reply_markup)
-            if sent:
-                total_proxies = cnt
-    return total_configs, total_proxies
-
 async def export_backup(update, context, profile_id, backup_type, count=None):
     try:
         profile = get_profile(profile_id)
@@ -5886,9 +5725,9 @@ async def export_backup(update, context, profile_id, backup_type, count=None):
 
         if backup_type == "configs":
             if count is None or count == -1:
-                rows = c.execute("SELECT full_url FROM seen WHERE profile_id=? AND full_url != '' ORDER BY last_posted DESC", (profile_id,)).fetchall()
+                rows = conn.execute("SELECT full_url FROM seen WHERE profile_id=? AND full_url != '' ORDER BY last_posted DESC", (profile_id,)).fetchall()
             else:
-                rows = c.execute("SELECT full_url FROM seen WHERE profile_id=? AND full_url != '' ORDER BY last_posted DESC LIMIT ?", (profile_id, count)).fetchall()
+                rows = conn.execute("SELECT full_url FROM seen WHERE profile_id=? AND full_url != '' ORDER BY last_posted DESC LIMIT ?", (profile_id, count)).fetchall()
             links = [row[0] for row in rows if row[0]]
             if not links:
                 await update.message.reply_text("❌ هیچ کانفیگی برای بک‌آپ یافت نشد.")
@@ -5904,9 +5743,9 @@ async def export_backup(update, context, profile_id, backup_type, count=None):
 
         elif backup_type == "proxies":
             if count is None or count == -1:
-                rows = c.execute("SELECT proxy_url FROM proxies_seen WHERE profile_id=? ORDER BY last_posted DESC", (profile_id,)).fetchall()
+                rows = conn.execute("SELECT proxy_url FROM proxies_seen WHERE profile_id=? ORDER BY last_posted DESC", (profile_id,)).fetchall()
             else:
-                rows = c.execute("SELECT proxy_url FROM proxies_seen WHERE profile_id=? ORDER BY last_posted DESC LIMIT ?", (profile_id, count)).fetchall()
+                rows = conn.execute("SELECT proxy_url FROM proxies_seen WHERE profile_id=? ORDER BY last_posted DESC LIMIT ?", (profile_id, count)).fetchall()
             links = [row[0] for row in rows if row[0]]
             if not links:
                 await update.message.reply_text("❌ هیچ پروکسی برای بک‌آپ یافت نشد.")
@@ -5993,7 +5832,7 @@ def main():
     app.add_handler(CommandHandler("balance", cmd_balance))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CallbackQueryHandler(on_callback))
-    app.add_handler(MessageHandler(filters.Document.ALL, on_document))
+    # حذف هندلر فایل‌ها (Document)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     log.info("✅ Bot is ready, polling...")
     app.run_polling()

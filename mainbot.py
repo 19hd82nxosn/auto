@@ -541,7 +541,6 @@ def delete_profile(profile_id):
     c.execute("DELETE FROM blacklist WHERE profile_id=?", (profile_id,))
     conn.commit()
 
-# توابع دسترسی به تنظیمات جدید
 def get_profile_interval_config(profile_id):
     prof = get_profile(profile_id)
     return prof.get("interval_config", 5) if prof else 5
@@ -570,7 +569,6 @@ def get_profile_max_post_proxy(profile_id):
 def set_profile_max_post_proxy(profile_id, val):
     update_profile(profile_id, max_post_proxy=val)
 
-# سایر توابع کمکی
 def get_profile_sources(profile_id):
     prof = get_profile(profile_id)
     if not prof:
@@ -599,24 +597,6 @@ def get_profile_banner_config(profile_id):
 def get_profile_banner_proxy(profile_id):
     prof = get_profile(profile_id)
     return prof["banner_proxy"] if prof else ""
-
-def get_profile_interval(profile_id):
-    return get_profile_interval_config(profile_id)
-
-def set_profile_interval(profile_id, val):
-    set_profile_interval_config(profile_id, val)
-
-def get_profile_max_post(profile_id):
-    return get_profile_max_post_config(profile_id)
-
-def set_profile_max_post(profile_id, val):
-    set_profile_max_post_config(profile_id, val)
-
-def get_profile_max_proxies(profile_id):
-    return get_profile_max_post_proxy(profile_id)
-
-def set_profile_max_proxies(profile_id, val):
-    set_profile_max_post_proxy(profile_id, val)
 
 def get_profile_last_num(profile_id):
     prof = get_profile(profile_id)
@@ -706,7 +686,6 @@ def get_profile_backup_interval(profile_id):
 def set_profile_backup_interval(profile_id, interval):
     update_profile(profile_id, backup_interval=interval)
 
-# ===== توابع جدید برای naming و channel_id =====
 def get_profile_naming_template(profile_id):
     prof = get_profile(profile_id)
     return prof.get("naming_template", "{Flag} | ⚡️Telegram = {CHANNEL_ID}") if prof else "{Flag} | ⚡️Telegram = {CHANNEL_ID}"
@@ -721,7 +700,6 @@ def get_profile_channel_id(profile_id):
 def set_profile_channel_id(profile_id, channel_id):
     update_profile(profile_id, channel_id=channel_id)
 
-# ===== توابع تایمر =====
 def set_profile_timer(profile_id, minutes):
     if minutes <= 0:
         clear_profile_timer(profile_id)
@@ -903,7 +881,6 @@ def clean_config_url(url: str) -> str:
 
 def extract_links_from_text(text):
     results = []
-    # اضافه کردن hysteria2 و hy2
     pattern = re.compile(r'(vless|vmess|trojan|hy2|tuic|ss|socks|hysteria2)://[^\s<>"\'{}()\[\]]+', re.IGNORECASE)
     for m in pattern.finditer(text):
         link = m.group(0).strip()
@@ -1139,10 +1116,6 @@ def add_custom_query_to_url(url, custom_query, protocol):
         new_base += '#' + fragment
     return new_base
 
-def append_channel_and_flag_encoded(url, channel, flag, custom_query=""):
-    # این تابع دیگر استفاده نمی‌شود، اما برای سازگاری نگه داشته شده
-    return url
-
 # ======================================================================
 # پینگ
 # ======================================================================
@@ -1278,7 +1251,7 @@ async def scrape_channel_paginated(profile_id, channel):
     all_configs = []
     all_proxies = []
     current_url = base_url
-    max_pages = 10
+    max_pages = 15
     page_count = 0
 
     while page_count < max_pages:
@@ -1334,7 +1307,7 @@ async def _scrape_single_page(profile_id, url, channel):
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
     }
-    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as cl:
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as cl:
         r = await cl.get(url, headers=headers)
         if r.status_code == 429:
             log.warning(f"Rate limit for {channel}, waiting 30s")
@@ -1573,6 +1546,9 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
     banner_template = get_profile_banner_config(profile_id) or "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
     naming_template = get_profile_naming_template(profile_id)
     channel_id = get_profile_channel_id(profile_id)
+    # اگر channel_id خالی باشد، از نام پروفایل بدون @ استفاده کن
+    if not channel_id:
+        channel_id = dest.replace("@", "") if dest else ""
 
     sponsor = get_sponsor(profile_id)
     sponsor_button = None
@@ -1596,7 +1572,6 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
         base_url = strip_url_fragment(url)
         modified_url = base_url + "#" + encoded_fragment
 
-        # اگر custom_query وجود دارد و پروتکل vmess نیست، آن را اعمال کن
         protocol = url.split('://')[0].lower() if '://' in url else ''
         if custom_query and protocol != 'vmess':
             modified_url = add_custom_query_to_url(modified_url, custom_query, protocol)
@@ -1751,6 +1726,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     all_proxies = []
     seen_urls = set()
 
+    # اسکرپ همه منابع به صورت موازی
     async def scrape_one(src):
         config_links, proxy_links = await scrape_channel_with_retry(profile_id, src)
         return src, config_links, proxy_links
@@ -1775,6 +1751,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                 if norm:
                     all_proxies.append(norm)
 
+    # فایل‌ها
     file_tasks = [fetch_files_from_channel(bot, profile_id, src, src) for src in sources]
     file_results = await asyncio.gather(*file_tasks, return_exceptions=True)
     for i, res in enumerate(file_results):
@@ -2581,7 +2558,7 @@ T = {
         "naming_template_prompt": "🏷️ قالب نام‌گذاری را وارد کنید.\n\nمتغیرهای قابل استفاده:\n- `{Flag}` : پرچم کشور\n- `{CHANNEL_ID}` : شناسه کانال (تنظیم شده در پروفایل)\n- `{COUNT}` : شماره کانفیگ\n\nمثال:\n`{Flag} | ⚡️Telegram = {CHANNEL_ID}`\n\nبرای استفاده از شمارنده، حتماً `{COUNT}` را در قالب قرار دهید.",
         "naming_template_set": "✅ قالب نام‌گذاری تنظیم شد: {template}",
         "btn_set_channel_id": "🆔 شناسه کانال",
-        "channel_id_prompt": "🆔 شناسه کانال را وارد کنید (مثلاً `MyChannel`):\n\nاین مقدار در قالب نام‌گذاری به جای `{CHANNEL_ID}` قرار می‌گیرد.",
+        "channel_id_prompt": "🆔 شناسه کانال را وارد کنید (مثلاً `MyChannel`):\n\nاین مقدار در قالب نام‌گذاری به جای `{CHANNEL_ID}` قرار می‌گیرد.\nاگر خالی بگذارید، از نام پروفایل استفاده می‌شود.",
         "channel_id_set": "✅ شناسه کانال تنظیم شد: {id}",
     },
     "en": {
@@ -2765,7 +2742,7 @@ T = {
         "naming_template_prompt": "🏷️ Enter naming template.\n\nAvailable variables:\n- `{Flag}` : Country flag\n- `{CHANNEL_ID}` : Channel ID (set in profile)\n- `{COUNT}` : Config number\n\nExample:\n`{Flag} | ⚡️Telegram = {CHANNEL_ID}`\n\nMake sure to include `{COUNT}` if you want numbering.",
         "naming_template_set": "✅ Naming template set: {template}",
         "btn_set_channel_id": "🆔 Channel ID",
-        "channel_id_prompt": "🆔 Enter channel ID (e.g. `MyChannel`):\n\nThis value replaces `{CHANNEL_ID}` in the naming template.",
+        "channel_id_prompt": "🆔 Enter channel ID (e.g. `MyChannel`):\n\nThis value replaces `{CHANNEL_ID}` in the naming template.\nIf left empty, profile name will be used.",
         "channel_id_set": "✅ Channel ID set: {id}",
     }
 }
@@ -3123,7 +3100,6 @@ async def on_callback(u, ctx):
         if d == "dummy":
             return
 
-        # ===== منوی اصلی =====
         if d == "back_home":
             profiles = get_profiles()
             total = len(profiles)
@@ -3158,7 +3134,6 @@ async def on_callback(u, ctx):
             await q.edit_message_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="back_home", style="primary")]]))
             return
 
-        # ===== زبان =====
         if d == "toggle_lang":
             current = get_lang()
             new_lang = "en" if current == "fa" else "fa"
@@ -3170,7 +3145,6 @@ async def on_callback(u, ctx):
             await q.edit_message_text(txt, parse_mode="HTML", reply_markup=general_settings_kb())
             return
 
-        # ===== مدیریت ادمین‌ها =====
         if d == "manage_admins":
             admins = list_admins()
             main = MAIN_ADMIN_ID
@@ -3199,7 +3173,6 @@ async def on_callback(u, ctx):
             await q.edit_message_text("❌ شناسه ادمین مورد نظر برای حذف را وارد کنید:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="manage_admins", style="primary")]]))
             return
 
-        # ===== بک‌آپ دیتابیس =====
         if d == "backup_db":
             try:
                 await q.edit_message_text("⏳ در حال تهیه بک‌آپ...")
@@ -3215,7 +3188,6 @@ async def on_callback(u, ctx):
                 await q.message.edit_text("❌ " + msg("backup_failed"))
             return
 
-        # ===== پروفایل‌ها =====
         if d == "prof_add":
             ctx.user_data["action"] = "prof_add"
             await q.edit_message_text(msg("profile_add_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="profiles_list", style="primary")]]))
@@ -3238,7 +3210,6 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # ===== اسپانسر =====
         if d.startswith("sp_menu_"):
             parts = d.split("_")
             if len(parts) >= 3:
@@ -3414,7 +3385,6 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # ===== مدیریت منابع =====
         if d.startswith("src_list_"):
             parts = d.split("_")
             if len(parts) >= 3:
@@ -3472,7 +3442,6 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # ===== مقصد =====
         if d.startswith("dl_"):
             parts = d.split("_")
             if len(parts) >= 2:
@@ -3519,7 +3488,6 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # ===== سایر تنظیمات =====
         if d.startswith("ac_"):
             parts = d.split("_")
             if len(parts) >= 2:
@@ -3580,7 +3548,6 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # دکمه‌های interval و max
         if d.startswith("set_cfg_interval_"):
             parts = d.split("_")
             if len(parts) >= 4:
@@ -3982,7 +3949,6 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # ===== بخش‌های جدید: بک‌آپ export، تایمر، لاگ، تنظیم بازه بک‌آپ، کرون، لیست سیاه =====
         if d.startswith("backup_export_menu_"):
             parts = d.split("_")
             if len(parts) >= 4:
@@ -4290,7 +4256,6 @@ async def on_callback(u, ctx):
                 await q.message.edit_text("❌ " + msg("backup_failed"))
             return
 
-        # ===== حذف پروفایل =====
         if d.startswith("delprof_"):
             parts = d.split("_")
             if len(parts) >= 2:
@@ -4428,7 +4393,6 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # در انتها اگر هیچکدام نبود، به لیست پروفایل‌ها برگردیم.
         await show_profiles_list(q.message)
 
     except Exception as e:
@@ -4520,7 +4484,6 @@ async def on_text(u, ctx):
     if not is_admin(u.effective_user.id):
         return
 
-    # مدیریت تایمر سفارشی
     if ctx.user_data.get("action", "").startswith("timer_custom_"):
         profile_id = int(ctx.user_data["action"].split("_")[2])
         try:
@@ -4536,7 +4499,6 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    # بک‌آپ export custom
     if ctx.user_data.get("backup_export_custom"):
         data = ctx.user_data["backup_export_custom"]
         profile_id = data["profile_id"]
@@ -4553,7 +4515,6 @@ async def on_text(u, ctx):
         await u.message.reply_text("✅ بک‌آپ ارسال شد.")
         return
 
-    # ویرایش اسپانسر
     if ctx.user_data.get("sponsor_edit_field"):
         field = ctx.user_data["sponsor_edit_field"]
         profile_id = ctx.user_data.get("sponsor_edit_profile_id")
@@ -4653,7 +4614,6 @@ async def on_text(u, ctx):
 
     t = u.message.text.strip()
 
-    # تنظیم بازه بک‌آپ
     if a.startswith("setbackupinterval_"):
         profile_id = int(a.split("_")[1])
         try:
@@ -4668,7 +4628,6 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    # لیست سیاه
     if a.startswith("bl_add_"):
         profile_id = int(a.split("_")[2])
         if not t:
@@ -4693,7 +4652,6 @@ async def on_text(u, ctx):
         await u.message.reply_text(txt, parse_mode="HTML", reply_markup=blacklist_kb(profile_id))
         return
 
-    # کرون
     if a.startswith("setcron_"):
         profile_id = int(a.split("_")[1])
         cron = t.strip()
@@ -4711,7 +4669,6 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    # مدیریت ادمین‌ها - add
     if a == "add_admin":
         try:
             new_id = int(t.strip())
@@ -4730,7 +4687,6 @@ async def on_text(u, ctx):
         await u.message.reply_text("📋 لیست ادمین‌ها:", reply_markup=manage_admins_kb())
         return
 
-    # مدیریت ادمین‌ها - remove
     if a == "remove_admin":
         try:
             rem_id = int(t.strip())
@@ -4751,7 +4707,6 @@ async def on_text(u, ctx):
         await u.message.reply_text("📋 لیست ادمین‌ها:", reply_markup=manage_admins_kb())
         return
 
-    # افزودن پروفایل
     if a == "prof_add":
         dest_name = t if t else None
         if not dest_name:
@@ -4776,7 +4731,6 @@ async def on_text(u, ctx):
         await show_profiles_list(u.message)
         return
 
-    # افزودن منبع
     if a.startswith("sa_"):
         profile_id = int(a.split("_")[1])
         if not t:
@@ -4806,7 +4760,6 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    # تنظیم مقصد
     if a.startswith("da_"):
         profile_id = int(a.split("_")[1])
         dest = t if t else None
@@ -4824,7 +4777,6 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    # تنظیم نام
     if a.startswith("ac_"):
         profile_id = int(a.split("_")[1])
         name = t if t else ""
@@ -4836,7 +4788,6 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    # بنر کانفیگ
     if a.startswith("ab_config_"):
         profile_id = int(a.split("_")[2])
         if not t:
@@ -4851,7 +4802,6 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    # بنر پروکسی
     if a.startswith("ab_proxy_"):
         profile_id = int(a.split("_")[2])
         if not t:
@@ -4866,7 +4816,6 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    # تنظیم بازه کانفیگ
     if a.startswith("set_cfg_interval_"):
         profile_id = int(a.split("_")[3])
         if not t:
@@ -4887,7 +4836,6 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    # تنظیم بازه پروکسی
     if a.startswith("set_prx_interval_"):
         profile_id = int(a.split("_")[3])
         if not t:
@@ -4908,7 +4856,6 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    # تنظیم تعداد کانفیگ
     if a.startswith("set_cfg_max_"):
         profile_id = int(a.split("_")[3])
         if not t:
@@ -4929,7 +4876,6 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    # تنظیم تعداد پروکسی
     if a.startswith("set_prx_max_"):
         profile_id = int(a.split("_")[3])
         if not t:
@@ -4950,14 +4896,12 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    # ارسال دستی
     if a.startswith("manual_"):
         profile_id = int(a.split("_")[1])
         await process_manual_text(u, u.message, profile_id, is_document=False)
         del ctx.user_data["action"]
         return
 
-    # کوئری سفارشی
     if a.startswith("setquery_"):
         profile_id = int(a.split("_")[1])
         query = t if t else ""
@@ -4974,14 +4918,12 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    # تنظیم قالب نام‌گذاری
     if a.startswith("set_naming_"):
         profile_id = int(a.split("_")[2])
         template = t.strip()
         if not template:
             await u.message.reply_text("❌ قالب خالی است.")
             return
-        # اعتبارسنجی ساده: حداقل باید {Flag} یا {CHANNEL_ID} یا {COUNT} داشته باشد
         if "{Flag}" not in template and "{CHANNEL_ID}" not in template and "{COUNT}" not in template:
             await u.message.reply_text("❌ قالب باید حداقل یکی از متغیرهای {Flag}، {CHANNEL_ID} یا {COUNT} را داشته باشد.")
             return
@@ -4991,7 +4933,6 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    # تنظیم شناسه کانال
     if a.startswith("set_channel_id_"):
         profile_id = int(a.split("_")[2])
         channel_id = t.strip()
@@ -5053,7 +4994,6 @@ async def process_manual_text(u, message, profile_id, is_document=False):
         if not config_links and not proxy_links:
             return await p.edit_text("❌ هیچ لینک معتبری یافت نشد.")
 
-        # فیلتر تکراری
         new_configs = [link for link in config_links if not is_already_posted(profile_id, link)]
         new_proxies = []
         for pl in proxy_links:
@@ -5064,15 +5004,12 @@ async def process_manual_text(u, message, profile_id, is_document=False):
         if not new_configs and not new_proxies:
             return await p.edit_text("❌ هیچ لینک جدیدی برای ارسال وجود ندارد.")
 
-        # گرفتن max_post_config و max_post_proxy
         max_post_cfg = get_profile_max_post_config(profile_id)
         max_post_prx = get_profile_max_post_proxy(profile_id)
 
-        # تقسیم کانفیگ‌ها به چند بخش
         config_chunks = [new_configs[i:i+max_post_cfg] for i in range(0, len(new_configs), max_post_cfg)]
         proxy_chunks = []
         if new_proxies:
-            # برای پروکسی‌ها هم به همین ترتیب
             valid_proxies = [p for p in new_proxies if "t.me/proxy" in p.lower()]
             if valid_proxies:
                 proxy_chunks = [valid_proxies[i:i+max_post_prx] for i in range(0, len(valid_proxies), max_post_prx)]
@@ -5080,15 +5017,13 @@ async def process_manual_text(u, message, profile_id, is_document=False):
         total_configs_sent = 0
         total_proxies_sent = 0
 
-        # ارسال هر تکه کانفیگ
         for chunk in config_chunks:
             working = [(url, 0, 0) for url in chunk]
             sent = await post_configs(u.get_bot(), profile_id, working, source_for_seen="manual", is_instant=False, max_post_override=len(chunk))
             if sent > 0:
                 total_configs_sent += sent
-            await asyncio.sleep(1)  # کمی تاخیر بین ارسال‌ها
+            await asyncio.sleep(1)
 
-        # ارسال هر تکه پروکسی
         for chunk in proxy_chunks:
             proxy_with_ping = []
             for proxy_url in chunk:

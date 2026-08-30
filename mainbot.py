@@ -922,6 +922,16 @@ def extract_links_from_text(text):
                     if len(clean) > len(proto) + 5:
                         results.append(clean)
 
+    # اگر لینک مستقیم پیدا نشد، دنبال لینک‌های تلگرامی (پیام) بگرد
+    if not results:
+        # لینک‌های t.me که پروکسی نیستند
+        telegram_msg_pattern = r'https?://t\.me/([^/\s?]+)/(\d+)(?:\?[^\s]*)?(?:#.*)?'
+        for m in re.finditer(telegram_msg_pattern, text, re.IGNORECASE):
+            link = m.group(0).strip()
+            if link and "proxy" not in link.lower():
+                results.append(link)
+
+    # اگر باز هم چیزی نبود، base64 decoding را امتحان کن
     if not results:
         text_clean = text.replace('\n', '').replace('\r', '').strip()
         if re.match(r'^[A-Za-z0-9+/=]+$', text_clean):
@@ -1274,7 +1284,7 @@ async def scrape_channel_paginated(profile_id, channel):
     all_configs = []
     all_proxies = []
     current_url = base_url
-    max_pages = 20  # افزایش برای اطمینان
+    max_pages = 20
     page_count = 0
     log.info(f"🔍 Starting scrape for {clean_channel}, last_seen_msg_id={last_seen_msg_id}")
 
@@ -1286,10 +1296,8 @@ async def scrape_channel_paginated(profile_id, channel):
             log.info(f"⚠️ No messages found on page {page_count} for {clean_channel}")
             break
 
-        # اگر به پیام آخر رسیدیم، متوقف شو
         if last_seen_msg_id and last_seen_msg_id in msg_ids:
             log.info(f"✅ Reached last seen message {last_seen_msg_id} for {clean_channel}. Stopping pagination.")
-            # لینک‌های این صفحه را هم اضافه می‌کنیم (قبل از پیام آخر)
             all_configs.extend(config_links)
             all_proxies.extend(proxy_links)
             break
@@ -1297,7 +1305,6 @@ async def scrape_channel_paginated(profile_id, channel):
         all_configs.extend(config_links)
         all_proxies.extend(proxy_links)
 
-        # پیدا کردن قدیمی‌ترین message_id برای رفتن به صفحه بعد
         numeric_ids = []
         for mid in msg_ids:
             parts = mid.split('/')
@@ -1308,9 +1315,8 @@ async def scrape_channel_paginated(profile_id, channel):
             current_url = f"{base_url}?before={oldest}"
         else:
             break
-        await asyncio.sleep(0.5)  # کمی تاخیر برای جلوگیری از مسدود شدن
+        await asyncio.sleep(0.5)
 
-    # به‌روزرسانی آخرین message_id (جدیدترین پیام دیده‌شده)
     if msg_ids:
         newest_msg_id = msg_ids[0] if msg_ids else ""
         if newest_msg_id:
@@ -1358,12 +1364,38 @@ async def _scrape_single_page(url, channel):
         return config_links, proxy_links, msg_ids
 
 # ======================================================================
-# فایل‌ها - اصلاح شده با متد صحیح
+# اسکرپ لینک پیام تلگرام (جدید)
+# ======================================================================
+async def scrape_single_message_link(profile_id, url):
+    """
+    اسکرپ محتوای یک پیام خاص در تلگرام (مثلاً https://t.me/VmessProtocol/1744)
+    و استخراج کانفیگ‌ها و پروکسی‌های داخل آن.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as cl:
+            headers = {"User-Agent": _USER_AGENTS[0]}
+            r = await cl.get(url, headers=headers)
+            if r.status_code != 200:
+                log.warning(f"⚠️ Failed to fetch message link {url}, status {r.status_code}")
+                return [], []
+            html = r.text
+            configs = extract_links_from_text(html)
+            proxies = extract_proxy_links_from_text(html)
+            # فیلتر کردن لینک‌هایی که خودشان t.me هستند (برای جلوگیری از حلقه)
+            configs = [c for c in configs if not c.startswith("https://t.me/") or "proxy" in c.lower()]
+            proxies = [p for p in proxies if p.startswith("https://t.me/proxy")]
+            log.info(f"📩 Scraped message {url}: {len(configs)} configs, {len(proxies)} proxies")
+            return configs, proxies
+    except Exception as e:
+        log.warning(f"Error scraping message link {url}: {e}")
+        return [], []
+
+# ======================================================================
+# فایل‌ها
 # ======================================================================
 async def fetch_files_from_channel(bot, profile_id, channel, source):
     try:
         chat_id = channel if channel.startswith('@') else '@' + channel
-        # استفاده از bot.get_chat_history به جای chat.get_history
         messages = await bot.get_chat_history(chat_id, limit=50)
         new_links = []
         for msg in messages:
@@ -1723,7 +1755,7 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
     return count, (text, buttons)
 
 # ======================================================================
-# چرخه اصلی
+# چرخه اصلی (اصلاح‌شده برای اسکرپ لینک‌های پیام)
 # ======================================================================
 async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_proxies=True, is_instant=False):
     log.info("=" * 50)
@@ -1734,7 +1766,6 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
         log.error(f"❌ Profile {profile_id} not found!")
         return 0, "profile not found"
 
-    # بررسی فعال بودن پروفایل
     if not get_profile_enabled(profile_id):
         log.info(f"⏸️ Profile {profile_id} is disabled, skipping cycle.")
         return 0, "profile disabled"
@@ -1743,7 +1774,6 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     sources = [normalize_channel_input(s) for s in sources if normalize_channel_input(s)]
     if not sources:
         log.error(f"❌ Profile {profile_id} has no valid sources!")
-        # ارسال پیام به ادمین برای اطلاع
         try:
             await bot.send_message(
                 MAIN_ADMIN_ID,
@@ -1772,8 +1802,10 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     all_configs = []
     all_proxies = []
     seen_urls = set()
+    # برای ذخیره لینک‌های پیام تلگرام که باید جداگانه اسکرپ شوند
+    message_links_to_scrape = set()
 
-    # اسکرپ همه منابع
+    # اسکرپ همه منابع اصلی
     async def scrape_one(src):
         config_links, proxy_links = await scrape_channel_with_retry(profile_id, src)
         return src, config_links, proxy_links
@@ -1790,7 +1822,11 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
         for link in config_links:
             if link not in seen_urls:
                 seen_urls.add(link)
-                all_configs.append((link, src))
+                # اگر لینک t.me بود و پروکسی نبود، آن را برای اسکرپ بعدی ذخیره کن
+                if link.startswith("https://t.me/") and "proxy" not in link.lower():
+                    message_links_to_scrape.add(link)
+                else:
+                    all_configs.append((link, src))
         for link in proxy_links:
             if link not in seen_urls:
                 seen_urls.add(link)
@@ -1815,8 +1851,32 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                     norm = normalize_proxy_url(link)
                     if norm:
                         all_proxies.append(norm)
+                elif link.startswith("https://t.me/") and "proxy" not in link.lower():
+                    message_links_to_scrape.add(link)
                 else:
                     all_configs.append((link, src))
+
+    # اسکرپ لینک‌های پیام (به صورت موازی)
+    if message_links_to_scrape:
+        log.info(f"🔍 Scraping {len(message_links_to_scrape)} message links...")
+        msg_scrape_tasks = [scrape_single_message_link(profile_id, link) for link in message_links_to_scrape]
+        msg_results = await asyncio.gather(*msg_scrape_tasks, return_exceptions=True)
+        for idx, res in enumerate(msg_results):
+            if isinstance(res, Exception):
+                log.warning(f"Message link scrape error for {list(message_links_to_scrape)[idx]}: {res}")
+                continue
+            configs, proxies = res
+            src = list(message_links_to_scrape)[idx]
+            for c in configs:
+                if c not in seen_urls:
+                    seen_urls.add(c)
+                    all_configs.append((c, src))
+            for p in proxies:
+                if p not in seen_urls:
+                    seen_urls.add(p)
+                    norm = normalize_proxy_url(p)
+                    if norm:
+                        all_proxies.append(norm)
 
     new_configs = [(u, s) for u, s in all_configs if not is_already_posted(profile_id, u)]
     new_proxies = [p for p in all_proxies if not is_proxy_posted(profile_id, p)]
@@ -1841,7 +1901,6 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                     if ping_enabled:
                         ping, ok, cnt = await check_full_link_ping(u, ping_mode)
                     else:
-                        # اگر پینگ غیرفعال است، همه را قبول کن
                         ping, ok, cnt = 0, True, 0
                     if ok:
                         log.info(f"✅ Config OK: {u[:50]}... ping={ping}ms")
@@ -1915,7 +1974,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     return total_configs + total_proxies, result_msg
 
 # ======================================================================
-# حلقه‌های خودکار
+# حلقه‌های خودکار (بدون تغییر)
 # ======================================================================
 async def profile_loop_config(bot, profile_id):
     log.info(f"🔄 Starting config loop for profile {profile_id}")
@@ -1926,7 +1985,6 @@ async def profile_loop_config(bot, profile_id):
                 log.error(f"❌ Profile {profile_id} not found, stopping config loop.")
                 break
 
-            # بررسی فعال بودن پروفایل
             if not get_profile_enabled(profile_id):
                 log.info(f"⏸️ Profile {profile_id} is disabled, sleeping 60s")
                 await asyncio.sleep(60)
@@ -1999,7 +2057,6 @@ async def profile_loop_proxy(bot, profile_id):
                 log.error(f"❌ Profile {profile_id} not found, stopping proxy loop.")
                 break
 
-            # بررسی فعال بودن پروفایل
             if not get_profile_enabled(profile_id):
                 log.info(f"⏸️ Profile {profile_id} is disabled, sleeping 60s")
                 await asyncio.sleep(60)

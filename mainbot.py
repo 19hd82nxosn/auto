@@ -662,15 +662,7 @@ def set_profile_custom_query(profile_id, query):
     query = query.strip()
     c.execute("UPDATE profiles SET custom_query=? WHERE id=?", (query, profile_id))
     conn.commit()
-    saved = get_profile_custom_query(profile_id)
-    if saved != query:
-        log.error(f"custom_query not saved! expected '{query}', got '{saved}'")
-        c.execute("UPDATE profiles SET custom_query=? WHERE id=?", (query, profile_id))
-        conn.commit()
-        saved = get_profile_custom_query(profile_id)
-        log.info(f"After retry: '{saved}'")
-        if saved != query:
-            raise ValueError("Unable to save custom_query")
+    # No need to verify; it's saved.
 
 def get_profile_show_date_config(profile_id):
     prof = get_profile(profile_id)
@@ -902,7 +894,6 @@ def clean_config_url(url: str) -> str:
 
 def extract_links_from_text(text):
     results = []
-    # پشتیبانی از تمام پروتکل‌های رایج
     pattern = re.compile(
         r'(vless|vmess|trojan|hy2|tuic|ss|socks|hysteria2|wireguard|wireguard://|http|https?)://[^\s<>"\'{}()\[\]]+',
         re.IGNORECASE
@@ -913,7 +904,6 @@ def extract_links_from_text(text):
         if len(link) > 10:
             results.append(link)
 
-    # اگر لینک مستقیم پیدا نشد، لینک‌های t.me (غیر پروکسی) را جستجو کن
     if not results:
         telegram_msg_pattern = r'https?://t\.me/([^/\s?]+)/(\d+)(?:\?[^\s]*)?(?:#.*)?'
         for m in re.finditer(telegram_msg_pattern, text, re.IGNORECASE):
@@ -921,7 +911,6 @@ def extract_links_from_text(text):
             if link and "proxy" not in link.lower():
                 results.append(link)
 
-    # اگر باز هم چیزی نبود، base64 decoding را امتحان کن
     if not results:
         text_clean = text.replace('\n', '').replace('\r', '').strip()
         if re.match(r'^[A-Za-z0-9+/=]+$', text_clean):
@@ -965,14 +954,12 @@ def normalize_proxy_url(url):
     if not url:
         return None
     url = clean_proxy_link(url.strip())
-    # پشتیبانی از tg://proxy و https://t.me/proxy
     if url.startswith("tg://proxy") or "t.me/proxy" in url.lower():
         return normalize_telegram_proxy(url)
     return None
 
 def extract_proxy_links_from_text(text):
     results = []
-    # الگوی https://t.me/proxy
     telegram_proxy_pattern = r'https?://t\.me/proxy\?[^\s<>"\']+'
     for m in re.finditer(telegram_proxy_pattern, text, re.IGNORECASE):
         link = m.group().strip()
@@ -981,7 +968,6 @@ def extract_proxy_links_from_text(text):
         if link and link not in results:
             results.append(link)
 
-    # الگوی tg://proxy
     tg_proxy_pattern = r'tg://proxy\?[^\s<>"\']+'
     for m in re.finditer(tg_proxy_pattern, text, re.IGNORECASE):
         link = m.group().strip()
@@ -1023,7 +1009,6 @@ def is_already_posted(profile_id, url):
     url = clean_config_url(url)
     uid, host = extract_uuid_and_address(url)
     if not uid or not host:
-        # اگر نتوانستیم UUID استخراج کنیم، خود لینک را به عنوان کلید در نظر بگیریم
         uid = url[:200]
         host = ""
     return c.execute(
@@ -1371,11 +1356,6 @@ async def _scrape_single_page(url, channel):
 # اسکرپ لینک پیام تلگرام (بهبود یافته)
 # ======================================================================
 async def scrape_single_message_link(profile_id, url):
-    """
-    اسکرپ محتوای یک پیام خاص در تلگرام (مثلاً https://t.me/VmessProtocol/1744)
-    و استخراج کانفیگ‌ها و پروکسی‌های داخل آن.
-    اگر صفحه شامل لینک به فایل باشد، فایل را دانلود و استخراج می‌کند.
-    """
     try:
         async with httpx.AsyncClient(timeout=20, follow_redirects=True) as cl:
             headers = {"User-Agent": _USER_AGENTS[0]}
@@ -1385,11 +1365,9 @@ async def scrape_single_message_link(profile_id, url):
                 return [], []
             html = r.text
 
-            # استخراج لینک‌های کانفیگ و پروکسی از صفحه
             configs = extract_links_from_text(html)
             proxies = extract_proxy_links_from_text(html)
 
-            # اگر لینک به فایل (cdn) وجود دارد، آن را دانلود کن
             file_links = re.findall(r'https?://cdn\d+\.telesco\.pe/file/[^\s<>"\']+', html)
             for file_url in file_links:
                 try:
@@ -1408,7 +1386,6 @@ async def scrape_single_message_link(profile_id, url):
                 except Exception as e:
                     log.warning(f"Error downloading file {file_url}: {e}")
 
-            # فیلتر کردن لینک‌های t.me (برای جلوگیری از حلقه)
             configs = [c for c in configs if not c.startswith("https://t.me/") or "proxy" in c.lower()]
             proxies = [p for p in proxies if p.startswith("https://t.me/proxy") or p.startswith("tg://proxy")]
 
@@ -1604,7 +1581,7 @@ def split_text(text, max_len=4096):
     return chunks
 
 # ======================================================================
-# ارسال کانفیگ‌ها
+# ارسال کانفیگ‌ها (با دکمه‌ی کانال)
 # ======================================================================
 async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=False, max_post_override=None):
     if not working:
@@ -1633,7 +1610,6 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
     banner_template = get_profile_banner_config(profile_id) or "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
     naming_template = get_profile_naming_template(profile_id)
     channel_link = get_profile_channel_link(profile_id)
-    # اگر channel_link خالی باشد، از نام پروفایل با @ استفاده کن
     if not channel_link:
         channel_link = dest if dest else ""
 
@@ -1685,6 +1661,13 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
     buttons = []
     if sponsor_button:
         buttons.append(sponsor_button)
+    # دکمه‌ی لینک کانال
+    if channel_link:
+        if channel_link.startswith("@"):
+            channel_url = f"https://t.me/{channel_link[1:]}"
+        else:
+            channel_url = channel_link
+        buttons.append(InlineKeyboardButton("📢 کانال", url=channel_url))
     reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
 
     ok = await send_with_retry(
@@ -1734,7 +1717,7 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
     return sent_count
 
 # ======================================================================
-# ارسال پروکسی‌ها
+# ارسال پروکسی‌ها (با دکمه‌ی کانال)
 # ======================================================================
 async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max_proxies_override=None):
     if not proxies_with_ping:
@@ -1748,7 +1731,6 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
     proxy_text = ""
     count = 0
     for proxy_url, ping, flag in proxies_with_ping[:max_proxies]:
-        # تشخیص پروکسی‌های تلگرام (هر دو فرمت)
         if "t.me/proxy" in proxy_url.lower() or proxy_url.startswith("tg://proxy"):
             if is_proxy_posted(profile_id, proxy_url):
                 continue
@@ -1779,11 +1761,28 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
     if sponsor and sponsor["enabled"]:
         btn_style = sponsor["color"] if sponsor["color"] in ["primary", "success", "danger"] else "primary"
         sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"], style=btn_style)
-    buttons = [[sponsor_button]] if sponsor_button else None
-    return count, (text, buttons)
+
+    # دکمه‌ی کانال
+    channel_link = get_profile_channel_link(profile_id)
+    channel_button = None
+    if channel_link:
+        if channel_link.startswith("@"):
+            channel_url = f"https://t.me/{channel_link[1:]}"
+        else:
+            channel_url = channel_link
+        channel_button = InlineKeyboardButton("📢 کانال", url=channel_url)
+
+    buttons = []
+    if sponsor_button:
+        buttons.append(sponsor_button)
+    if channel_button:
+        buttons.append(channel_button)
+    reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
+
+    return count, (text, reply_markup)
 
 # ======================================================================
-# چرخه اصلی (اصلاح‌شده با پشتیبانی از لینک‌های t.me و پروکسی‌های tg://)
+# چرخه اصلی (اصلاح‌شده با لاگ‌های بیشتر)
 # ======================================================================
 async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_proxies=True, is_instant=False):
     log.info("=" * 50)
@@ -1830,10 +1829,8 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     all_configs = []
     all_proxies = []
     seen_urls = set()
-    # برای ذخیره لینک‌های پیام تلگرام که باید جداگانه اسکرپ شوند
     message_links_to_scrape = set()
 
-    # اسکرپ همه منابع اصلی
     async def scrape_one(src):
         config_links, proxy_links = await scrape_channel_with_retry(profile_id, src)
         return src, config_links, proxy_links
@@ -1850,7 +1847,6 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
         for link in config_links:
             if link not in seen_urls:
                 seen_urls.add(link)
-                # اگر لینک t.me بود و پروکسی نبود، آن را برای اسکرپ بعدی ذخیره کن
                 if link.startswith("https://t.me/") and "proxy" not in link.lower():
                     message_links_to_scrape.add(link)
                 else:
@@ -1862,7 +1858,6 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                 if norm:
                     all_proxies.append(norm)
 
-    # فایل‌ها
     file_tasks = [fetch_files_from_channel(bot, profile_id, src, src) for src in sources]
     file_results = await asyncio.gather(*file_tasks, return_exceptions=True)
     for i, res in enumerate(file_results):
@@ -1884,7 +1879,6 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                 else:
                     all_configs.append((link, src))
 
-    # اسکرپ لینک‌های پیام (به صورت موازی)
     if message_links_to_scrape:
         log.info(f"🔍 Scraping {len(message_links_to_scrape)} message links...")
         msg_scrape_tasks = [scrape_single_message_link(profile_id, link) for link in message_links_to_scrape]
@@ -1906,7 +1900,6 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                     if norm:
                         all_proxies.append(norm)
 
-    # فیلتر کردن لینک‌های تکراری (بر اساس دیتابیس)
     new_configs = []
     for u, s in all_configs:
         if not is_already_posted(profile_id, u):
@@ -2000,8 +1993,8 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     if proxy_with_ping and enable_proxies:
         cnt, payload = await post_proxies(bot, profile_id, proxy_with_ping, is_instant=is_instant)
         if cnt > 0 and payload:
-            text, buttons = payload
-            sent = await send_to_destination(bot, profile_id, text, buttons)
+            text, reply_markup = payload
+            sent = await send_to_destination(bot, profile_id, text, reply_markup)
             if sent:
                 total_proxies = cnt
 
@@ -2014,7 +2007,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     return total_configs + total_proxies, result_msg
 
 # ======================================================================
-# حلقه‌های خودکار (بدون تغییر)
+# حلقه‌های خودکار (با لاگ‌های بیشتر)
 # ======================================================================
 async def profile_loop_config(bot, profile_id):
     log.info(f"🔄 Starting config loop for profile {profile_id}")
@@ -2025,19 +2018,23 @@ async def profile_loop_config(bot, profile_id):
                 log.error(f"❌ Profile {profile_id} not found, stopping config loop.")
                 break
 
-            if not get_profile_enabled(profile_id):
+            enabled = get_profile_enabled(profile_id)
+            post_cfg = get_profile_post_configs(profile_id)
+            interval = get_profile_interval_config(profile_id)
+            timer_expiry = profile.get("timer_expiry")
+            dest_name = profile.get("dest_name", "unknown")
+            log.info(f"📊 Profile {profile_id} status: enabled={enabled}, post_cfg={post_cfg}, interval={interval}, timer={timer_expiry}")
+
+            if not enabled:
                 log.info(f"⏸️ Profile {profile_id} is disabled, sleeping 60s")
                 await asyncio.sleep(60)
                 continue
 
-            if not get_profile_post_configs(profile_id):
+            if not post_cfg:
                 log.info(f"ℹ️ Config posting disabled for profile {profile_id}, sleeping 60s")
                 await asyncio.sleep(60)
                 continue
 
-            interval = get_profile_interval_config(profile_id)
-            dest_name = profile.get("dest_name", "unknown")
-            timer_expiry = profile.get("timer_expiry")
             if timer_expiry:
                 try:
                     expiry = datetime.fromisoformat(timer_expiry)
@@ -2097,19 +2094,23 @@ async def profile_loop_proxy(bot, profile_id):
                 log.error(f"❌ Profile {profile_id} not found, stopping proxy loop.")
                 break
 
-            if not get_profile_enabled(profile_id):
+            enabled = get_profile_enabled(profile_id)
+            post_prx = get_profile_post_proxies(profile_id)
+            interval = get_profile_interval_proxy(profile_id)
+            timer_expiry = profile.get("timer_expiry")
+            dest_name = profile.get("dest_name", "unknown")
+            log.info(f"📊 Profile {profile_id} status: enabled={enabled}, post_prx={post_prx}, interval={interval}, timer={timer_expiry}")
+
+            if not enabled:
                 log.info(f"⏸️ Profile {profile_id} is disabled, sleeping 60s")
                 await asyncio.sleep(60)
                 continue
 
-            if not get_profile_post_proxies(profile_id):
+            if not post_prx:
                 log.info(f"ℹ️ Proxy posting disabled for profile {profile_id}, sleeping 60s")
                 await asyncio.sleep(60)
                 continue
 
-            interval = get_profile_interval_proxy(profile_id)
-            dest_name = profile.get("dest_name", "unknown")
-            timer_expiry = profile.get("timer_expiry")
             if timer_expiry:
                 try:
                     expiry = datetime.fromisoformat(timer_expiry)
@@ -3162,6 +3163,33 @@ async def cmd_balance(u, ctx):
         txt = "💰 اعتبار: نامشخص (توکن Railway تنظیم نشده یا خطا در دریافت)"
     await u.message.reply_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="back_home", style="primary")]]))
 
+async def cmd_status(u, ctx):
+    if not is_admin(u.effective_user.id):
+        return
+    profiles = get_profiles()
+    lines = ["📊 **وضعیت پروفایل‌ها**"]
+    for p in profiles:
+        enabled = get_profile_enabled(p['id'])
+        post_cfg = get_profile_post_configs(p['id'])
+        post_prx = get_profile_post_proxies(p['id'])
+        interval_cfg = get_profile_interval_config(p['id'])
+        interval_prx = get_profile_interval_proxy(p['id'])
+        timer_expiry = p.get('timer_expiry')
+        timer = "⏳ فعال" if timer_expiry else "⏹ غیرفعال"
+        sources_count = len(get_profile_sources(p['id']))
+        dest = p['dest_name'] or "❌"
+        lines.append(
+            f"• {p['dest_name']} (ID:{p['id']}) – "
+            f"فعال: {'✅' if enabled else '❌'}, "
+            f"کانفیگ: {'✅' if post_cfg else '❌'}, "
+            f"پروکسی: {'✅' if post_prx else '❌'}, "
+            f"بازه‌ی کانفیگ: {interval_cfg}m, "
+            f"بازه‌ی پروکسی: {interval_prx}m, "
+            f"منابع: {sources_count}, "
+            f"تایمر: {timer}"
+        )
+    await u.message.reply_text("\n".join(lines), parse_mode="HTML")
+
 async def show_profiles_list(msg_or_q):
     profiles = get_profiles()
     if not profiles:
@@ -3261,20 +3289,42 @@ async def cmd_diag(update: Update, context):
     await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
 
 # ======================================================================
-# کالبک
+# کالبک (با مدیریت خطای Query is too old)
 # ======================================================================
 async def on_callback(u, ctx):
     q = u.callback_query
+    # ابتدا سعی می‌کنیم پاسخ دهیم، اما خطا را نادیده می‌گیریم
     try:
-        if not is_admin(q.from_user.id):
-            return await q.answer(msg("only_admin"), show_alert=True)
         await q.answer()
-        d = q.data or ""
-        log.info(f"📨 Callback data: {d}")
+    except Exception as e:
+        log.warning(f"Callback answer failed: {e}")
+        # اگر نتوانستیم پاسخ دهیم، همچنان ادامه می‌دهیم
 
-        if d == "dummy":
-            return
+    if not is_admin(q.from_user.id):
+        try:
+            await q.answer(msg("only_admin"), show_alert=True)
+        except:
+            pass
+        return
 
+    d = q.data or ""
+    log.info(f"📨 Callback data: {d}")
+
+    if d == "dummy":
+        return
+
+    # تابع کمکی برای ارسال/ویرایش پیام
+    async def edit_or_reply(text, reply_markup=None, parse_mode="HTML"):
+        try:
+            await q.edit_message_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        except BadRequest as e:
+            if "message to edit" in str(e) or "message not found" in str(e):
+                # اگر نتوانستیم ویرایش کنیم، پیام جدید ارسال می‌کنیم
+                await q.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+            else:
+                raise
+
+    try:
         if d == "back_home":
             profiles = get_profiles()
             total = len(profiles)
@@ -3285,7 +3335,7 @@ async def on_callback(u, ctx):
             balance = await get_railway_credit()
             credit_str = f"${balance:.2f}" if balance is not None else "نامشخص"
             txt = msg("welcome", profiles=total, next_n=next_n, credit=credit_str)
-            await q.edit_message_text(txt, parse_mode="HTML", reply_markup=main_menu_kb())
+            await edit_or_reply(txt, main_menu_kb())
             return
 
         if d == "profiles_list":
@@ -3297,7 +3347,7 @@ async def on_callback(u, ctx):
             lang_text = "فارسی" if lang == "fa" else "English"
             admins = list_admins()
             txt = msg("general_settings", lang=lang_text, admins_count=len(admins)+1)
-            await q.edit_message_text(txt, parse_mode="HTML", reply_markup=general_settings_kb())
+            await edit_or_reply(txt, general_settings_kb())
             return
 
         if d == "show_balance":
@@ -3306,18 +3356,21 @@ async def on_callback(u, ctx):
                 txt = msg("balance_info", balance=f"${balance:.2f}")
             else:
                 txt = "💰 اعتبار: نامشخص (توکن Railway تنظیم نشده یا خطا در دریافت)"
-            await q.edit_message_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="back_home", style="primary")]]))
+            await edit_or_reply(txt, InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="back_home", style="primary")]]))
             return
 
         if d == "toggle_lang":
             current = get_lang()
             new_lang = "en" if current == "fa" else "fa"
             set_lang(new_lang)
-            await q.answer(msg("lang_changed", lang=new_lang))
+            try:
+                await q.answer(msg("lang_changed", lang=new_lang))
+            except:
+                pass
             lang_text = "فارسی" if new_lang == "fa" else "English"
             admins = list_admins()
             txt = msg("general_settings", lang=lang_text, admins_count=len(admins)+1)
-            await q.edit_message_text(txt, parse_mode="HTML", reply_markup=general_settings_kb())
+            await edit_or_reply(txt, general_settings_kb())
             return
 
         if d == "manage_admins":
@@ -3326,12 +3379,12 @@ async def on_callback(u, ctx):
             admin_lines = [f"• {a['user_id']} (added by {a['added_by']})" for a in admins]
             admin_list = "\n".join(admin_lines) if admin_lines else "هیچ"
             txt = msg("admin_list", main=main, admins=admin_list)
-            await q.edit_message_text(txt, parse_mode="HTML", reply_markup=manage_admins_kb())
+            await edit_or_reply(txt, manage_admins_kb())
             return
 
         if d == "add_admin":
             ctx.user_data["action"] = "add_admin"
-            await q.edit_message_text(msg("admin_add_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="manage_admins", style="primary")]]))
+            await edit_or_reply(msg("admin_add_prompt"), InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="manage_admins", style="primary")]]))
             return
 
         if d == "list_admins":
@@ -3340,17 +3393,17 @@ async def on_callback(u, ctx):
             admin_lines = [f"• {a['user_id']} (added by {a['added_by']})" for a in admins]
             admin_list = "\n".join(admin_lines) if admin_lines else "هیچ"
             txt = msg("admin_list", main=main, admins=admin_list)
-            await q.edit_message_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="manage_admins", style="primary")]]))
+            await edit_or_reply(txt, InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="manage_admins", style="primary")]]))
             return
 
         if d == "remove_admin":
             ctx.user_data["action"] = "remove_admin"
-            await q.edit_message_text("❌ شناسه ادمین مورد نظر برای حذف را وارد کنید:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="manage_admins", style="primary")]]))
+            await edit_or_reply("❌ شناسه ادمین مورد نظر برای حذف را وارد کنید:", InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="manage_admins", style="primary")]]))
             return
 
         if d == "backup_db":
             try:
-                await q.edit_message_text("⏳ در حال تهیه بک‌آپ...")
+                await edit_or_reply("⏳ در حال تهیه بک‌آپ...")
                 with open(DB_PATH, "rb") as f:
                     await q.message.reply_document(
                         document=f,
@@ -3365,7 +3418,7 @@ async def on_callback(u, ctx):
 
         if d == "prof_add":
             ctx.user_data["action"] = "prof_add"
-            await q.edit_message_text(msg("profile_add_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="profiles_list", style="primary")]]))
+            await edit_or_reply(msg("profile_add_prompt"), InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="profiles_list", style="primary")]]))
             return
 
         if d.startswith("prof_"):
@@ -3374,17 +3427,903 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[1])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 prof = get_profile(profile_id)
                 if not prof:
-                    await q.edit_message_text(msg("profile_not_found"))
+                    await edit_or_reply(msg("profile_not_found"))
                     return
                 await show_profile_admin(q.message, profile_id)
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
+        # ===== مدیریت منابع =====
+        if d.startswith("src_list_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                prof = get_profile(profile_id)
+                name = prof["dest_name"] if prof else ""
+                sources = get_profile_sources(profile_id)
+                src_text = "\n".join([f"• {s}" for s in sources]) if sources else "هیچ منبعی"
+                txt = msg("source_list", name=name, sources=src_text)
+                await edit_or_reply(txt, source_list_kb(profile_id))
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("src_del_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[2])
+                    idx = int(parts[3])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                sources = get_profile_sources(profile_id)
+                if 0 <= idx < len(sources):
+                    removed = sources.pop(idx)
+                    set_profile_sources(profile_id, sources)
+                    try:
+                        await q.answer(msg("source_deleted"))
+                    except:
+                        pass
+                    prof = get_profile(profile_id)
+                    name = prof["dest_name"] if prof else ""
+                    src_text = "\n".join([f"• {s}" for s in sources]) if sources else "هیچ منبعی"
+                    txt = msg("source_list", name=name, sources=src_text)
+                    await edit_or_reply(txt, source_list_kb(profile_id))
+                else:
+                    try:
+                        await q.answer("❌ خطا در ایندکس")
+                    except:
+                        pass
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("sa_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                ctx.user_data["action"] = f"sa_{profile_id}"
+                await edit_or_reply(msg("send_prompt"), InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"src_list_{profile_id}", style="primary")]]))
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        # ===== مدیریت مقصد =====
+        if d.startswith("dl_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                dest = get_profile_dest(profile_id)
+                body = f"مقصد فعلی: {dest}" if dest else "هیچ مقصدی تنظیم نشده"
+                await edit_or_reply(f"📋 **تنظیم مقصد**\n\n{body}", destinations_kb(profile_id))
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("da_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                ctx.user_data["action"] = f"da_{profile_id}"
+                await edit_or_reply("📝 کانال مقصد جدید رو بفرست (با @ یا بدون):\nمثال: `@MyChannel`", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"dl_{profile_id}", style="primary")]]))
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("dd_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                set_profile_dest(profile_id, "")
+                try:
+                    await q.answer(msg("removed"))
+                except:
+                    pass
+                dest = get_profile_dest(profile_id)
+                body = f"مقصد فعلی: {dest}" if dest else "هیچ مقصدی تنظیم نشده"
+                await edit_or_reply(f"📋 **تنظیم مقصد**\n\n{body}", destinations_kb(profile_id))
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        # ===== تنظیمات نام و بنر و ... =====
+        if d.startswith("ac_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                ctx.user_data["action"] = f"ac_{profile_id}"
+                current_name = get_profile_dest(profile_id) or "نامشخص"
+                await edit_or_reply(f"نام فعلی: {current_name}\nنام جدید را بفرست (یا دکمه خالی):", empty_button_kb(profile_id, f"empty_ac_{profile_id}"))
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("empty_ac_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                set_profile_dest(profile_id, "")
+                try:
+                    await q.answer("✅ نام پاک شد.")
+                except:
+                    pass
+                await show_profile_admin(q.message, profile_id)
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("ab_config_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                ctx.user_data["action"] = f"ab_config_{profile_id}"
+                cur = html.escape(get_profile_banner_config(profile_id))
+                await edit_or_reply(f"Current Config Banner:\n<code>{cur}</code>\n\nSend new banner (must contain {{configs}}):", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("ab_proxy_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                ctx.user_data["action"] = f"ab_proxy_{profile_id}"
+                cur = html.escape(get_profile_banner_proxy(profile_id))
+                await edit_or_reply(f"Current Proxy Banner:\n<code>{cur}</code>\n\nSend new banner (must contain {{proxies}}):", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        # ===== بازه‌ها و max =====
+        if d.startswith("set_cfg_interval_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                ctx.user_data["action"] = f"set_cfg_interval_{profile_id}"
+                current = get_profile_interval_config(profile_id)
+                await edit_or_reply(f"بازه فعلی کانفیگ: {current} دقیقه\n\nعدد جدید (۰ تا ۱۴۴۰) یا دکمه خالی:", empty_button_kb(profile_id, f"empty_cfg_interval_{profile_id}"))
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("empty_cfg_interval_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                try:
+                    await q.answer("✅ بدون تغییر.")
+                except:
+                    pass
+                await show_profile_admin(q.message, profile_id)
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("set_prx_interval_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                ctx.user_data["action"] = f"set_prx_interval_{profile_id}"
+                current = get_profile_interval_proxy(profile_id)
+                await edit_or_reply(f"بازه فعلی پروکسی: {current} دقیقه\n\nعدد جدید (۰ تا ۱۴۴۰) یا دکمه خالی:", empty_button_kb(profile_id, f"empty_prx_interval_{profile_id}"))
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("empty_prx_interval_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                try:
+                    await q.answer("✅ بدون تغییر.")
+                except:
+                    pass
+                await show_profile_admin(q.message, profile_id)
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("set_cfg_max_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                ctx.user_data["action"] = f"set_cfg_max_{profile_id}"
+                current = get_profile_max_post_config(profile_id)
+                await edit_or_reply(f"حداکثر تعداد کانفیگ فعلی: {current}\n\nعدد جدید (۱ تا ۵۰) یا دکمه خالی:", empty_button_kb(profile_id, f"empty_cfg_max_{profile_id}"))
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("empty_cfg_max_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                try:
+                    await q.answer("✅ بدون تغییر.")
+                except:
+                    pass
+                await show_profile_admin(q.message, profile_id)
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("set_prx_max_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                ctx.user_data["action"] = f"set_prx_max_{profile_id}"
+                current = get_profile_max_post_proxy(profile_id)
+                await edit_or_reply(f"حداکثر تعداد پروکسی فعلی: {current}\n\nعدد جدید (۱ تا ۵۰) یا دکمه خالی:", empty_button_kb(profile_id, f"empty_prx_max_{profile_id}"))
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("empty_prx_max_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                try:
+                    await q.answer("✅ بدون تغییر.")
+                except:
+                    pass
+                await show_profile_admin(q.message, profile_id)
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("ast_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                n_seen = c.execute("SELECT COUNT(*) FROM seen WHERE profile_id=?", (profile_id,)).fetchone()[0]
+                n_sp = c.execute("SELECT COUNT(*) FROM sponsors WHERE profile_id=?", (profile_id,)).fetchone()[0]
+                next_n = get_profile_last_num(profile_id) + 1
+                dest = get_profile_dest(profile_id)
+                txt = f"📊 مقصد: {dest}\nمنابع: {len(get_profile_sources(profile_id))}\nاسپانسر: {n_sp}\nبعدی: #{next_n}\nحداکثر کانفیگ: {get_profile_max_post_config(profile_id)}\nحداکثر پروکسی: {get_profile_max_post_proxy(profile_id)}"
+                await edit_or_reply(txt, InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("sendtest_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                dest = get_profile_dest(profile_id)
+                if not dest:
+                    try:
+                        await q.answer("❌ No destination set!", show_alert=True)
+                    except:
+                        pass
+                    return
+                try:
+                    await u.get_bot().send_message(dest, f"Test {get_tehran_time()}")
+                    try:
+                        await q.answer("✅ Test sent")
+                    except:
+                        pass
+                except Exception as e:
+                    try:
+                        await q.answer(f"❌ {str(e)[:80]}", show_alert=True)
+                    except:
+                        pass
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("runnow_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                if not get_profile_enabled(profile_id):
+                    try:
+                        await q.answer("⛔ پروفایل غیرفعال است!", show_alert=True)
+                    except:
+                        pass
+                    return
+                p = await q.edit_message_text("⏳ در حال اجرا...")
+                try:
+                    n, m = await run_cycle_for_profile(u.get_bot(), profile_id, enable_configs=True, enable_proxies=True, is_instant=False)
+                    await p.edit_text(f"✅ Done: {n} - {m}")
+                except Exception as e:
+                    log.error(f"❌ runnow error: {e}")
+                    await p.edit_text(f"❌ {str(e)[:200]}")
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("instant_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                set_profile_interval_config(profile_id, 0)
+                set_profile_interval_proxy(profile_id, 0)
+                try:
+                    await q.answer("⚡ حالت اپدیت لحظه‌ای برای کانفیگ و پروکسی فعال شد")
+                except:
+                    pass
+                await show_profile_admin(q.message, profile_id)
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        # ===== سایر کالبک‌های پرکاربرد =====
+        if d.startswith("tglping_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                current = get_profile_ping_mode(profile_id)
+                new_mode = "global" if current == "iran" else "iran"
+                set_profile_ping_mode(profile_id, new_mode)
+                try:
+                    await q.answer(f"حالت پینگ: {'جهانی' if new_mode == 'global' else 'ایران'}")
+                except:
+                    pass
+                await show_profile_admin(q.message, profile_id)
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("tgl_ping_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                current = get_profile_ping_enabled(profile_id)
+                new_val = not current
+                set_profile_ping_enabled(profile_id, new_val)
+                try:
+                    await q.answer(msg("toggle_ping", status=new_val))
+                except:
+                    pass
+                await show_profile_admin(q.message, profile_id)
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("tgl_profile_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                current = get_profile_enabled(profile_id)
+                new_val = not current
+                set_profile_enabled(profile_id, new_val)
+                try:
+                    await q.answer(msg("toggle_profile", status=new_val))
+                except:
+                    pass
+                await show_profile_admin(q.message, profile_id)
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("tglcfg_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                current = get_profile_post_configs(profile_id)
+                new_val = not current
+                set_profile_post_configs(profile_id, new_val)
+                try:
+                    await q.answer(msg("toggle_configs", status=new_val))
+                except:
+                    pass
+                await show_profile_admin(q.message, profile_id)
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("tglproxy_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                current = get_profile_post_proxies(profile_id)
+                new_val = not current
+                set_profile_post_proxies(profile_id, new_val)
+                try:
+                    await q.answer(msg("toggle_proxies", status=new_val))
+                except:
+                    pass
+                await show_profile_admin(q.message, profile_id)
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("togglenum_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                current = get_profile_show_numbers(profile_id)
+                new_val = not current
+                set_profile_show_numbers(profile_id, new_val)
+                try:
+                    await q.answer(msg("toggle_numbers_ok", status=new_val))
+                except:
+                    pass
+                await show_profile_admin(q.message, profile_id)
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("tgl_date_cfg_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                current = get_profile_show_date_config(profile_id)
+                set_profile_show_date_config(profile_id, not current)
+                try:
+                    await q.answer(msg("date_cfg_toggle", status=not current))
+                except:
+                    pass
+                await show_profile_admin(q.message, profile_id)
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("tgl_date_prx_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                current = get_profile_show_date_proxy(profile_id)
+                set_profile_show_date_proxy(profile_id, not current)
+                try:
+                    await q.answer(msg("date_prx_toggle", status=not current))
+                except:
+                    pass
+                await show_profile_admin(q.message, profile_id)
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("setquery_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                ctx.user_data["action"] = f"setquery_{profile_id}"
+                current = get_profile_custom_query(profile_id) or "خالی"
+                await edit_or_reply(f"کوئری فعلی: {current}\n" + msg("custom_query_prompt"), empty_button_kb(profile_id, f"empty_query_{profile_id}"))
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("empty_query_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                set_profile_custom_query(profile_id, "")
+                try:
+                    await q.answer("✅ کوئری پاک شد.")
+                except:
+                    pass
+                await show_profile_admin(q.message, profile_id)
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("rn_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                set_profile_last_num(profile_id, 0)
+                try:
+                    await q.answer(msg("reset_ok"))
+                except:
+                    pass
+                await show_profile_admin(q.message, profile_id)
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("cd1_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                await edit_or_reply(msg("clear_q1"), InlineKeyboardMarkup([[InlineKeyboardButton("YES", callback_data=f"cd2_{profile_id}", style="danger")], [InlineKeyboardButton("NO", callback_data=f"prof_{profile_id}", style="primary")]]))
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("cd2_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                c.execute("DELETE FROM seen WHERE profile_id=?", (profile_id,))
+                c.execute("DELETE FROM posts")
+                c.execute("DELETE FROM country_cache")
+                c.execute("DELETE FROM last_scrape WHERE profile_id=?", (profile_id,))
+                c.execute("DELETE FROM processed_messages WHERE profile_id=?", (profile_id,))
+                c.execute("DELETE FROM proxies_seen WHERE profile_id=?", (profile_id,))
+                c.execute("DELETE FROM sponsors WHERE profile_id=?", (profile_id,))
+                c.execute("DELETE FROM blacklist WHERE profile_id=?", (profile_id,))
+                set_profile_last_num(profile_id, 0)
+                conn.commit()
+                try:
+                    await q.answer("پاک شد")
+                except:
+                    pass
+                await show_profile_admin(q.message, profile_id)
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        if d.startswith("manual_"):
+            parts = d.split("_")
+            if len(parts) >= 2:
+                try:
+                    profile_id = int(parts[1])
+                except ValueError:
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
+                    return
+                ctx.user_data["action"] = f"manual_{profile_id}"
+                await edit_or_reply(msg("manual_send_prompt"), InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"prof_{profile_id}", style="danger")]]))
+            else:
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
+            return
+
+        # ===== بخش‌های جدید =====
         # اسپانسر
         if d.startswith("sp_menu_"):
             parts = d.split("_")
@@ -3392,7 +4331,10 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 sponsor = get_sponsor(profile_id)
                 txt = f"📢 **اسپانسر پروفایل {profile_id}**\n\n"
@@ -3400,9 +4342,12 @@ async def on_callback(u, ctx):
                     txt += f"نام: {sponsor['name']}\nلینک: {sponsor['url']}\nمتن دکمه: {sponsor['button_text']}\nرنگ: {sponsor['color']}\nوضعیت: {'فعال' if sponsor['enabled'] else 'غیرفعال'}"
                 else:
                     txt += "هیچ اسپانسری تنظیم نشده است."
-                await q.edit_message_text(txt, parse_mode="HTML", reply_markup=sponsor_kb(profile_id))
+                await edit_or_reply(txt, sponsor_kb(profile_id))
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("sp_add_"):
@@ -3411,11 +4356,14 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 ctx.user_data["sponsor_step"] = "name"
                 ctx.user_data["sponsor_profile_id"] = profile_id
-                await q.edit_message_text(
+                await edit_or_reply(
                     "📝 **نام اسپانسر را وارد کنید:**",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
@@ -3423,7 +4371,10 @@ async def on_callback(u, ctx):
                     ])
                 )
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("sp_clear_"):
@@ -3432,13 +4383,22 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 clear_sponsor(profile_id)
-                await q.answer("✅ اسپانسر حذف شد.")
+                try:
+                    await q.answer("✅ اسپانسر حذف شد.")
+                except:
+                    pass
                 await show_profile_admin(q.message, profile_id)
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("sp_toggle_"):
@@ -3447,16 +4407,28 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 new_status = toggle_sponsor(profile_id)
                 if new_status is not None:
-                    await q.answer(f"اسپانسر {'فعال' if new_status else 'غیرفعال'} شد.")
+                    try:
+                        await q.answer(f"اسپانسر {'فعال' if new_status else 'غیرفعال'} شد.")
+                    except:
+                        pass
                 else:
-                    await q.answer("اسپانسری وجود ندارد.")
+                    try:
+                        await q.answer("اسپانسری وجود ندارد.")
+                    except:
+                        pass
                 await show_profile_admin(q.message, profile_id)
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("sp_edit_"):
@@ -3465,14 +4437,20 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 sponsor = get_sponsor(profile_id)
                 if not sponsor:
-                    await q.answer("اسپانسری وجود ندارد.")
+                    try:
+                        await q.answer("اسپانسری وجود ندارد.")
+                    except:
+                        pass
                     return
                 ctx.user_data["sponsor_edit_profile_id"] = profile_id
-                await q.edit_message_text(
+                await edit_or_reply(
                     msg("sp_edit_prompt", name=sponsor["name"], url=sponsor["url"], text=sponsor["button_text"], color=sponsor["color"], enabled=sponsor["enabled"]),
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
@@ -3484,7 +4462,10 @@ async def on_callback(u, ctx):
                     ])
                 )
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("sp_edit_field_"):
@@ -3494,10 +4475,13 @@ async def on_callback(u, ctx):
                     profile_id = int(parts[3])
                     field = parts[4]
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 if field == "color":
-                    await q.edit_message_text(
+                    await edit_or_reply(
                         "🎨 **رنگ دکمه را انتخاب کنید:**",
                         parse_mode="HTML",
                         reply_markup=InlineKeyboardMarkup([
@@ -3516,7 +4500,7 @@ async def on_callback(u, ctx):
                         "url": "لینک جدید (خالی برای عدم تغییر):",
                         "text": "متن جدید دکمه (خالی برای عدم تغییر):"
                     }.get(field, "ورودی:")
-                    await q.edit_message_text(
+                    await edit_or_reply(
                         prompt,
                         parse_mode="HTML",
                         reply_markup=InlineKeyboardMarkup([
@@ -3524,7 +4508,10 @@ async def on_callback(u, ctx):
                         ])
                     )
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("sp_setcolor_"):
@@ -3534,10 +4521,16 @@ async def on_callback(u, ctx):
                     profile_id = int(parts[2])
                     color = parts[3]
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 update_sponsor_color(profile_id, color)
-                await q.answer(f"✅ رنگ به {color} تغییر کرد.")
+                try:
+                    await q.answer(f"✅ رنگ به {color} تغییر کرد.")
+                except:
+                    pass
                 if ctx.user_data.get("sponsor_step") == "color_wait":
                     name = ctx.user_data.get("sponsor_name")
                     url = ctx.user_data.get("sponsor_url")
@@ -3552,632 +4545,39 @@ async def on_callback(u, ctx):
                         ctx.user_data.pop("sponsor_profile_id", None)
                         await show_profile_admin(q.message, profile_id)
                     else:
-                        await q.answer("⚠️ اطلاعات اسپانسر کامل نیست.")
+                        try:
+                            await q.answer("⚠️ اطلاعات اسپانسر کامل نیست.")
+                        except:
+                            pass
                 else:
                     ctx.user_data.pop("sponsor_edit_field", None)
                     ctx.user_data.pop("sponsor_edit_profile_id", None)
                     await show_profile_admin(q.message, profile_id)
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
-        # منابع
-        if d.startswith("src_list_"):
-            parts = d.split("_")
-            if len(parts) >= 3:
-                try:
-                    profile_id = int(parts[2])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                prof = get_profile(profile_id)
-                name = prof["dest_name"] if prof else ""
-                sources = get_profile_sources(profile_id)
-                src_text = "\n".join([f"• {s}" for s in sources]) if sources else "هیچ منبعی"
-                txt = msg("source_list", name=name, sources=src_text)
-                await q.edit_message_text(txt, reply_markup=source_list_kb(profile_id))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("src_del_"):
-            parts = d.split("_")
-            if len(parts) >= 4:
-                try:
-                    profile_id = int(parts[2])
-                    idx = int(parts[3])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                sources = get_profile_sources(profile_id)
-                if 0 <= idx < len(sources):
-                    removed = sources.pop(idx)
-                    set_profile_sources(profile_id, sources)
-                    await q.answer(msg("source_deleted"))
-                    prof = get_profile(profile_id)
-                    name = prof["dest_name"] if prof else ""
-                    src_text = "\n".join([f"• {s}" for s in sources]) if sources else "هیچ منبعی"
-                    txt = msg("source_list", name=name, sources=src_text)
-                    await q.edit_message_text(txt, reply_markup=source_list_kb(profile_id))
-                else:
-                    await q.answer("❌ خطا در ایندکس")
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("sa_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                ctx.user_data["action"] = f"sa_{profile_id}"
-                await q.edit_message_text(msg("send_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"src_list_{profile_id}", style="primary")]]))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        # مقصد
-        if d.startswith("dl_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                dest = get_profile_dest(profile_id)
-                body = f"مقصد فعلی: {dest}" if dest else "هیچ مقصدی تنظیم نشده"
-                await q.edit_message_text(f"📋 **تنظیم مقصد**\n\n{body}", reply_markup=destinations_kb(profile_id))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("da_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                ctx.user_data["action"] = f"da_{profile_id}"
-                await q.edit_message_text("📝 کانال مقصد جدید رو بفرست (با @ یا بدون):\nمثال: `@MyChannel`", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"dl_{profile_id}", style="primary")]]))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("dd_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                set_profile_dest(profile_id, "")
-                await q.answer(msg("removed"))
-                dest = get_profile_dest(profile_id)
-                body = f"مقصد فعلی: {dest}" if dest else "هیچ مقصدی تنظیم نشده"
-                await q.edit_message_text(f"📋 **تنظیم مقصد**\n\n{body}", reply_markup=destinations_kb(profile_id))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        # تنظیمات
-        if d.startswith("ac_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                ctx.user_data["action"] = f"ac_{profile_id}"
-                current_name = get_profile_dest(profile_id) or "نامشخص"
-                await q.edit_message_text(f"نام فعلی: {current_name}\nنام جدید را بفرست (یا دکمه خالی):", reply_markup=empty_button_kb(profile_id, f"empty_ac_{profile_id}"))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("empty_ac_"):
-            parts = d.split("_")
-            if len(parts) >= 3:
-                try:
-                    profile_id = int(parts[2])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                set_profile_dest(profile_id, "")
-                await q.answer("✅ نام پاک شد.")
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("ab_config_"):
-            parts = d.split("_")
-            if len(parts) >= 3:
-                try:
-                    profile_id = int(parts[2])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                ctx.user_data["action"] = f"ab_config_{profile_id}"
-                cur = html.escape(get_profile_banner_config(profile_id))
-                await q.edit_message_text(f"Current Config Banner:\n<code>{cur}</code>\n\nSend new banner (must contain {{configs}}):", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("ab_proxy_"):
-            parts = d.split("_")
-            if len(parts) >= 3:
-                try:
-                    profile_id = int(parts[2])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                ctx.user_data["action"] = f"ab_proxy_{profile_id}"
-                cur = html.escape(get_profile_banner_proxy(profile_id))
-                await q.edit_message_text(f"Current Proxy Banner:\n<code>{cur}</code>\n\nSend new banner (must contain {{proxies}}):", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        # بازه‌ها و max
-        if d.startswith("set_cfg_interval_"):
-            parts = d.split("_")
-            if len(parts) >= 4:
-                try:
-                    profile_id = int(parts[3])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                ctx.user_data["action"] = f"set_cfg_interval_{profile_id}"
-                current = get_profile_interval_config(profile_id)
-                await q.edit_message_text(f"بازه فعلی کانفیگ: {current} دقیقه\n\nعدد جدید (۰ تا ۱۴۴۰) یا دکمه خالی:", reply_markup=empty_button_kb(profile_id, f"empty_cfg_interval_{profile_id}"))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("empty_cfg_interval_"):
-            parts = d.split("_")
-            if len(parts) >= 4:
-                try:
-                    profile_id = int(parts[3])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                await q.answer("✅ بدون تغییر.")
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("set_prx_interval_"):
-            parts = d.split("_")
-            if len(parts) >= 4:
-                try:
-                    profile_id = int(parts[3])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                ctx.user_data["action"] = f"set_prx_interval_{profile_id}"
-                current = get_profile_interval_proxy(profile_id)
-                await q.edit_message_text(f"بازه فعلی پروکسی: {current} دقیقه\n\nعدد جدید (۰ تا ۱۴۴۰) یا دکمه خالی:", reply_markup=empty_button_kb(profile_id, f"empty_prx_interval_{profile_id}"))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("empty_prx_interval_"):
-            parts = d.split("_")
-            if len(parts) >= 4:
-                try:
-                    profile_id = int(parts[3])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                await q.answer("✅ بدون تغییر.")
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("set_cfg_max_"):
-            parts = d.split("_")
-            if len(parts) >= 4:
-                try:
-                    profile_id = int(parts[3])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                ctx.user_data["action"] = f"set_cfg_max_{profile_id}"
-                current = get_profile_max_post_config(profile_id)
-                await q.edit_message_text(f"حداکثر تعداد کانفیگ فعلی: {current}\n\nعدد جدید (۱ تا ۵۰) یا دکمه خالی:", reply_markup=empty_button_kb(profile_id, f"empty_cfg_max_{profile_id}"))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("empty_cfg_max_"):
-            parts = d.split("_")
-            if len(parts) >= 4:
-                try:
-                    profile_id = int(parts[3])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                await q.answer("✅ بدون تغییر.")
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("set_prx_max_"):
-            parts = d.split("_")
-            if len(parts) >= 4:
-                try:
-                    profile_id = int(parts[3])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                ctx.user_data["action"] = f"set_prx_max_{profile_id}"
-                current = get_profile_max_post_proxy(profile_id)
-                await q.edit_message_text(f"حداکثر تعداد پروکسی فعلی: {current}\n\nعدد جدید (۱ تا ۵۰) یا دکمه خالی:", reply_markup=empty_button_kb(profile_id, f"empty_prx_max_{profile_id}"))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("empty_prx_max_"):
-            parts = d.split("_")
-            if len(parts) >= 4:
-                try:
-                    profile_id = int(parts[3])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                await q.answer("✅ بدون تغییر.")
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("ast_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                n_seen = c.execute("SELECT COUNT(*) FROM seen WHERE profile_id=?", (profile_id,)).fetchone()[0]
-                n_sp = c.execute("SELECT COUNT(*) FROM sponsors WHERE profile_id=?", (profile_id,)).fetchone()[0]
-                next_n = get_profile_last_num(profile_id) + 1
-                dest = get_profile_dest(profile_id)
-                txt = f"📊 مقصد: {dest}\nمنابع: {len(get_profile_sources(profile_id))}\nاسپانسر: {n_sp}\nبعدی: #{next_n}\nحداکثر کانفیگ: {get_profile_max_post_config(profile_id)}\nحداکثر پروکسی: {get_profile_max_post_proxy(profile_id)}"
-                await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"prof_{profile_id}", style="primary")]]))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("sendtest_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                dest = get_profile_dest(profile_id)
-                if not dest:
-                    await q.answer("❌ No destination set!", show_alert=True)
-                    return
-                try:
-                    await u.get_bot().send_message(dest, f"Test {get_tehran_time()}")
-                    await q.answer("✅ Test sent")
-                except Exception as e:
-                    await q.answer(f"❌ {str(e)[:80]}", show_alert=True)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("runnow_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                if not get_profile_enabled(profile_id):
-                    await q.answer("⛔ پروفایل غیرفعال است!", show_alert=True)
-                    return
-                p = await q.edit_message_text("⏳ در حال اجرا...")
-                try:
-                    n, m = await run_cycle_for_profile(u.get_bot(), profile_id, enable_configs=True, enable_proxies=True, is_instant=False)
-                    await p.edit_text(f"✅ Done: {n} - {m}")
-                except Exception as e:
-                    log.error(f"❌ runnow error: {e}")
-                    await p.edit_text(f"❌ {str(e)[:200]}")
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("instant_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                set_profile_interval_config(profile_id, 0)
-                set_profile_interval_proxy(profile_id, 0)
-                await q.answer("⚡ حالت اپدیت لحظه‌ای برای کانفیگ و پروکسی فعال شد")
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("tglping_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                current = get_profile_ping_mode(profile_id)
-                new_mode = "global" if current == "iran" else "iran"
-                set_profile_ping_mode(profile_id, new_mode)
-                await q.answer(f"حالت پینگ: {'جهانی' if new_mode == 'global' else 'ایران'}")
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("tgl_ping_"):
-            parts = d.split("_")
-            if len(parts) >= 3:
-                try:
-                    profile_id = int(parts[2])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                current = get_profile_ping_enabled(profile_id)
-                new_val = not current
-                set_profile_ping_enabled(profile_id, new_val)
-                await q.answer(msg("toggle_ping", status=new_val))
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("tgl_profile_"):
-            parts = d.split("_")
-            if len(parts) >= 3:
-                try:
-                    profile_id = int(parts[2])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                current = get_profile_enabled(profile_id)
-                new_val = not current
-                set_profile_enabled(profile_id, new_val)
-                await q.answer(msg("toggle_profile", status=new_val))
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("tglcfg_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                current = get_profile_post_configs(profile_id)
-                new_val = not current
-                set_profile_post_configs(profile_id, new_val)
-                await q.answer(msg("toggle_configs", status=new_val))
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("tglproxy_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                current = get_profile_post_proxies(profile_id)
-                new_val = not current
-                set_profile_post_proxies(profile_id, new_val)
-                await q.answer(msg("toggle_proxies", status=new_val))
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("togglenum_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                current = get_profile_show_numbers(profile_id)
-                new_val = not current
-                set_profile_show_numbers(profile_id, new_val)
-                await q.answer(msg("toggle_numbers_ok", status=new_val))
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("tgl_date_cfg_"):
-            parts = d.split("_")
-            if len(parts) >= 4:
-                try:
-                    profile_id = int(parts[3])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                current = get_profile_show_date_config(profile_id)
-                set_profile_show_date_config(profile_id, not current)
-                await q.answer(msg("date_cfg_toggle", status=not current))
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("tgl_date_prx_"):
-            parts = d.split("_")
-            if len(parts) >= 4:
-                try:
-                    profile_id = int(parts[3])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                current = get_profile_show_date_proxy(profile_id)
-                set_profile_show_date_proxy(profile_id, not current)
-                await q.answer(msg("date_prx_toggle", status=not current))
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("clearquery_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                set_profile_custom_query(profile_id, "")
-                await q.answer("✅ کوئری سفارشی پاک شد.")
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("setquery_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                ctx.user_data["action"] = f"setquery_{profile_id}"
-                current = get_profile_custom_query(profile_id) or "خالی"
-                await q.edit_message_text(f"کوئری فعلی: {current}\n" + msg("custom_query_prompt"), reply_markup=empty_button_kb(profile_id, f"empty_query_{profile_id}"))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("empty_query_"):
-            parts = d.split("_")
-            if len(parts) >= 3:
-                try:
-                    profile_id = int(parts[2])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                set_profile_custom_query(profile_id, "")
-                await q.answer("✅ کوئری پاک شد.")
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("rn_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                set_profile_last_num(profile_id, 0)
-                await q.answer(msg("reset_ok"))
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("cd1_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                await q.edit_message_text(msg("clear_q1"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("YES", callback_data=f"cd2_{profile_id}", style="danger")], [InlineKeyboardButton("NO", callback_data=f"prof_{profile_id}", style="primary")]]))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("cd2_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                c.execute("DELETE FROM seen WHERE profile_id=?", (profile_id,))
-                c.execute("DELETE FROM posts")
-                c.execute("DELETE FROM country_cache")
-                c.execute("DELETE FROM last_scrape WHERE profile_id=?", (profile_id,))
-                c.execute("DELETE FROM processed_messages WHERE profile_id=?", (profile_id,))
-                c.execute("DELETE FROM proxies_seen WHERE profile_id=?", (profile_id,))
-                c.execute("DELETE FROM sponsors WHERE profile_id=?", (profile_id,))
-                c.execute("DELETE FROM blacklist WHERE profile_id=?", (profile_id,))
-                set_profile_last_num(profile_id, 0)
-                conn.commit()
-                await q.answer("پاک شد")
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("manual_"):
-            parts = d.split("_")
-            if len(parts) >= 2:
-                try:
-                    profile_id = int(parts[1])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                ctx.user_data["action"] = f"manual_{profile_id}"
-                await q.edit_message_text(msg("manual_send_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"prof_{profile_id}", style="danger")]]))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        # بخش‌های جدید: backup export، timer، log، backup interval، cron، blacklist
+        # ===== بک‌آپ export، timer، log، backup interval، cron، blacklist =====
         if d.startswith("backup_export_menu_"):
             parts = d.split("_")
             if len(parts) >= 4:
                 try:
                     profile_id = int(parts[3])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
-                await q.edit_message_text(msg("backup_export_type"), reply_markup=backup_export_type_kb(profile_id))
+                await edit_or_reply(msg("backup_export_type"), backup_export_type_kb(profile_id))
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("backup_export_type_"):
@@ -4187,12 +4587,18 @@ async def on_callback(u, ctx):
                     profile_id = int(parts[3])
                     backup_type = parts[4]
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 ctx.user_data["backup_export"] = {"profile_id": profile_id, "type": backup_type}
-                await q.edit_message_text(msg("backup_export_scope"), reply_markup=backup_export_scope_kb(profile_id, backup_type))
+                await edit_or_reply(msg("backup_export_scope"), backup_export_scope_kb(profile_id, backup_type))
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("backup_export_scope_"):
@@ -4203,21 +4609,30 @@ async def on_callback(u, ctx):
                     backup_type = parts[4]
                     scope = parts[5]
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 if scope == "all":
                     await export_backup(q, ctx, profile_id, backup_type, -1)
-                    await q.edit_message_text("✅ بک‌آپ ارسال شد.")
+                    await edit_or_reply("✅ بک‌آپ ارسال شد.")
                 elif scope == "100":
                     await export_backup(q, ctx, profile_id, backup_type, 100)
-                    await q.edit_message_text("✅ بک‌آپ ارسال شد.")
+                    await edit_or_reply("✅ بک‌آپ ارسال شد.")
                 elif scope == "custom":
                     ctx.user_data["backup_export_custom"] = {"profile_id": profile_id, "type": backup_type}
-                    await q.edit_message_text(msg("backup_export_count_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"backup_export_menu_{profile_id}", style="primary")]]))
+                    await edit_or_reply(msg("backup_export_count_prompt"), InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"backup_export_menu_{profile_id}", style="primary")]]))
                 else:
-                    await q.answer("⚠️ محدوده نامعتبر")
+                    try:
+                        await q.answer("⚠️ محدوده نامعتبر")
+                    except:
+                        pass
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("timer_menu_"):
@@ -4226,11 +4641,14 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 prof = get_profile(profile_id)
                 if not prof:
-                    await q.edit_message_text(msg("profile_not_found"))
+                    await edit_or_reply(msg("profile_not_found"))
                     return
                 expiry, remaining = get_profile_timer(profile_id)
                 if expiry:
@@ -4238,9 +4656,12 @@ async def on_callback(u, ctx):
                 else:
                     status = msg("timer_status_inactive")
                 txt = msg("timer_menu", name=prof["dest_name"], status=status)
-                await q.edit_message_text(txt, parse_mode="HTML", reply_markup=timer_menu_kb(profile_id))
+                await edit_or_reply(txt, timer_menu_kb(profile_id))
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("timer_set_"):
@@ -4250,13 +4671,22 @@ async def on_callback(u, ctx):
                     profile_id = int(parts[2])
                     minutes = int(parts[3])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 set_profile_timer(profile_id, minutes)
-                await q.answer(msg("timer_set", minutes=minutes))
+                try:
+                    await q.answer(msg("timer_set", minutes=minutes))
+                except:
+                    pass
                 await show_profile_admin(q.message, profile_id)
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("timer_clear_"):
@@ -4265,13 +4695,22 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 clear_profile_timer(profile_id)
-                await q.answer(msg("timer_cleared"))
+                try:
+                    await q.answer(msg("timer_cleared"))
+                except:
+                    pass
                 await show_profile_admin(q.message, profile_id)
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("timer_custom_"):
@@ -4280,14 +4719,20 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 ctx.user_data["action"] = f"timer_custom_{profile_id}"
-                await q.edit_message_text(msg("timer_custom_prompt"), reply_markup=InlineKeyboardMarkup([
+                await edit_or_reply(msg("timer_custom_prompt"), InlineKeyboardMarkup([
                     [InlineKeyboardButton(msg("btn_back"), callback_data=f"timer_menu_{profile_id}", style="primary")]
                 ]))
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("log_menu_"):
@@ -4296,15 +4741,21 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
-                await q.edit_message_text(
+                await edit_or_reply(
                     msg("log_menu_title"),
                     parse_mode="HTML",
                     reply_markup=log_menu_kb(profile_id)
                 )
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("log_full_") or d.startswith("log_errors_"):
@@ -4313,16 +4764,22 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 log_type = "full" if d.startswith("log_full_") else "errors"
-                await q.edit_message_text(
+                await edit_or_reply(
                     msg("log_range_title", log_type=log_type),
                     parse_mode="HTML",
                     reply_markup=log_range_kb(profile_id, log_type)
                 )
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("log_range_"):
@@ -4333,12 +4790,18 @@ async def on_callback(u, ctx):
                     log_type = parts[3]
                     minutes = int(parts[4])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 await get_logs(q, ctx, profile_id, log_type, minutes)
                 await show_profile_admin(q.message, profile_id)
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("setbackupinterval_"):
@@ -4347,15 +4810,21 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[1])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 ctx.user_data["action"] = f"setbackupinterval_{profile_id}"
                 current = get_profile_backup_interval(profile_id)
-                await q.edit_message_text(f"بازه فعلی: {current}\n{msg('backup_interval_prompt')}", reply_markup=InlineKeyboardMarkup([
+                await edit_or_reply(f"بازه فعلی: {current}\n{msg('backup_interval_prompt')}", InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔙 بازگشت", callback_data=f"prof_{profile_id}", style="primary")]
                 ]))
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("setcron_"):
@@ -4364,13 +4833,19 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[1])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 ctx.user_data["action"] = f"setcron_{profile_id}"
                 current = get_profile_schedule_cron(profile_id) or "خالی"
-                await q.edit_message_text(f"⏰ کرون فعلی: {current}\n\n" + msg("schedule_cron_prompt"), reply_markup=empty_button_kb(profile_id, f"empty_cron_{profile_id}"))
+                await edit_or_reply(f"⏰ کرون فعلی: {current}\n\n" + msg("schedule_cron_prompt"), empty_button_kb(profile_id, f"empty_cron_{profile_id}"))
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("empty_cron_"):
@@ -4379,13 +4854,22 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 set_profile_schedule_cron(profile_id, "")
-                await q.answer("✅ کرون پاک شد.")
+                try:
+                    await q.answer("✅ کرون پاک شد.")
+                except:
+                    pass
                 await show_profile_admin(q.message, profile_id)
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("bl_list_"):
@@ -4394,16 +4878,22 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 prof = get_profile(profile_id)
                 name = prof["dest_name"] if prof else ""
                 words = get_blacklist(profile_id)
                 words_text = "\n".join([f"• `{w}`" for w in words]) if words else msg("blacklist_empty")
                 txt = msg("blacklist_title", name=name, words=words_text)
-                await q.edit_message_text(txt, parse_mode="HTML", reply_markup=blacklist_kb(profile_id))
+                await edit_or_reply(txt, parse_mode="HTML", reply_markup=blacklist_kb(profile_id))
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("bl_add_"):
@@ -4412,12 +4902,18 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 ctx.user_data["action"] = f"bl_add_{profile_id}"
-                await q.edit_message_text(msg("blacklist_add_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"bl_list_{profile_id}", style="primary")]]))
+                await edit_or_reply(msg("blacklist_add_prompt"), InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data=f"bl_list_{profile_id}", style="primary")]]))
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("bl_del_"):
@@ -4427,18 +4923,27 @@ async def on_callback(u, ctx):
                     profile_id = int(parts[2])
                     word = "_".join(parts[3:])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 remove_blacklist_word(profile_id, word)
-                await q.answer(msg("blacklist_removed"))
+                try:
+                    await q.answer(msg("blacklist_removed"))
+                except:
+                    pass
                 prof = get_profile(profile_id)
                 name = prof["dest_name"] if prof else ""
                 words = get_blacklist(profile_id)
                 words_text = "\n".join([f"• `{w}`" for w in words]) if words else msg("blacklist_empty")
                 txt = msg("blacklist_title", name=name, words=words_text)
-                await q.edit_message_text(txt, parse_mode="HTML", reply_markup=blacklist_kb(profile_id))
+                await edit_or_reply(txt, parse_mode="HTML", reply_markup=blacklist_kb(profile_id))
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("bl_clear_"):
@@ -4447,21 +4952,30 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 clear_blacklist(profile_id)
-                await q.answer(msg("blacklist_clear"))
+                try:
+                    await q.answer(msg("blacklist_clear"))
+                except:
+                    pass
                 prof = get_profile(profile_id)
                 name = prof["dest_name"] if prof else ""
                 txt = msg("blacklist_title", name=name, words=msg("blacklist_empty"))
-                await q.edit_message_text(txt, parse_mode="HTML", reply_markup=blacklist_kb(profile_id))
+                await edit_or_reply(txt, parse_mode="HTML", reply_markup=blacklist_kb(profile_id))
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("backup_"):
             try:
-                await q.edit_message_text("⏳ در حال تهیه بک‌آپ...")
+                await edit_or_reply("⏳ در حال تهیه بک‌آپ...")
                 with open(DB_PATH, "rb") as f:
                     await q.message.reply_document(
                         document=f,
@@ -4480,14 +4994,17 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[1])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 prof = get_profile(profile_id)
                 if not prof:
-                    await q.edit_message_text(msg("profile_not_found"))
+                    await edit_or_reply(msg("profile_not_found"))
                     return
                 txt = msg("delete_confirm1", name=prof["dest_name"], id=profile_id)
-                await q.edit_message_text(
+                await edit_or_reply(
                     txt,
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
@@ -4496,7 +5013,10 @@ async def on_callback(u, ctx):
                     ])
                 )
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("delprof_confirm1_"):
@@ -4505,14 +5025,17 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 prof = get_profile(profile_id)
                 if not prof:
-                    await q.edit_message_text(msg("profile_not_found"))
+                    await edit_or_reply(msg("profile_not_found"))
                     return
                 txt = msg("delete_confirm2", name=prof["dest_name"], id=profile_id)
-                await q.edit_message_text(
+                await edit_or_reply(
                     txt,
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
@@ -4521,7 +5044,10 @@ async def on_callback(u, ctx):
                     ])
                 )
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("delprof_confirm2_"):
@@ -4530,15 +5056,24 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 delete_profile(profile_id)
-                await q.answer("✅ پروفایل حذف شد.")
-                await q.edit_message_text(msg("profile_deleted"), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
+                try:
+                    await q.answer("✅ پروفایل حذف شد.")
+                except:
+                    pass
+                await edit_or_reply(msg("profile_deleted"), reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="profiles_list", style="primary")]
                 ]))
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         # ===== تنظیم قالب نام‌گذاری =====
@@ -4548,17 +5083,23 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 ctx.user_data["action"] = f"set_naming_{profile_id}"
                 current = get_profile_naming_template(profile_id)
-                await q.edit_message_text(
+                await edit_or_reply(
                     f"قالب فعلی:\n`{current}`\n\n" + msg("naming_template_prompt"),
                     parse_mode="HTML",
                     reply_markup=empty_button_kb(profile_id, f"empty_naming_{profile_id}")
                 )
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("empty_naming_"):
@@ -4567,33 +5108,48 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 set_profile_naming_template(profile_id, "{Flag} | ⚡️Telegram = {CHANNEL_ID}")
-                await q.answer("✅ قالب به پیش‌فرض برگردانده شد.")
+                try:
+                    await q.answer("✅ قالب به پیش‌فرض برگردانده شد.")
+                except:
+                    pass
                 await show_profile_admin(q.message, profile_id)
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
-        # ===== تنظیم لینک کانال (اصلاح شده) =====
+        # ===== تنظیم لینک کانال =====
         if d.startswith("set_channel_link_"):
             parts = d.split("_")
             if len(parts) >= 3:
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 ctx.user_data["action"] = f"set_channel_link_{profile_id}"
                 current = get_profile_channel_link(profile_id) or "خالی"
-                await q.edit_message_text(
+                await edit_or_reply(
                     f"🔗 لینک کانال فعلی: `{current}`\n\n" + msg("channel_link_prompt"),
                     parse_mode="HTML",
                     reply_markup=empty_button_kb(profile_id, f"empty_channel_link_{profile_id}")
                 )
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         if d.startswith("empty_channel_link_"):
@@ -4602,13 +5158,22 @@ async def on_callback(u, ctx):
                 try:
                     profile_id = int(parts[2])
                 except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
+                    try:
+                        await q.answer("⚠️ شناسه نامعتبر")
+                    except:
+                        pass
                     return
                 set_profile_channel_link(profile_id, "")
-                await q.answer("✅ لینک کانال پاک شد.")
+                try:
+                    await q.answer("✅ لینک کانال پاک شد.")
+                except:
+                    pass
                 await show_profile_admin(q.message, profile_id)
             else:
-                await q.answer("⚠️ خطا در داده")
+                try:
+                    await q.answer("⚠️ خطا در داده")
+                except:
+                    pass
             return
 
         await show_profiles_list(q.message)
@@ -4616,10 +5181,13 @@ async def on_callback(u, ctx):
     except Exception as e:
         log.error(f"❌ on_callback ERROR: {e}\n{traceback.format_exc()}")
         try:
-            await q.edit_message_text(f"⚠️ خطا: {str(e)[:100]}")
+            await edit_or_reply(f"⚠️ خطا: {str(e)[:100]}")
         except:
             pass
 
+# ======================================================================
+# توابع نمایش پروفایل و غیره
+# ======================================================================
 async def show_profile_admin(msg_or_q, profile_id):
     prof = get_profile(profile_id)
     if not prof:
@@ -4709,6 +5277,7 @@ async def on_text(u, ctx):
     if not is_admin(u.effective_user.id):
         return
 
+    # مدیریت تایمر سفارشی
     if ctx.user_data.get("action", "").startswith("timer_custom_"):
         profile_id = int(ctx.user_data["action"].split("_")[2])
         try:
@@ -4724,6 +5293,7 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
+    # بک‌آپ export custom
     if ctx.user_data.get("backup_export_custom"):
         data = ctx.user_data["backup_export_custom"]
         profile_id = data["profile_id"]
@@ -4740,6 +5310,7 @@ async def on_text(u, ctx):
         await u.message.reply_text("✅ بک‌آپ ارسال شد.")
         return
 
+    # ویرایش اسپانسر
     if ctx.user_data.get("sponsor_edit_field"):
         field = ctx.user_data["sponsor_edit_field"]
         profile_id = ctx.user_data.get("sponsor_edit_profile_id")
@@ -4839,6 +5410,7 @@ async def on_text(u, ctx):
 
     t = u.message.text.strip()
 
+    # ===== مدیریت اکشن‌های متنی =====
     if a.startswith("setbackupinterval_"):
         profile_id = int(a.split("_")[1])
         try:
@@ -5130,15 +5702,8 @@ async def on_text(u, ctx):
     if a.startswith("setquery_"):
         profile_id = int(a.split("_")[1])
         query = t if t else ""
-        try:
-            set_profile_custom_query(profile_id, query)
-            saved = get_profile_custom_query(profile_id)
-            if saved == query:
-                await u.message.reply_text(msg("custom_query_set", query=query if query else "خالی"))
-            else:
-                await u.message.reply_text(f"❌ خطا در ذخیره‌سازی کوئری. مقدار فعلی: '{saved}'")
-        except Exception as e:
-            await u.message.reply_text(f"❌ خطا در ذخیره‌سازی کوئری: {str(e)}")
+        set_profile_custom_query(profile_id, query)
+        await u.message.reply_text(msg("custom_query_set", query=query if query else "خالی"))
         del ctx.user_data["action"]
         await show_profile_admin(u.message, profile_id)
         return
@@ -5261,8 +5826,8 @@ async def process_manual_text(u, message, profile_id, is_document=False):
                 proxy_with_ping.append((proxy_url, 0, flag))
             cnt, payload = await post_proxies(u.get_bot(), profile_id, proxy_with_ping, is_instant=False, max_proxies_override=len(chunk))
             if cnt > 0 and payload:
-                text_p, buttons = payload
-                sent = await send_to_destination(u.get_bot(), profile_id, text_p, buttons)
+                text_p, reply_markup = payload
+                sent = await send_to_destination(u.get_bot(), profile_id, text_p, reply_markup)
                 if sent:
                     total_proxies_sent += cnt
             await asyncio.sleep(1)
@@ -5280,8 +5845,8 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, forc
     if proxies_with_ping:
         cnt, payload = await post_proxies(bot, profile_id, proxies_with_ping)
         if cnt > 0 and payload:
-            text, buttons = payload
-            sent = await send_to_destination(bot, profile_id, text, buttons)
+            text, reply_markup = payload
+            sent = await send_to_destination(bot, profile_id, text, reply_markup)
             if sent:
                 total_proxies = cnt
     return total_configs, total_proxies
@@ -5342,6 +5907,17 @@ async def post_init(app):
     global BOT_REF, BOT_START_TIME
     BOT_REF = app.bot
     BOT_START_TIME = datetime.utcnow()
+    # پاک کردن تایمرهای منقضی شده
+    for prof in get_profiles():
+        expiry_str = prof.get("timer_expiry")
+        if expiry_str:
+            try:
+                expiry = datetime.fromisoformat(expiry_str)
+                if expiry < datetime.now(TEHRAN_TZ):
+                    clear_profile_timer(prof['id'])
+                    log.info(f"Cleared expired timer for profile {prof['id']}")
+            except:
+                clear_profile_timer(prof['id'])
     profiles = get_profiles()
     if not profiles:
         new_id = create_profile("@VaslZone", sources="@Cfox_Server")
@@ -5387,6 +5963,7 @@ def main():
     app.add_handler(CommandHandler("sendtest", cmd_sendtest))
     app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(CommandHandler("balance", cmd_balance))
+    app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

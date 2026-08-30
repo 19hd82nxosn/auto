@@ -662,7 +662,6 @@ def set_profile_custom_query(profile_id, query):
     query = query.strip()
     c.execute("UPDATE profiles SET custom_query=? WHERE id=?", (query, profile_id))
     conn.commit()
-    # No need to verify; it's saved.
 
 def get_profile_show_date_config(profile_id):
     prof = get_profile(profile_id)
@@ -1782,7 +1781,7 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
     return count, (text, reply_markup)
 
 # ======================================================================
-# چرخه اصلی (اصلاح‌شده با لاگ‌های بیشتر)
+# چرخه اصلی (با timeout و مدیریت خطا)
 # ======================================================================
 async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_proxies=True, is_instant=False):
     log.info("=" * 50)
@@ -1826,6 +1825,21 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     ping_enabled = get_profile_ping_enabled(profile_id)
     log.info(f"📡 Sources: {len(sources)} | 🎯 {dest} | 🌍 Ping: {ping_mode} | Ping enabled: {ping_enabled}")
 
+    # اجرای با timeout 120 ثانیه
+    try:
+        return await asyncio.wait_for(
+            _run_cycle_internal(bot, profile_id, sources, dest, ping_mode, ping_enabled, enable_configs, enable_proxies, is_instant),
+            timeout=120.0
+        )
+    except asyncio.TimeoutError:
+        log.error(f"⏰ Cycle for profile {profile_id} timed out after 120 seconds.")
+        return 0, "timeout"
+    except Exception as e:
+        log.error(f"❌ Cycle for profile {profile_id} failed: {e}\n{traceback.format_exc()}")
+        return 0, f"error: {str(e)[:100]}"
+
+async def _run_cycle_internal(bot, profile_id, sources, dest, ping_mode, ping_enabled, enable_configs, enable_proxies, is_instant):
+    # این تابع همان بدنه‌ی قبلی run_cycle_for_profile است (بدون timeout)
     all_configs = []
     all_proxies = []
     seen_urls = set()
@@ -2007,7 +2021,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     return total_configs + total_proxies, result_msg
 
 # ======================================================================
-# حلقه‌های خودکار (با لاگ‌های بیشتر)
+# حلقه‌های خودکار (با لاگ‌های بیشتر و مقاوم‌سازی)
 # ======================================================================
 async def profile_loop_config(bot, profile_id):
     log.info(f"🔄 Starting config loop for profile {profile_id}")
@@ -2081,8 +2095,7 @@ async def profile_loop_config(bot, profile_id):
             log.info(f"🛑 Config loop for profile {profile_id} cancelled.")
             break
         except Exception as e:
-            log.error(f"❌ profile_loop_config error: {e}")
-            log.error(traceback.format_exc())
+            log.error(f"❌ profile_loop_config error: {e}\n{traceback.format_exc()}")
             await asyncio.sleep(60)
 
 async def profile_loop_proxy(bot, profile_id):
@@ -2157,8 +2170,7 @@ async def profile_loop_proxy(bot, profile_id):
             log.info(f"🛑 Proxy loop for profile {profile_id} cancelled.")
             break
         except Exception as e:
-            log.error(f"❌ profile_loop_proxy error: {e}")
-            log.error(traceback.format_exc())
+            log.error(f"❌ profile_loop_proxy error: {e}\n{traceback.format_exc()}")
             await asyncio.sleep(60)
 
 # ======================================================================
@@ -3224,12 +3236,19 @@ async def cmd_runnow(u, ctx):
                 results.append(f"{prof['dest_name']}: غیرفعال")
                 continue
             log.info(f"🚀 /runnow for profile {prof['id']}")
-            n, m = await run_cycle_for_profile(u.get_bot(), prof['id'], enable_configs=True, enable_proxies=True, is_instant=False)
-            results.append(f"{prof['dest_name']}: {n} - {m}")
+            try:
+                n, m = await asyncio.wait_for(
+                    run_cycle_for_profile(u.get_bot(), prof['id'], enable_configs=True, enable_proxies=True, is_instant=False),
+                    timeout=120.0
+                )
+                results.append(f"{prof['dest_name']}: {n} - {m}")
+            except asyncio.TimeoutError:
+                results.append(f"{prof['dest_name']}: timeout")
+            except Exception as e:
+                results.append(f"{prof['dest_name']}: error - {str(e)[:50]}")
         await p.edit_text("✅ Done:\n" + "\n".join(results))
     except Exception as e:
-        log.error(f"❌ /runnow error: {e}")
-        log.error(traceback.format_exc())
+        log.error(f"❌ /runnow error: {e}\n{traceback.format_exc()}")
         await p.edit_text(f"❌ {str(e)[:200]}")
 
 async def cmd_runall(u, ctx):
@@ -3244,12 +3263,19 @@ async def cmd_runall(u, ctx):
                 results.append(f"{prof['dest_name']}: غیرفعال")
                 continue
             log.info(f"🚀 /runall for profile {prof['id']}")
-            n, m = await run_cycle_for_profile(u.get_bot(), prof['id'], enable_configs=True, enable_proxies=True, is_instant=False)
-            results.append(f"{prof['dest_name']}: {n} - {m}")
+            try:
+                n, m = await asyncio.wait_for(
+                    run_cycle_for_profile(u.get_bot(), prof['id'], enable_configs=True, enable_proxies=True, is_instant=False),
+                    timeout=120.0
+                )
+                results.append(f"{prof['dest_name']}: {n} - {m}")
+            except asyncio.TimeoutError:
+                results.append(f"{prof['dest_name']}: timeout")
+            except Exception as e:
+                results.append(f"{prof['dest_name']}: error - {str(e)[:50]}")
         await p.edit_text("✅ Done:\n" + "\n".join(results))
     except Exception as e:
-        log.error(f"❌ /runall error: {e}")
-        log.error(traceback.format_exc())
+        log.error(f"❌ /runall error: {e}\n{traceback.format_exc()}")
         await p.edit_text(f"❌ {str(e)[:200]}")
 
 async def cmd_sendtest(u, ctx):
@@ -3293,12 +3319,10 @@ async def cmd_diag(update: Update, context):
 # ======================================================================
 async def on_callback(u, ctx):
     q = u.callback_query
-    # ابتدا سعی می‌کنیم پاسخ دهیم، اما خطا را نادیده می‌گیریم
     try:
         await q.answer()
     except Exception as e:
-        log.warning(f"Callback answer failed: {e}")
-        # اگر نتوانستیم پاسخ دهیم، همچنان ادامه می‌دهیم
+        log.warning(f"Callback answer failed (ignored): {e}")
 
     if not is_admin(q.from_user.id):
         try:
@@ -3313,15 +3337,14 @@ async def on_callback(u, ctx):
     if d == "dummy":
         return
 
-    # تابع کمکی برای ارسال/ویرایش پیام
     async def edit_or_reply(text, reply_markup=None, parse_mode="HTML"):
         try:
             await q.edit_message_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
         except BadRequest as e:
-            if "message to edit" in str(e) or "message not found" in str(e):
-                # اگر نتوانستیم ویرایش کنیم، پیام جدید ارسال می‌کنیم
+            if "message to edit" in str(e) or "message not found" in str(e) or "can't edit" in str(e):
                 await q.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
             else:
+                log.error(f"Edit error: {e}")
                 raise
 
     try:
@@ -3938,10 +3961,15 @@ async def on_callback(u, ctx):
                     return
                 p = await q.edit_message_text("⏳ در حال اجرا...")
                 try:
-                    n, m = await run_cycle_for_profile(u.get_bot(), profile_id, enable_configs=True, enable_proxies=True, is_instant=False)
+                    n, m = await asyncio.wait_for(
+                        run_cycle_for_profile(u.get_bot(), profile_id, enable_configs=True, enable_proxies=True, is_instant=False),
+                        timeout=120.0
+                    )
                     await p.edit_text(f"✅ Done: {n} - {m}")
+                except asyncio.TimeoutError:
+                    await p.edit_text("❌ Timeout (بیش از ۲ دقیقه)")
                 except Exception as e:
-                    log.error(f"❌ runnow error: {e}")
+                    log.error(f"❌ runnow error: {e}\n{traceback.format_exc()}")
                     await p.edit_text(f"❌ {str(e)[:200]}")
             else:
                 try:

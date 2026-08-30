@@ -139,8 +139,9 @@ c.execute("""CREATE TABLE IF NOT EXISTS last_scrape (
     source TEXT,
     last_scrape_time TEXT,
     profile_id INTEGER DEFAULT 1,
+    last_message_id TEXT DEFAULT '',
     UNIQUE(source, profile_id))""")
-ensure_column("last_scrape", "profile_id", "INTEGER DEFAULT 1", 1)
+ensure_column("last_scrape", "last_message_id", "TEXT DEFAULT ''", "")
 
 c.execute("""CREATE TABLE IF NOT EXISTS processed_messages (
     source TEXT,
@@ -369,12 +370,13 @@ def migrate_tables_for_profile_isolation():
                     source TEXT,
                     last_scrape_time TEXT,
                     profile_id INTEGER DEFAULT 1,
+                    last_message_id TEXT DEFAULT '',
                     UNIQUE(source, profile_id)
                 )
             """)
             c.execute("""
-                INSERT INTO last_scrape (source, last_scrape_time, profile_id)
-                SELECT source, last_scrape_time, profile_id FROM last_scrape_old
+                INSERT INTO last_scrape (source, last_scrape_time, profile_id, last_message_id)
+                SELECT source, last_scrape_time, profile_id, '' FROM last_scrape_old
             """)
             c.execute("DROP TABLE last_scrape_old")
             conn.commit()
@@ -1017,9 +1019,17 @@ def get_last_scrape_time(profile_id, source):
     r = c.execute("SELECT last_scrape_time FROM last_scrape WHERE source=? AND profile_id=?", (source, profile_id)).fetchone()
     return r[0] if r else None
 
-def update_last_scrape_time(profile_id, source, time_str):
-    c.execute("INSERT OR REPLACE INTO last_scrape (source, last_scrape_time, profile_id) VALUES (?,?,?)",
-              (source, time_str, profile_id))
+def update_last_scrape_time(profile_id, source, time_str, last_message_id=""):
+    c.execute("INSERT OR REPLACE INTO last_scrape (source, last_scrape_time, profile_id, last_message_id) VALUES (?,?,?,?)",
+              (source, time_str, profile_id, last_message_id))
+    conn.commit()
+
+def get_last_message_id(profile_id, source):
+    r = c.execute("SELECT last_message_id FROM last_scrape WHERE source=? AND profile_id=?", (source, profile_id)).fetchone()
+    return r[0] if r else ""
+
+def update_last_message_id(profile_id, source, msg_id):
+    c.execute("UPDATE last_scrape SET last_message_id=? WHERE source=? AND profile_id=?", (msg_id, source, profile_id))
     conn.commit()
 
 def strip_url_fragment(url):
@@ -1213,7 +1223,7 @@ async def check_full_link_ping(url, ping_mode="iran"):
     return ping, ok, cnt
 
 # ======================================================================
-# اسکرپ (همیشه همه لینک‌ها را برمی‌گرداند)
+# اسکرپ (با پیج‌بندی کامل و استخراج شناسه پیام)
 # ======================================================================
 _scrape_cache = {}
 _USER_AGENTS = [
@@ -1226,20 +1236,91 @@ _USER_AGENTS = [
 
 async def scrape_channel_with_retry(profile_id, channel, max_retries=2):
     try:
-        return await _scrape_channel_internal(profile_id, channel)
+        return await scrape_channel_paginated(profile_id, channel)
     except Exception as e:
         log.error(f"❌ scrape {channel} error: {e}")
         return [], []
 
-async def _scrape_channel_internal(profile_id, channel):
-    import time as _t
-    current_time = _t.time()
+async def scrape_channel_paginated(profile_id, channel):
+    """
+    اسکرپ کامل کانال با پیج‌بندی تا جایی که پیام‌های جدید پیدا شود.
+    از last_message_id برای تشخیص پیام‌های قبلاً دیده شده استفاده می‌کند.
+    """
     clean_channel = normalize_channel_input(channel)
     if not clean_channel:
         log.warning(f"Invalid channel name: {channel}")
         return [], []
-    url = f"https://t.me/s/{clean_channel.lstrip('@')}"
-    log.info(f"🔍 Scraping {clean_channel}...")
+
+    last_seen_msg_id = get_last_message_id(profile_id, clean_channel)
+    base_url = f"https://t.me/s/{clean_channel.lstrip('@')}"
+    all_configs = []
+    all_proxies = []
+    current_url = base_url
+    max_pages = 10   # برای جلوگیری از حلقه بی‌نهایت
+    page_count = 0
+    oldest_msg_id = None
+
+    while page_count < max_pages:
+        page_count += 1
+        log.info(f"🔍 Scraping page {page_count} for {clean_channel} (url: {current_url})")
+        config_links, proxy_links, msg_ids = await _scrape_single_page(profile_id, current_url, clean_channel)
+        if not msg_ids:
+            log.info(f"⚠️ No messages found on page {page_count} for {clean_channel}")
+            break
+
+        # اگر آخرین پیام دیده شده وجود داشته باشد و در این صفحه باشد، یعنی به پیام‌های قبلی رسیدیم، متوقف می‌شویم.
+        if last_seen_msg_id and last_seen_msg_id in msg_ids:
+            log.info(f"✅ Reached last seen message {last_seen_msg_id} for {clean_channel}. Stopping pagination.")
+            # اما قبل از توقف، باید لینک‌های این صفحه را استخراج کنیم (چون ممکن است پیام‌های جدیدتری نسبت به last_seen_msg_id باشند)
+            all_configs.extend(config_links)
+            all_proxies.extend(proxy_links)
+            break
+
+        # اگر پیام‌ها جدید هستند، آنها را اضافه می‌کنیم
+        all_configs.extend(config_links)
+        all_proxies.extend(proxy_links)
+
+        # پیدا کردن قدیمی‌ترین msg_id در این صفحه
+        numeric_ids = []
+        for mid in msg_ids:
+            parts = mid.split('/')
+            if len(parts) == 2 and parts[1].isdigit():
+                numeric_ids.append(int(parts[1]))
+        if numeric_ids:
+            oldest = min(numeric_ids)
+            oldest_msg_id = f"{clean_channel.lstrip('@')}/{oldest}"
+            # اگر قدیمی‌ترین پیام این صفحه برابر با last_seen_msg_id است، توقف می‌کنیم (قبلاً بررسی کردیم)
+            if last_seen_msg_id and oldest_msg_id == last_seen_msg_id:
+                log.info(f"✅ Oldest message on page is last seen, stopping pagination.")
+                break
+            # ساخت URL صفحه بعدی با ?before=oldest
+            current_url = f"{base_url}?before={oldest}"
+        else:
+            # اگر نتوانستیم msg_id عددی استخراج کنیم، نمی‌توانیم ادامه دهیم
+            break
+
+        # یک تاخیر کوچک برای جلوگیری از مسدود شدن
+        await asyncio.sleep(0.5)
+
+    # به‌روزرسانی last_message_id با جدیدترین پیام دیده شده (اولین پیام در اولین صفحه)
+    if msg_ids:
+        # جدیدترین پیام در اولین صفحه، اولین msg_id است
+        newest_msg_id = msg_ids[0] if msg_ids else ""
+        if newest_msg_id:
+            update_last_message_id(profile_id, clean_channel, newest_msg_id)
+            log.info(f"📝 Updated last_message_id for {clean_channel} to {newest_msg_id}")
+
+    # به‌روزرسانی زمان اسکرپ
+    update_last_scrape_time(profile_id, clean_channel, get_tehran_time(), last_message_id=newest_msg_id if msg_ids else "")
+
+    # حذف لینک‌های تکراری
+    all_configs = list(set(all_configs))
+    all_proxies = list(set(all_proxies))
+
+    log.info(f"📊 {clean_channel}: total found {len(all_configs)} configs, {len(all_proxies)} proxies (paginated)")
+    return all_configs, all_proxies
+
+async def _scrape_single_page(profile_id, url, channel):
     headers = {
         "User-Agent": _USER_AGENTS[hash(datetime.now().timestamp()) % len(_USER_AGENTS)],
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -1252,22 +1333,70 @@ async def _scrape_channel_internal(profile_id, channel):
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as cl:
         r = await cl.get(url, headers=headers)
         if r.status_code == 429:
-            log.warning(f"Rate limit for {clean_channel}, waiting 30s")
+            log.warning(f"Rate limit for {channel}, waiting 30s")
             await asyncio.sleep(30)
             r = await cl.get(url, headers=headers)
         if r.status_code != 200:
-            log.warning(f"⚠️ {clean_channel} returned status {r.status_code}")
-            return [], []
+            log.warning(f"⚠️ {channel} returned status {r.status_code} for url {url}")
+            return [], [], []
         html_text = r.text
 
+        # استخراج لینک‌ها
         config_links = extract_links_from_text(html_text)
         proxy_links = extract_proxy_links_from_text(html_text)
 
-        log.info(f"📊 {clean_channel}: found {len(config_links)} configs, {len(proxy_links)} proxies")
-        update_last_scrape_time(profile_id, clean_channel, get_tehran_time())
+        # استخراج شناسه‌های پیام (data-post)
+        msg_ids = re.findall(r'data-post="([^"]+)"', html_text)
+        # اگر data-post وجود نداشت، از pattern دیگری استفاده می‌کنیم
+        if not msg_ids:
+            # مثلاً از لینک‌های پیام
+            msg_ids = re.findall(r'href="/([^/]+/\d+)"', html_text)
+        # تمیز کردن و یکتا سازی
+        msg_ids = list(set(msg_ids))
 
-        _scrape_cache[(profile_id, clean_channel)] = (current_time, config_links, proxy_links)
-        return config_links, proxy_links
+        log.info(f"📄 Page {url}: found {len(config_links)} configs, {len(proxy_links)} proxies, {len(msg_ids)} messages")
+        return config_links, proxy_links, msg_ids
+
+# ======================================================================
+# فایل‌ها (با افزایش محدودیت)
+# ======================================================================
+async def fetch_files_from_channel(bot, profile_id, channel, source):
+    try:
+        chat_id = channel if channel.startswith('@') else '@' + channel
+        # افزایش limit به 50 برای پوشش بیشتر پیام‌ها
+        messages = await bot.get_chat_history(chat_id, limit=50)
+        new_links = []
+        for msg in messages:
+            if is_message_processed(profile_id, source, msg.message_id):
+                continue
+            doc = msg.document
+            if not doc:
+                continue
+            try:
+                file_obj = await doc.get_file()
+                data = await file_obj.download_as_bytearray()
+            except Exception as e:
+                log.warning(f"Download file from {source} failed: {e}")
+                continue
+
+            text = decrypt_subscription(bytes(data), [])
+            if not text:
+                text = bytes(data).decode('utf-8', errors='ignore')
+
+            links = get_v2ray_links_from_text(text)
+            if not links:
+                links = extract_links_from_text(text)
+
+            if links:
+                new_links.extend(links)
+                log.info(f"✅ Extracted {len(links)} links from file in {source} (msg {msg.message_id})")
+
+            mark_message_processed(profile_id, source, msg.message_id)
+
+        return new_links
+    except Exception as e:
+        log.warning(f"fetch_files_from_channel({channel}) error: {e}")
+        return []
 
 def decrypt_subscription(data: bytes, passwords: list):
     protocols = ("vless://", "vmess://", "trojan://",
@@ -1310,43 +1439,6 @@ def get_v2ray_links_from_text(text):
             if len(link) > 10:
                 results.append(link)
     return list(set(results))
-
-async def fetch_files_from_channel(bot, profile_id, channel, source):
-    try:
-        chat_id = channel if channel.startswith('@') else '@' + channel
-        messages = await bot.get_chat_history(chat_id, limit=10)
-        new_links = []
-        for msg in messages:
-            if is_message_processed(profile_id, source, msg.message_id):
-                continue
-            doc = msg.document
-            if not doc:
-                continue
-            try:
-                file_obj = await doc.get_file()
-                data = await file_obj.download_as_bytearray()
-            except Exception as e:
-                log.warning(f"Download file from {source} failed: {e}")
-                continue
-
-            text = decrypt_subscription(bytes(data), [])
-            if not text:
-                text = bytes(data).decode('utf-8', errors='ignore')
-
-            links = get_v2ray_links_from_text(text)
-            if not links:
-                links = extract_links_from_text(text)
-
-            if links:
-                new_links.extend(links)
-                log.info(f"✅ Extracted {len(links)} links from file in {source} (msg {msg.message_id})")
-
-            mark_message_processed(profile_id, source, msg.message_id)
-
-        return new_links
-    except Exception as e:
-        log.warning(f"fetch_files_from_channel({channel}) error: {e}")
-        return []
 
 # ======================================================================
 # ارسال
@@ -1607,7 +1699,7 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False):
     return count, (text, buttons)
 
 # ======================================================================
-# چرخه اصلی (با جدا کردن کانفیگ و پروکسی) - اصلاح نام پارامترها
+# چرخه اصلی (با جدا کردن کانفیگ و پروکسی)
 # ======================================================================
 async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_proxies=True, is_instant=False):
     log.info("=" * 50)
@@ -1632,7 +1724,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     ping_mode = get_profile_ping_mode(profile_id)
     log.info(f"📡 Sources: {len(sources)} | 🎯 {dest} | 🌍 Ping: {ping_mode}")
 
-    # ==== اسکرپ همه منابع ====
+    # ==== اسکرپ همه منابع با پیج‌بندی کامل ====
     all_configs = []
     all_proxies = []
     seen_urls = set()
@@ -1661,7 +1753,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                 if norm:
                     all_proxies.append(norm)
 
-    # ==== فایل‌ها ====
+    # ==== فایل‌ها (افزایش limit) ====
     file_tasks = [fetch_files_from_channel(bot, profile_id, src, src) for src in sources]
     file_results = await asyncio.gather(*file_tasks, return_exceptions=True)
     for i, res in enumerate(file_results):
@@ -1690,14 +1782,14 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     # ==== تست پینگ برای کانفیگ‌ها ====
     working = []
     if enable_configs and new_configs:
-        test_limit = get_profile_max_post_config(profile_id) * 3
+        test_limit = get_profile_max_post_config(profile_id) * 5  # افزایش تست برای پیدا کردن بیشتر
         if is_instant:
-            test_limit = min(test_limit, 20)
+            test_limit = min(test_limit, 30)
         else:
-            test_limit = min(test_limit, 50)
+            test_limit = min(test_limit, 100)
         to_test = new_configs[:test_limit]
         log.info(f"📊 Testing {len(to_test)} configs...")
-        sem = asyncio.Semaphore(20)
+        sem = asyncio.Semaphore(30)  # افزایش همزمانی
         async def _check(item):
             u, src = item
             async with sem:
@@ -1728,7 +1820,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
         valid_proxies = [p for p in new_proxies if "t.me/proxy" in p.lower()]
         if valid_proxies:
             log.info(f"📊 Processing {len(valid_proxies)} proxies...")
-            sem = asyncio.Semaphore(20)
+            sem = asyncio.Semaphore(30)
             async def check_proxy(proxy_url):
                 async with sem:
                     ping, ok, cnt = await check_full_link_ping(proxy_url, ping_mode)
@@ -1739,7 +1831,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                         flag = await get_flag_for_ip(ip)
                     return proxy_url, ping if ok else 0, flag
             results = await asyncio.gather(
-                *[check_proxy(p) for p in valid_proxies[:50]], return_exceptions=True)
+                *[check_proxy(p) for p in valid_proxies[:100]], return_exceptions=True)
             for r in results:
                 if isinstance(r, Exception):
                     continue
@@ -1771,7 +1863,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     return total_configs + total_proxies, result_msg
 
 # ======================================================================
-# حلقه‌های خودکار جداگانه برای کانفیگ و پروکسی
+# حلقه‌های خودکار جداگانه برای کانفیگ و پروکسی (با دقت زمانی)
 # ======================================================================
 async def profile_loop_config(bot, profile_id):
     log.info(f"🔄 Starting config loop for profile {profile_id}")
@@ -1792,6 +1884,7 @@ async def profile_loop_config(bot, profile_id):
                     if expiry > now:
                         remaining_seconds = (expiry - now).total_seconds()
                         log.info(f"⏳ Timer active for profile {profile_id}: {remaining_seconds/60:.1f} minutes remaining")
+                        # خواب تا زمان پایان تایمر یا حداکثر ۶۰ ثانیه (برای بررسی مجدد)
                         await asyncio.sleep(min(remaining_seconds, 60))
                         continue
                     else:
@@ -1812,15 +1905,17 @@ async def profile_loop_config(bot, profile_id):
                 log.info(f"⚡ INSTANT CONFIG UPDATE for profile {profile_id} ({dest_name})")
                 n, m = await run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_proxies=False, is_instant=True)
                 log.info(f"[instant config] result: {n} - {m}")
+                # برای حالت لحظه‌ای، ۵ ثانیه صبر می‌کنیم تا دوباره اجرا شود
                 await asyncio.sleep(5)
             else:
                 now = datetime.now(TEHRAN_TZ)
                 next_run = now + timedelta(minutes=interval)
                 sleep_seconds = (next_run - now).total_seconds()
                 if sleep_seconds > 0:
-                    log.info(f"⏳ Config loop sleeping for {sleep_seconds:.0f}s until {next_run.strftime('%H:%M:%S')}")
+                    log.info(f"⏳ Config loop sleeping for {sleep_seconds:.0f}s until {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
                     await asyncio.sleep(sleep_seconds)
                 else:
+                    # اگر به هر دلیل زمان منفی شد، یک ثانیه صبر می‌کنیم
                     await asyncio.sleep(1)
 
                 log.info(f"⏰ CONFIG AUTO TICK for profile {profile_id}")
@@ -1833,6 +1928,7 @@ async def profile_loop_config(bot, profile_id):
         except Exception as e:
             log.error(f"❌ profile_loop_config error: {e}")
             log.error(traceback.format_exc())
+            # در صورت خطا، ۶۰ ثانیه صبر می‌کنیم تا دوباره تلاش کند
             await asyncio.sleep(60)
 
 async def profile_loop_proxy(bot, profile_id):
@@ -1880,7 +1976,7 @@ async def profile_loop_proxy(bot, profile_id):
                 next_run = now + timedelta(minutes=interval)
                 sleep_seconds = (next_run - now).total_seconds()
                 if sleep_seconds > 0:
-                    log.info(f"⏳ Proxy loop sleeping for {sleep_seconds:.0f}s until {next_run.strftime('%H:%M:%S')}")
+                    log.info(f"⏳ Proxy loop sleeping for {sleep_seconds:.0f}s until {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
                     await asyncio.sleep(sleep_seconds)
                 else:
                     await asyncio.sleep(1)

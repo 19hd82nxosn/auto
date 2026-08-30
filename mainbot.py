@@ -902,7 +902,11 @@ def clean_config_url(url: str) -> str:
 
 def extract_links_from_text(text):
     results = []
-    pattern = re.compile(r'(vless|vmess|trojan|hy2|tuic|ss|socks|hysteria2)://[^\s<>"\'{}()\[\]]+', re.IGNORECASE)
+    # پشتیبانی از تمام پروتکل‌های رایج
+    pattern = re.compile(
+        r'(vless|vmess|trojan|hy2|tuic|ss|socks|hysteria2|wireguard|wireguard://|http|https?)://[^\s<>"\'{}()\[\]]+',
+        re.IGNORECASE
+    )
     for m in pattern.finditer(text):
         link = m.group(0).strip()
         link = re.sub(r'[.,;:!؟\'"`]+$', '', link)
@@ -1270,8 +1274,9 @@ async def scrape_channel_paginated(profile_id, channel):
     all_configs = []
     all_proxies = []
     current_url = base_url
-    max_pages = 15
+    max_pages = 20  # افزایش برای اطمینان
     page_count = 0
+    log.info(f"🔍 Starting scrape for {clean_channel}, last_seen_msg_id={last_seen_msg_id}")
 
     while page_count < max_pages:
         page_count += 1
@@ -1281,8 +1286,10 @@ async def scrape_channel_paginated(profile_id, channel):
             log.info(f"⚠️ No messages found on page {page_count} for {clean_channel}")
             break
 
+        # اگر به پیام آخر رسیدیم، متوقف شو
         if last_seen_msg_id and last_seen_msg_id in msg_ids:
             log.info(f"✅ Reached last seen message {last_seen_msg_id} for {clean_channel}. Stopping pagination.")
+            # لینک‌های این صفحه را هم اضافه می‌کنیم (قبل از پیام آخر)
             all_configs.extend(config_links)
             all_proxies.extend(proxy_links)
             break
@@ -1290,6 +1297,7 @@ async def scrape_channel_paginated(profile_id, channel):
         all_configs.extend(config_links)
         all_proxies.extend(proxy_links)
 
+        # پیدا کردن قدیمی‌ترین message_id برای رفتن به صفحه بعد
         numeric_ids = []
         for mid in msg_ids:
             parts = mid.split('/')
@@ -1300,8 +1308,9 @@ async def scrape_channel_paginated(profile_id, channel):
             current_url = f"{base_url}?before={oldest}"
         else:
             break
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.5)  # کمی تاخیر برای جلوگیری از مسدود شدن
 
+    # به‌روزرسانی آخرین message_id (جدیدترین پیام دیده‌شده)
     if msg_ids:
         newest_msg_id = msg_ids[0] if msg_ids else ""
         if newest_msg_id:
@@ -1564,9 +1573,9 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
     banner_template = get_profile_banner_config(profile_id) or "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
     naming_template = get_profile_naming_template(profile_id)
     channel_link = get_profile_channel_link(profile_id)
-    # اگر channel_link خالی باشد، از نام پروفایل بدون @ استفاده کن
+    # اگر channel_link خالی باشد، از نام پروفایل با @ استفاده کن
     if not channel_link:
-        channel_link = dest.replace("@", "") if dest else ""
+        channel_link = dest if dest else ""
 
     sponsor = get_sponsor(profile_id)
     sponsor_button = None
@@ -1734,11 +1743,26 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     sources = [normalize_channel_input(s) for s in sources if normalize_channel_input(s)]
     if not sources:
         log.error(f"❌ Profile {profile_id} has no valid sources!")
+        # ارسال پیام به ادمین برای اطلاع
+        try:
+            await bot.send_message(
+                MAIN_ADMIN_ID,
+                f"⚠️ پروفایل {profile.get('dest_name', '')} (ID:{profile_id}) هیچ منبعی ندارد. لطفاً یک منبع اضافه کنید."
+            )
+        except:
+            pass
         return 0, "no valid sources"
 
     dest = get_profile_dest(profile_id)
     if not dest:
         log.error(f"❌ Profile {profile_id} has no destination!")
+        try:
+            await bot.send_message(
+                MAIN_ADMIN_ID,
+                f"⚠️ پروفایل {profile.get('dest_name', '')} (ID:{profile_id}) مقصدی ندارد. لطفاً یک مقصد تنظیم کنید."
+            )
+        except:
+            pass
         return 0, "no destination"
 
     ping_mode = get_profile_ping_mode(profile_id)

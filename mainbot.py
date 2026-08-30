@@ -1140,7 +1140,7 @@ def add_custom_query_to_url(url, custom_query, protocol):
     return new_base
 
 # ======================================================================
-# پینگ
+# پینگ (بهینه‌شده با timeout کمتر)
 # ======================================================================
 async def host_to_ip(host):
     try:
@@ -1155,7 +1155,7 @@ async def test_tcp_ping(host, port):
         start = loop.time()
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port),
-            timeout=1.5
+            timeout=1.0  # کاهش timeout
         )
         writer.close()
         await writer.wait_closed()
@@ -1171,7 +1171,7 @@ async def ping_from_iran_only(host, port=None, allow_tcp_fallback=True):
     target = ip
 
     try:
-        async with httpx.AsyncClient(timeout=5) as cl:
+        async with httpx.AsyncClient(timeout=4) as cl:
             r = await cl.get(
                 f"https://check-host.net/check-ping?host={target}&json=1",
                 headers={"User-Agent": "Mozilla/5.0"},
@@ -1245,7 +1245,7 @@ async def check_full_link_ping(url, ping_mode="iran"):
     return ping, ok, cnt
 
 # ======================================================================
-# اسکرپ
+# اسکرپ (بهینه‌شده: تعداد صفحات کمتر، همزمانی بیشتر)
 # ======================================================================
 _USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -1254,14 +1254,10 @@ _USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
 ]
 
-async def scrape_channel_with_retry(profile_id, channel, max_retries=2):
-    try:
-        return await scrape_channel_paginated(profile_id, channel)
-    except Exception as e:
-        log.error(f"❌ scrape {channel} error: {e}")
-        return [], []
-
-async def scrape_channel_paginated(profile_id, channel):
+async def scrape_channel_paginated(profile_id, channel, max_pages=3):
+    """
+    فقط حداکثر ۳ صفحه اسکرپ می‌کند تا سرعت بالا برود.
+    """
     clean_channel = normalize_channel_input(channel)
     if not clean_channel:
         log.warning(f"Invalid channel name: {channel}")
@@ -1272,7 +1268,6 @@ async def scrape_channel_paginated(profile_id, channel):
     all_configs = []
     all_proxies = []
     current_url = base_url
-    max_pages = 20
     page_count = 0
     log.info(f"🔍 Starting scrape for {clean_channel}, last_seen_msg_id={last_seen_msg_id}")
 
@@ -1303,7 +1298,7 @@ async def scrape_channel_paginated(profile_id, channel):
             current_url = f"{base_url}?before={oldest}"
         else:
             break
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)  # تاخیر کمتر
 
     if msg_ids:
         newest_msg_id = msg_ids[0] if msg_ids else ""
@@ -1329,11 +1324,11 @@ async def _scrape_single_page(url, channel):
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
     }
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as cl:
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as cl:
         r = await cl.get(url, headers=headers)
         if r.status_code == 429:
-            log.warning(f"Rate limit for {channel}, waiting 30s")
-            await asyncio.sleep(30)
+            log.warning(f"Rate limit for {channel}, waiting 10s")
+            await asyncio.sleep(10)
             r = await cl.get(url, headers=headers)
         if r.status_code != 200:
             log.warning(f"⚠️ {channel} returned status {r.status_code} for url {url}")
@@ -1352,11 +1347,11 @@ async def _scrape_single_page(url, channel):
         return config_links, proxy_links, msg_ids
 
 # ======================================================================
-# اسکرپ لینک پیام تلگرام (بهبود یافته)
+# اسکرپ لینک پیام تلگرام (بدون دانلود فایل)
 # ======================================================================
 async def scrape_single_message_link(profile_id, url):
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as cl:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as cl:
             headers = {"User-Agent": _USER_AGENTS[0]}
             r = await cl.get(url, headers=headers)
             if r.status_code != 200:
@@ -1367,26 +1362,10 @@ async def scrape_single_message_link(profile_id, url):
             configs = extract_links_from_text(html)
             proxies = extract_proxy_links_from_text(html)
 
-            file_links = re.findall(r'https?://cdn\d+\.telesco\.pe/file/[^\s<>"\']+', html)
-            for file_url in file_links:
-                try:
-                    log.info(f"📥 Downloading file from {file_url}")
-                    file_r = await cl.get(file_url, headers=headers)
-                    if file_r.status_code == 200:
-                        data = file_r.content
-                        text = decrypt_subscription(data, [])
-                        if not text:
-                            text = data.decode('utf-8', errors='ignore')
-                        new_configs = extract_links_from_text(text)
-                        new_proxies = extract_proxy_links_from_text(text)
-                        configs.extend(new_configs)
-                        proxies.extend(new_proxies)
-                        log.info(f"✅ Extracted {len(new_configs)} configs and {len(new_proxies)} proxies from file")
-                except Exception as e:
-                    log.warning(f"Error downloading file {file_url}: {e}")
-
-            configs = [c for c in configs if not c.startswith("https://t.me/") or "proxy" in c.lower()]
+            # فقط لینک‌های t.me/proxy و tg://proxy را نگه می‌داریم
             proxies = [p for p in proxies if p.startswith("https://t.me/proxy") or p.startswith("tg://proxy")]
+            # لینک‌های t.me را برای خود لینک پیام فیلتر نمی‌کنیم، اما از ارسال آن‌ها جلوگیری می‌کنیم
+            configs = [c for c in configs if not c.startswith("https://t.me/") or "proxy" in c.lower()]
 
             log.info(f"📩 Scraped message {url}: {len(configs)} configs, {len(proxies)} proxies")
             return configs, proxies
@@ -1395,92 +1374,9 @@ async def scrape_single_message_link(profile_id, url):
         return [], []
 
 # ======================================================================
-# فایل‌ها
-# ======================================================================
-async def fetch_files_from_channel(bot, profile_id, channel, source):
-    try:
-        chat_id = channel if channel.startswith('@') else '@' + channel
-        messages = await bot.get_chat_history(chat_id, limit=50)
-        new_links = []
-        for msg in messages:
-            if is_message_processed(profile_id, source, msg.message_id):
-                continue
-            doc = msg.document
-            if not doc:
-                continue
-            try:
-                file_obj = await doc.get_file()
-                data = await file_obj.download_as_bytearray()
-            except Exception as e:
-                log.warning(f"Download file from {source} failed: {e}")
-                continue
-
-            text = decrypt_subscription(bytes(data), [])
-            if not text:
-                text = bytes(data).decode('utf-8', errors='ignore')
-
-            links = get_v2ray_links_from_text(text)
-            if not links:
-                links = extract_links_from_text(text)
-
-            if links:
-                new_links.extend(links)
-                log.info(f"✅ Extracted {len(links)} links from file in {source} (msg {msg.message_id})")
-
-            mark_message_processed(profile_id, source, msg.message_id)
-
-        return new_links
-    except Exception as e:
-        log.warning(f"fetch_files_from_channel({channel}) error: {e}")
-        return []
-
-def decrypt_subscription(data: bytes, passwords: list):
-    protocols = ("vless://", "vmess://", "trojan://",
-                  "hy2://", "tuic://", "hysteria2://")
-    try:
-        text = data.decode('utf-8', errors='ignore')
-        if any(p in text for p in protocols):
-            return text
-    except Exception:
-        pass
-    try:
-        decoded = base64.b64decode(data + b'=' * (-len(data) % 4))
-        text = decoded.decode('utf-8', errors='ignore')
-        if any(p in text for p in protocols):
-            return text
-    except Exception:
-        pass
-    try:
-        decoded = base64.b64decode(data + b'=' * (-len(data) % 4)) \
-            .decode('utf-8', errors='ignore')
-        text = unquote(decoded)
-        if any(p in text for p in protocols):
-            return text
-    except Exception:
-        pass
-    return None
-
-def get_v2ray_links_from_text(text):
-    results = []
-    patterns = [
-        r'vless://[^\s<>"\']+',
-        r'vmess://[^\s<>"\']+',
-        r'trojan://[^\s<>"\']+',
-        r'hy2://[^\s<>"\']+',
-        r'tuic://[^\s<>"\']+',
-        r'hysteria2://[^\s<>"\']+'
-    ]
-    for pattern in patterns:
-        for m in re.finditer(pattern, text):
-            link = m.group().strip()
-            if len(link) > 10:
-                results.append(link)
-    return list(set(results))
-
-# ======================================================================
 # ارسال
 # ======================================================================
-async def send_with_retry(bot, chat_id, text, parse_mode="HTML", reply_markup=None, disable_web_page_preview=True, max_retries=5):
+async def send_with_retry(bot, chat_id, text, parse_mode="HTML", reply_markup=None, disable_web_page_preview=True, max_retries=3):
     retry_count = 0
     while retry_count < max_retries:
         try:
@@ -1493,13 +1389,13 @@ async def send_with_retry(bot, chat_id, text, parse_mode="HTML", reply_markup=No
             )
             return True
         except RetryAfter as e:
-            wait = e.retry_after + 2
+            wait = e.retry_after + 1
             log.warning(f"Flood control, waiting {wait} seconds...")
             await asyncio.sleep(wait)
             retry_count += 1
         except TimedOut:
             log.warning(f"Timeout, retrying... ({retry_count+1}/{max_retries})")
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
             retry_count += 1
         except BadRequest as e:
             if "can't parse entities" in str(e):
@@ -1517,7 +1413,7 @@ async def send_with_retry(bot, chat_id, text, parse_mode="HTML", reply_markup=No
             return False
         except Exception as e:
             log.error(f"Send error: {e}")
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
             retry_count += 1
     return False
 
@@ -1549,7 +1445,7 @@ async def send_to_destination(bot, profile_id, text, buttons=None):
             if not ok2:
                 success = False
         if idx < len(chunks) - 1:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
     return success
 
 def split_text(text, max_len=4096):
@@ -1580,7 +1476,7 @@ def split_text(text, max_len=4096):
     return chunks
 
 # ======================================================================
-# ارسال کانفیگ‌ها (اصلاح شده برای دکمه کانال)
+# ارسال کانفیگ‌ها (با دکمه کانال)
 # ======================================================================
 async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=False, max_post_override=None):
     if not working:
@@ -1657,11 +1553,9 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
     except KeyError:
         full_text = f"✦ V2Ray Config List\n\n{configs_text}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
 
-    # ===== اضافه کردن دکمه‌های اضافی (اسپانسر + کانال) =====
     buttons = []
     if sponsor_button:
         buttons.append(sponsor_button)
-    # دکمه کانال
     channel_link_display = get_profile_channel_link(profile_id)
     if channel_link_display:
         if channel_link_display.startswith("@"):
@@ -1677,7 +1571,7 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
         parse_mode="HTML",
         reply_markup=reply_markup,
         disable_web_page_preview=True,
-        max_retries=5
+        max_retries=3
     )
     if not ok:
         plain_text = re.sub(r'<[^>]+>', '', full_text)
@@ -1686,7 +1580,7 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
             parse_mode=None,
             reply_markup=reply_markup,
             disable_web_page_preview=True,
-            max_retries=3
+            max_retries=2
         )
         if not ok2:
             log.error(f"❌ Failed to send configs after all retries")
@@ -1719,7 +1613,7 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
     return sent_count
 
 # ======================================================================
-# ارسال پروکسی‌ها (اصلاح شده برای دکمه کانال)
+# ارسال پروکسی‌ها (با دکمه کانال)
 # ======================================================================
 async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max_proxies_override=None):
     if not proxies_with_ping:
@@ -1766,7 +1660,6 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
     buttons = []
     if sponsor_button:
         buttons.append(sponsor_button)
-    # دکمه کانال
     channel_link_display = get_profile_channel_link(profile_id)
     if channel_link_display:
         if channel_link_display.startswith("@"):
@@ -1779,7 +1672,7 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
     return count, (text, reply_markup)
 
 # ======================================================================
-# چرخه اصلی (بدون تغییر عمده، فقط لاگ بیشتر)
+# چرخه اصلی (بهینه‌شده)
 # ======================================================================
 async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_proxies=True, is_instant=False):
     log.info("=" * 50)
@@ -1828,8 +1721,9 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     seen_urls = set()
     message_links_to_scrape = set()
 
+    # اسکرپ همه منابع به صورت همزمان
     async def scrape_one(src):
-        config_links, proxy_links = await scrape_channel_with_retry(profile_id, src)
+        config_links, proxy_links = await scrape_channel_paginated(profile_id, src, max_pages=2)  # فقط ۲ صفحه برای سرعت
         return src, config_links, proxy_links
 
     scrape_tasks = [scrape_one(src) for src in sources]
@@ -1855,27 +1749,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                 if norm:
                     all_proxies.append(norm)
 
-    file_tasks = [fetch_files_from_channel(bot, profile_id, src, src) for src in sources]
-    file_results = await asyncio.gather(*file_tasks, return_exceptions=True)
-    for i, res in enumerate(file_results):
-        if isinstance(res, Exception):
-            log.warning(f"File fetch error for {sources[i]}: {res}")
-            continue
-        links = res
-        src = sources[i]
-        log.info(f"  {src}: {len(links)} links from files")
-        for link in links:
-            if link not in seen_urls:
-                seen_urls.add(link)
-                if "t.me/proxy" in link.lower() or link.startswith("tg://proxy"):
-                    norm = normalize_proxy_url(link)
-                    if norm:
-                        all_proxies.append(norm)
-                elif link.startswith("https://t.me/") and "proxy" not in link.lower():
-                    message_links_to_scrape.add(link)
-                else:
-                    all_configs.append((link, src))
-
+    # اسکرپ لینک‌های پیام (به صورت موازی)
     if message_links_to_scrape:
         log.info(f"🔍 Scraping {len(message_links_to_scrape)} message links...")
         msg_scrape_tasks = [scrape_single_message_link(profile_id, link) for link in message_links_to_scrape]
@@ -1897,32 +1771,25 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                     if norm:
                         all_proxies.append(norm)
 
+    # فیلتر کردن تکراری‌ها
     new_configs = []
     for u, s in all_configs:
         if not is_already_posted(profile_id, u):
             new_configs.append((u, s))
-        else:
-            log.debug(f"⏭️ Config already posted: {u[:50]}...")
 
     new_proxies = []
     for p in all_proxies:
         if not is_proxy_posted(profile_id, p):
             new_proxies.append(p)
-        else:
-            log.debug(f"⏭️ Proxy already posted: {p[:50]}...")
 
     log.info(f"📊 New configs: {len(new_configs)}, New proxies: {len(new_proxies)}")
 
     working = []
     if enable_configs and new_configs:
-        test_limit = get_profile_max_post_config(profile_id) * 5
-        if is_instant:
-            test_limit = min(test_limit, 30)
-        else:
-            test_limit = min(test_limit, 100)
+        test_limit = min(len(new_configs), 50)  # تست حداکثر ۵۰ عدد
         to_test = new_configs[:test_limit]
         log.info(f"📊 Testing {len(to_test)} configs...")
-        sem = asyncio.Semaphore(50)
+        sem = asyncio.Semaphore(100)
 
         async def _check(item):
             u, src = item
@@ -1933,10 +1800,8 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                     else:
                         ping, ok, cnt = 0, True, 0
                     if ok:
-                        log.info(f"✅ Config OK: {u[:50]}... ping={ping}ms")
                         return u, True, ping, cnt, src
                     else:
-                        log.info(f"❌ Config FAIL: {u[:50]}...")
                         return u, False, 0, 0, src
                 except Exception as e:
                     log.debug(f"ping failed for {u[:30]}: {e}")
@@ -1957,7 +1822,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
         valid_proxies = [p for p in new_proxies if "t.me/proxy" in p.lower() or p.startswith("tg://proxy")]
         if valid_proxies:
             log.info(f"📊 Processing {len(valid_proxies)} proxies...")
-            sem = asyncio.Semaphore(50)
+            sem = asyncio.Semaphore(100)
 
             async def check_proxy(proxy_url):
                 async with sem:
@@ -1973,7 +1838,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                     return proxy_url, ping if ok else 0, flag
 
             results = await asyncio.gather(
-                *[check_proxy(p) for p in valid_proxies[:100]], return_exceptions=True)
+                *[check_proxy(p) for p in valid_proxies[:50]], return_exceptions=True)
             for r in results:
                 if isinstance(r, Exception):
                     continue
@@ -2004,7 +1869,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     return total_configs + total_proxies, result_msg
 
 # ======================================================================
-# حلقه‌های خودکار (با لاگ بیشتر و مدیریت بهتر)
+# حلقه‌های خودکار (با مدیریت بهتر)
 # ======================================================================
 async def profile_loop_config(bot, profile_id):
     log.info(f"🔄 Starting config loop for profile {profile_id}")
@@ -2035,7 +1900,7 @@ async def profile_loop_config(bot, profile_id):
                     if expiry > now:
                         remaining_seconds = (expiry - now).total_seconds()
                         log.info(f"⏳ Timer active for profile {profile_id}: {remaining_seconds/60:.1f} minutes remaining")
-                        await asyncio.sleep(min(remaining_seconds, 60))
+                        await asyncio.sleep(min(remaining_seconds, 30))
                         continue
                     else:
                         clear_profile_timer(profile_id)
@@ -2107,7 +1972,7 @@ async def profile_loop_proxy(bot, profile_id):
                     if expiry > now:
                         remaining_seconds = (expiry - now).total_seconds()
                         log.info(f"⏳ Timer active for profile {profile_id}: {remaining_seconds/60:.1f} minutes remaining")
-                        await asyncio.sleep(min(remaining_seconds, 60))
+                        await asyncio.sleep(min(remaining_seconds, 30))
                         continue
                     else:
                         clear_profile_timer(profile_id)
@@ -2230,7 +2095,7 @@ async def delete_file_after_delay(filepath, delay_seconds):
 BOT_START_TIME = datetime.utcnow()
 
 # ======================================================================
-# توابع دریافت لاگ و گزارش روزانه
+# توابع دریافت لاگ و گزارش روزانه (بدون تغییر)
 # ======================================================================
 async def get_logs(update, context, profile_id, log_type="full", time_range_minutes=30):
     log_file_path = os.path.join(DATA_DIR, "bot.log")
@@ -2328,7 +2193,7 @@ async def send_daily_report(app):
         log.error(f"❌ Failed to send daily report: {e}")
 
 # ======================================================================
-# توابع Railway Credit
+# توابع Railway Credit (بدون تغییر)
 # ======================================================================
 async def get_railway_credit():
     if not RAILWAY_TOKEN:
@@ -2398,7 +2263,7 @@ async def periodic_credit_check():
         await asyncio.sleep(3600)
 
 # ======================================================================
-# پاکسازی دوره‌ای فایل‌ها
+# پاکسازی دوره‌ای فایل‌ها (بدون تغییر)
 # ======================================================================
 async def periodic_cleanup():
     while True:
@@ -2465,7 +2330,7 @@ async def periodic_cleanup():
         await asyncio.sleep(300)
 
 # ======================================================================
-# مدیریت ادمین‌ها
+# مدیریت ادمین‌ها (بدون تغییر)
 # ======================================================================
 def is_admin(user_id: int) -> bool:
     if user_id == MAIN_ADMIN_ID:
@@ -2493,7 +2358,7 @@ def list_admins():
     return admins
 
 # ======================================================================
-# مدیریت زبان
+# مدیریت زبان (بدون تغییر)
 # ======================================================================
 def get_lang() -> str:
     row = c.execute("SELECT v FROM cfg WHERE k='lang'").fetchone()
@@ -2508,7 +2373,7 @@ def set_lang(lang: str):
     conn.commit()
 
 # ======================================================================
-# کیبوردها و پیام‌ها
+# کیبوردها و پیام‌ها (بدون تغییر از کد اصلی)
 # ======================================================================
 BOT_REF = None
 
@@ -2906,7 +2771,7 @@ def msg(key, **kwargs):
     return text
 
 # ======================================================================
-# کیبوردها
+# کیبوردها (بدون تغییر)
 # ======================================================================
 def main_menu_kb():
     return InlineKeyboardMarkup([
@@ -3250,9 +3115,6 @@ async def cmd_diag(update: Update, context):
     msg_lines.append("")
     await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
 
-# ======================================================================
-# دستور status جدید
-# ======================================================================
 async def cmd_status(update: Update, context):
     if not is_admin(update.effective_user.id):
         return
@@ -3267,7 +3129,6 @@ async def cmd_status(update: Update, context):
         timer_expiry = p.get('timer_expiry')
         timer = "⏳ فعال" if timer_expiry else "⏹ غیرفعال"
         sources_count = len(get_profile_sources(p['id']))
-        dest = p['dest_name'] or "❌"
         lines.append(
             f"• {p['dest_name']} (ID:{p['id']}) – "
             f"فعال: {'✅' if enabled else '❌'}, "
@@ -3281,11 +3142,11 @@ async def cmd_status(update: Update, context):
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 # ======================================================================
-# کالبک (اصلاح شده برای جلوگیری از خطای Query)
+# کالبک (با پاسخ فوری برای جلوگیری از خطای Query)
 # ======================================================================
 async def on_callback(u, ctx):
     q = u.callback_query
-    # ابتدا سعی می‌کنیم به query پاسخ دهیم، اما اگر خطا رخ داد، آن را نادیده می‌گیریم
+    # پاسخ فوری به query
     try:
         if not is_admin(q.from_user.id):
             await q.answer(msg("only_admin"), show_alert=True)
@@ -3293,9 +3154,8 @@ async def on_callback(u, ctx):
         await q.answer()  # پاسخ ساده
     except Exception as e:
         log.warning(f"Failed to answer callback query: {e}")
-        # ادامه می‌دهیم، ممکن است پیام هنوز قابل ویرایش باشد
+        # ادامه می‌دهیم
 
-    # پردازش اصلی با try/except جامع
     try:
         d = q.data or ""
         log.info(f"📨 Callback data: {d}")
@@ -4569,7 +4429,7 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # ===== تنظیم قالب نام‌گذاری =====
+        # تنظیم قالب نام‌گذاری
         if d.startswith("set_naming_"):
             parts = d.split("_")
             if len(parts) >= 3:
@@ -4604,7 +4464,7 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # ===== تنظیم لینک کانال =====
+        # تنظیم لینک کانال
         if d.startswith("set_channel_link_"):
             parts = d.split("_")
             if len(parts) >= 3:
@@ -4731,7 +4591,7 @@ async def show_profile_admin(msg_or_q, profile_id):
             raise
 
 # ======================================================================
-# هندلرهای متنی و سند
+# هندلرهای متنی و سند (بدون تغییر، حذف بخش فایل)
 # ======================================================================
 async def on_text(u, ctx):
     if not is_admin(u.effective_user.id):
@@ -5202,7 +5062,7 @@ async def on_document(u, ctx):
         return
 
 # ======================================================================
-# ارسال دستی
+# ارسال دستی (بدون دانلود فایل)
 # ======================================================================
 async def process_manual_text(u, message, profile_id, is_document=False):
     p = await message.reply_text(msg("manual_send_processing"))
@@ -5420,7 +5280,7 @@ def main():
     app.add_handler(CommandHandler("sendtest", cmd_sendtest))
     app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(CommandHandler("balance", cmd_balance))
-    app.add_handler(CommandHandler("status", cmd_status))  # دستور جدید
+    app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

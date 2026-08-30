@@ -1349,13 +1349,13 @@ async def _scrape_single_page(url, channel):
         return config_links, proxy_links, msg_ids
 
 # ======================================================================
-# فایل‌ها
+# فایل‌ها - اصلاح شده با متد صحیح
 # ======================================================================
 async def fetch_files_from_channel(bot, profile_id, channel, source):
     try:
         chat_id = channel if channel.startswith('@') else '@' + channel
-        chat = await bot.get_chat(chat_id)
-        messages = await chat.get_history(limit=50)
+        # استفاده از bot.get_chat_history به جای chat.get_history
+        messages = await bot.get_chat_history(chat_id, limit=50)
         new_links = []
         for msg in messages:
             if is_message_processed(profile_id, source, msg.message_id):
@@ -4455,7 +4455,7 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # ===== تنظیم لینک کانال =====
+        # ===== تنظیم لینک کانال (اصلاح شده) =====
         if d.startswith("set_channel_link_"):
             parts = d.split("_")
             if len(parts) >= 3:
@@ -4467,7 +4467,7 @@ async def on_callback(u, ctx):
                 ctx.user_data["action"] = f"set_channel_link_{profile_id}"
                 current = get_profile_channel_link(profile_id) or "خالی"
                 await q.edit_message_text(
-                    f"لینک کانال فعلی: `{current}`\n\n" + msg("channel_link_prompt"),
+                    f"🔗 لینک کانال فعلی: `{current}`\n\n" + msg("channel_link_prompt"),
                     parse_mode="HTML",
                     reply_markup=empty_button_kb(profile_id, f"empty_channel_link_{profile_id}")
                 )

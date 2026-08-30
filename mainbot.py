@@ -913,18 +913,8 @@ def extract_links_from_text(text):
         if len(link) > 10:
             results.append(link)
 
+    # اگر لینک مستقیم پیدا نشد، لینک‌های t.me (غیر پروکسی) را جستجو کن
     if not results:
-        for token in text.split():
-            token = token.strip()
-            for proto in ['vless://', 'vmess://', 'trojan://', 'hy2://', 'tuic://', 'ss://', 'socks://', 'hysteria2://']:
-                if token.lower().startswith(proto):
-                    clean = re.sub(r'[.,;:!؟\'"`]+$', '', token)
-                    if len(clean) > len(proto) + 5:
-                        results.append(clean)
-
-    # اگر لینک مستقیم پیدا نشد، دنبال لینک‌های تلگرامی (پیام) بگرد
-    if not results:
-        # لینک‌های t.me که پروکسی نیستند
         telegram_msg_pattern = r'https?://t\.me/([^/\s?]+)/(\d+)(?:\?[^\s]*)?(?:#.*)?'
         for m in re.finditer(telegram_msg_pattern, text, re.IGNORECASE):
             link = m.group(0).strip()
@@ -975,12 +965,14 @@ def normalize_proxy_url(url):
     if not url:
         return None
     url = clean_proxy_link(url.strip())
-    if "t.me/proxy" in url.lower():
+    # پشتیبانی از tg://proxy و https://t.me/proxy
+    if url.startswith("tg://proxy") or "t.me/proxy" in url.lower():
         return normalize_telegram_proxy(url)
     return None
 
 def extract_proxy_links_from_text(text):
     results = []
+    # الگوی https://t.me/proxy
     telegram_proxy_pattern = r'https?://t\.me/proxy\?[^\s<>"\']+'
     for m in re.finditer(telegram_proxy_pattern, text, re.IGNORECASE):
         link = m.group().strip()
@@ -988,6 +980,15 @@ def extract_proxy_links_from_text(text):
         link = normalize_telegram_proxy(link)
         if link and link not in results:
             results.append(link)
+
+    # الگوی tg://proxy
+    tg_proxy_pattern = r'tg://proxy\?[^\s<>"\']+'
+    for m in re.finditer(tg_proxy_pattern, text, re.IGNORECASE):
+        link = m.group().strip()
+        link = clean_proxy_link(link)
+        if link and link not in results:
+            results.append(link)
+
     return results
 
 def extract_uuid_and_address(url):
@@ -1022,7 +1023,9 @@ def is_already_posted(profile_id, url):
     url = clean_config_url(url)
     uid, host = extract_uuid_and_address(url)
     if not uid or not host:
-        return False
+        # اگر نتوانستیم UUID استخراج کنیم، خود لینک را به عنوان کلید در نظر بگیریم
+        uid = url[:200]
+        host = ""
     return c.execute(
         "SELECT 1 FROM seen WHERE uuid=? AND address=? AND profile_id=?",
         (uid, host, profile_id)).fetchone() is not None
@@ -1040,7 +1043,8 @@ def mark_proxy_posted(profile_id, proxy_url):
 def mark_as_posted(profile_id, url, source, full_url=""):
     uid, host = extract_uuid_and_address(url)
     if not uid or not host:
-        return
+        uid = url[:200]
+        host = ""
     now = get_tehran_time()
     max_bn = c.execute("SELECT COALESCE(MAX(backup_num),0) FROM seen WHERE profile_id=?", (profile_id,)).fetchone()[0]
     new_bn = max_bn + 1 if full_url else 0
@@ -1364,26 +1368,50 @@ async def _scrape_single_page(url, channel):
         return config_links, proxy_links, msg_ids
 
 # ======================================================================
-# اسکرپ لینک پیام تلگرام (جدید)
+# اسکرپ لینک پیام تلگرام (بهبود یافته)
 # ======================================================================
 async def scrape_single_message_link(profile_id, url):
     """
     اسکرپ محتوای یک پیام خاص در تلگرام (مثلاً https://t.me/VmessProtocol/1744)
     و استخراج کانفیگ‌ها و پروکسی‌های داخل آن.
+    اگر صفحه شامل لینک به فایل باشد، فایل را دانلود و استخراج می‌کند.
     """
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as cl:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as cl:
             headers = {"User-Agent": _USER_AGENTS[0]}
             r = await cl.get(url, headers=headers)
             if r.status_code != 200:
                 log.warning(f"⚠️ Failed to fetch message link {url}, status {r.status_code}")
                 return [], []
             html = r.text
+
+            # استخراج لینک‌های کانفیگ و پروکسی از صفحه
             configs = extract_links_from_text(html)
             proxies = extract_proxy_links_from_text(html)
-            # فیلتر کردن لینک‌هایی که خودشان t.me هستند (برای جلوگیری از حلقه)
+
+            # اگر لینک به فایل (cdn) وجود دارد، آن را دانلود کن
+            file_links = re.findall(r'https?://cdn\d+\.telesco\.pe/file/[^\s<>"\']+', html)
+            for file_url in file_links:
+                try:
+                    log.info(f"📥 Downloading file from {file_url}")
+                    file_r = await cl.get(file_url, headers=headers)
+                    if file_r.status_code == 200:
+                        data = file_r.content
+                        text = decrypt_subscription(data, [])
+                        if not text:
+                            text = data.decode('utf-8', errors='ignore')
+                        new_configs = extract_links_from_text(text)
+                        new_proxies = extract_proxy_links_from_text(text)
+                        configs.extend(new_configs)
+                        proxies.extend(new_proxies)
+                        log.info(f"✅ Extracted {len(new_configs)} configs and {len(new_proxies)} proxies from file")
+                except Exception as e:
+                    log.warning(f"Error downloading file {file_url}: {e}")
+
+            # فیلتر کردن لینک‌های t.me (برای جلوگیری از حلقه)
             configs = [c for c in configs if not c.startswith("https://t.me/") or "proxy" in c.lower()]
-            proxies = [p for p in proxies if p.startswith("https://t.me/proxy")]
+            proxies = [p for p in proxies if p.startswith("https://t.me/proxy") or p.startswith("tg://proxy")]
+
             log.info(f"📩 Scraped message {url}: {len(configs)} configs, {len(proxies)} proxies")
             return configs, proxies
     except Exception as e:
@@ -1720,16 +1748,16 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
     proxy_text = ""
     count = 0
     for proxy_url, ping, flag in proxies_with_ping[:max_proxies]:
-        if "t.me/proxy" not in proxy_url.lower():
-            continue
-        if is_proxy_posted(profile_id, proxy_url):
-            continue
-        normalized_url = normalize_telegram_proxy(proxy_url)
-        clean_url = clean_proxy_link(normalized_url)
-        safe_url = html.escape(clean_url, quote=False)
-        proxy_text += f"• {flag} <a href=\"{safe_url}\">Telegram Proxy</a>\n"
-        mark_proxy_posted(profile_id, clean_url)
-        count += 1
+        # تشخیص پروکسی‌های تلگرام (هر دو فرمت)
+        if "t.me/proxy" in proxy_url.lower() or proxy_url.startswith("tg://proxy"):
+            if is_proxy_posted(profile_id, proxy_url):
+                continue
+            normalized_url = normalize_telegram_proxy(proxy_url)
+            clean_url = clean_proxy_link(normalized_url)
+            safe_url = html.escape(clean_url, quote=False)
+            proxy_text += f"• {flag} <a href=\"{safe_url}\">Telegram Proxy</a>\n"
+            mark_proxy_posted(profile_id, clean_url)
+            count += 1
 
     if count == 0:
         return 0, None
@@ -1755,7 +1783,7 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
     return count, (text, buttons)
 
 # ======================================================================
-# چرخه اصلی (اصلاح‌شده برای اسکرپ لینک‌های پیام)
+# چرخه اصلی (اصلاح‌شده با پشتیبانی از لینک‌های t.me و پروکسی‌های tg://)
 # ======================================================================
 async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_proxies=True, is_instant=False):
     log.info("=" * 50)
@@ -1847,7 +1875,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
         for link in links:
             if link not in seen_urls:
                 seen_urls.add(link)
-                if "t.me/proxy" in link.lower():
+                if "t.me/proxy" in link.lower() or link.startswith("tg://proxy"):
                     norm = normalize_proxy_url(link)
                     if norm:
                         all_proxies.append(norm)
@@ -1878,8 +1906,20 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                     if norm:
                         all_proxies.append(norm)
 
-    new_configs = [(u, s) for u, s in all_configs if not is_already_posted(profile_id, u)]
-    new_proxies = [p for p in all_proxies if not is_proxy_posted(profile_id, p)]
+    # فیلتر کردن لینک‌های تکراری (بر اساس دیتابیس)
+    new_configs = []
+    for u, s in all_configs:
+        if not is_already_posted(profile_id, u):
+            new_configs.append((u, s))
+        else:
+            log.debug(f"⏭️ Config already posted: {u[:50]}...")
+
+    new_proxies = []
+    for p in all_proxies:
+        if not is_proxy_posted(profile_id, p):
+            new_proxies.append(p)
+        else:
+            log.debug(f"⏭️ Proxy already posted: {p[:50]}...")
 
     log.info(f"📊 New configs: {len(new_configs)}, New proxies: {len(new_proxies)}")
 
@@ -1924,7 +1964,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
 
     proxy_with_ping = []
     if enable_proxies and new_proxies:
-        valid_proxies = [p for p in new_proxies if "t.me/proxy" in p.lower()]
+        valid_proxies = [p for p in new_proxies if "t.me/proxy" in p.lower() or p.startswith("tg://proxy")]
         if valid_proxies:
             log.info(f"📊 Processing {len(valid_proxies)} proxies...")
             sem = asyncio.Semaphore(50)

@@ -213,6 +213,9 @@ c.execute("""CREATE TABLE IF NOT EXISTS admins (
     user_id INTEGER PRIMARY KEY,
     added_by INTEGER,
     added_at TEXT)""")
+# اطمینان از وجود ستون‌های admins
+ensure_column("admins", "added_by", "INTEGER", 0)
+ensure_column("admins", "added_at", "TEXT", "")
 conn.commit()
 
 # ======================================================================
@@ -1358,13 +1361,13 @@ async def _scrape_single_page(profile_id, url, channel):
         return config_links, proxy_links, msg_ids
 
 # ======================================================================
-# فایل‌ها (با افزایش محدودیت)
+# فایل‌ها (با افزایش محدودیت و اصلاح متد)
 # ======================================================================
 async def fetch_files_from_channel(bot, profile_id, channel, source):
     try:
         chat_id = channel if channel.startswith('@') else '@' + channel
-        # افزایش limit به 50 برای پوشش بیشتر پیام‌ها
-        messages = await bot.get_chat_history(chat_id, limit=50)
+        chat = await bot.get_chat(chat_id)
+        messages = await chat.get_chat_history(limit=50)
         new_links = []
         for msg in messages:
             if is_message_processed(profile_id, source, msg.message_id):
@@ -1753,7 +1756,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                 if norm:
                     all_proxies.append(norm)
 
-    # ==== فایل‌ها (افزایش limit) ====
+    # ==== فایل‌ها (با متد صحیح) ====
     file_tasks = [fetch_files_from_channel(bot, profile_id, src, src) for src in sources]
     file_results = await asyncio.gather(*file_tasks, return_exceptions=True)
     for i, res in enumerate(file_results):
@@ -2068,6 +2071,11 @@ async def delete_file_after_delay(filepath, delay_seconds):
         log.error(f"Error deleting file {filepath}: {e}")
 
 # ======================================================================
+# متغیر سراسری برای زمان شروع بات (فیلتر لاگ)
+# ======================================================================
+BOT_START_TIME = datetime.utcnow()
+
+# ======================================================================
 # توابع دریافت لاگ و گزارش روزانه
 # ======================================================================
 async def get_logs(update, context, profile_id, log_type="full", time_range_minutes=30):
@@ -2078,6 +2086,8 @@ async def get_logs(update, context, profile_id, log_type="full", time_range_minu
 
     now_utc = datetime.utcnow()
     cutoff_utc = now_utc - timedelta(minutes=time_range_minutes)
+    # همچنین فقط خطوط بعد از زمان استارت را بگیریم
+    start_cutoff = BOT_START_TIME
 
     try:
         with open(log_file_path, 'r', encoding='utf-8') as f:
@@ -2097,7 +2107,8 @@ async def get_logs(update, context, profile_id, log_type="full", time_range_minu
             ts = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')
         except:
             continue
-        if ts < cutoff_utc:
+        # فیلتر بر اساس زمان استارت و بازه زمانی درخواستی
+        if ts < start_cutoff or ts < cutoff_utc:
             continue
 
         if log_type == "errors":
@@ -2107,7 +2118,7 @@ async def get_logs(update, context, profile_id, log_type="full", time_range_minu
             filtered.append(line)
 
     if not filtered:
-        await update.message.reply_text(f"❌ هیچ لاگ {log_type} در {time_range_minutes} دقیقهٔ اخیر یافت نشد.")
+        await update.message.reply_text(f"❌ هیچ لاگ {log_type} در {time_range_minutes} دقیقهٔ اخیر و پس از استارت یافت نشد.")
         return
 
     max_lines = 500
@@ -2125,7 +2136,7 @@ async def get_logs(update, context, profile_id, log_type="full", time_range_minu
         await update.message.reply_document(
             document=f,
             filename=filename,
-            caption=f"📋 لاگ {log_type} ({range_label} اخیر) - {len(filtered)} خط"
+            caption=f"📋 لاگ {log_type} ({range_label} اخیر پس از استارت) - {len(filtered)} خط"
         )
     os.remove(filepath)
 
@@ -5005,8 +5016,9 @@ BOT_REF = None
 ENABLE_AUTO = True
 
 async def post_init(app):
-    global BOT_REF
+    global BOT_REF, BOT_START_TIME
     BOT_REF = app.bot
+    BOT_START_TIME = datetime.utcnow()  # زمان شروع بات
     profiles = get_profiles()
     if not profiles:
         new_id = create_profile("@VaslZone", sources="@Cfox_Server")

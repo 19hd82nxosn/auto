@@ -186,7 +186,9 @@ c.execute("""CREATE TABLE IF NOT EXISTS profiles (
     max_post_config INTEGER DEFAULT 8,
     max_post_proxy INTEGER DEFAULT 10,
     naming_template TEXT DEFAULT '{Flag} | ⚡️Telegram = {CHANNEL_ID}',
-    channel_link TEXT DEFAULT ''
+    channel_link TEXT DEFAULT '',
+    ping_enabled INTEGER DEFAULT 1,
+    profile_enabled INTEGER DEFAULT 1
 )""")
 conn.commit()
 
@@ -205,6 +207,8 @@ ensure_column("profiles", "max_post_config", "INTEGER DEFAULT 8", 8)
 ensure_column("profiles", "max_post_proxy", "INTEGER DEFAULT 10", 10)
 ensure_column("profiles", "naming_template", "TEXT DEFAULT '{Flag} | ⚡️Telegram = {CHANNEL_ID}'", "{Flag} | ⚡️Telegram = {CHANNEL_ID}")
 ensure_column("profiles", "channel_link", "TEXT DEFAULT ''", "")
+ensure_column("profiles", "ping_enabled", "INTEGER DEFAULT 1", 1)
+ensure_column("profiles", "profile_enabled", "INTEGER DEFAULT 1", 1)
 
 c.execute("""CREATE TABLE IF NOT EXISTS blacklist (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -259,7 +263,9 @@ def fix_column_types():
                     max_post_config INTEGER DEFAULT 8,
                     max_post_proxy INTEGER DEFAULT 10,
                     naming_template TEXT DEFAULT '{Flag} | ⚡️Telegram = {CHANNEL_ID}',
-                    channel_link TEXT DEFAULT ''
+                    channel_link TEXT DEFAULT '',
+                    ping_enabled INTEGER DEFAULT 1,
+                    profile_enabled INTEGER DEFAULT 1
                 )
             """)
             c.execute("""
@@ -269,13 +275,13 @@ def fix_column_types():
                      created_at, show_numbers, custom_query, show_date_config, show_date_proxy,
                      schedule_cron, last_backup_count, timer_expiry, timer_duration, backup_interval,
                      interval_config, interval_proxy, max_post_config, max_post_proxy,
-                     naming_template, channel_link)
+                     naming_template, channel_link, ping_enabled, profile_enabled)
                 SELECT id, dest_name, sources, banner_config, banner_proxy, interval_min,
                        max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num,
                        created_at, show_numbers, custom_query, show_date_config, show_date_proxy,
                        schedule_cron, last_backup_count, timer_expiry, timer_duration, backup_interval,
                        interval_config, interval_proxy, max_post_config, max_post_proxy,
-                       naming_template, channel_link
+                       naming_template, channel_link, ping_enabled, profile_enabled
                 FROM profiles
             """)
             c.execute("DROP TABLE profiles")
@@ -431,14 +437,14 @@ def migrate_old_config():
              show_numbers, custom_query, show_date_config, show_date_proxy, schedule_cron, last_backup_count,
              timer_expiry, timer_duration, backup_interval,
              interval_config, interval_proxy, max_post_config, max_post_proxy,
-             naming_template, channel_link)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             naming_template, channel_link, ping_enabled, profile_enabled)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (dest, old_sources, old_banner_config, old_banner_proxy,
              old_interval, old_max_post, old_max_proxies,
              old_post_configs, old_post_proxies, old_ping_mode, old_last_num,
              datetime.now().isoformat(), 1, "", 1, 1, "", 0, None, 0, 1000,
              old_interval, old_interval, old_max_post, old_max_proxies,
-             "{Flag} | ⚡️Telegram = {CHANNEL_ID}", ""))
+             "{Flag} | ⚡️Telegram = {CHANNEL_ID}", "", 1, 1))
     conn.commit()
     log.info(f"✅ Migrated {len(dest_list)} profiles.")
 
@@ -494,7 +500,8 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
                    show_numbers=1, custom_query="",
                    show_date_config=1, show_date_proxy=1, schedule_cron="", backup_interval=1000,
                    interval_config=5, interval_proxy=5, max_post_config=8, max_post_proxy=10,
-                   naming_template="{Flag} | ⚡️Telegram = {CHANNEL_ID}", channel_link=""):
+                   naming_template="{Flag} | ⚡️Telegram = {CHANNEL_ID}", channel_link="",
+                   ping_enabled=1, profile_enabled=1):
     if not banner_config:
         banner_config = "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
     if not banner_proxy:
@@ -505,15 +512,15 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
          show_numbers, custom_query, show_date_config, show_date_proxy, schedule_cron, last_backup_count,
          timer_expiry, timer_duration, backup_interval,
          interval_config, interval_proxy, max_post_config, max_post_proxy,
-         naming_template, channel_link)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         naming_template, channel_link, ping_enabled, profile_enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (dest_name, sources, banner_config, banner_proxy,
          interval_min, max_post, max_proxies,
          post_configs, post_proxies, ping_mode, last_num,
          get_tehran_time(), show_numbers, custom_query,
          show_date_config, show_date_proxy, schedule_cron, 0, None, 0, backup_interval,
          interval_config, interval_proxy, max_post_config, max_post_proxy,
-         naming_template, channel_link))
+         naming_template, channel_link, ping_enabled, profile_enabled))
     conn.commit()
     return c.lastrowid
 
@@ -524,7 +531,7 @@ def update_profile(profile_id, **kwargs):
                "show_numbers", "custom_query", "show_date_config", "show_date_proxy",
                "schedule_cron", "last_backup_count", "timer_expiry", "timer_duration",
                "backup_interval", "interval_config", "interval_proxy", "max_post_config", "max_post_proxy",
-               "naming_template", "channel_link"]
+               "naming_template", "channel_link", "ping_enabled", "profile_enabled"]
     for key, value in kwargs.items():
         if key in allowed:
             c.execute(f"UPDATE profiles SET {key}=? WHERE id=?", (value, profile_id))
@@ -611,6 +618,20 @@ def get_profile_ping_mode(profile_id):
 
 def set_profile_ping_mode(profile_id, mode):
     update_profile(profile_id, ping_mode=mode)
+
+def get_profile_ping_enabled(profile_id):
+    prof = get_profile(profile_id)
+    return prof.get("ping_enabled", 1) if prof else 1
+
+def set_profile_ping_enabled(profile_id, enabled):
+    update_profile(profile_id, ping_enabled=1 if enabled else 0)
+
+def get_profile_enabled(profile_id):
+    prof = get_profile(profile_id)
+    return prof.get("profile_enabled", 1) if prof else 1
+
+def set_profile_enabled(profile_id, enabled):
+    update_profile(profile_id, profile_enabled=1 if enabled else 0)
 
 def get_profile_post_configs(profile_id):
     prof = get_profile(profile_id)
@@ -1222,7 +1243,7 @@ async def check_full_link_ping(url, ping_mode="iran"):
     return ping, ok, cnt
 
 # ======================================================================
-# اسکرپ (با پیج‌بندی کامل)
+# اسکرپ
 # ======================================================================
 _USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -1328,12 +1349,11 @@ async def _scrape_single_page(url, channel):
         return config_links, proxy_links, msg_ids
 
 # ======================================================================
-# فایل‌ها (اصلاح شده با متد صحیح)
+# فایل‌ها
 # ======================================================================
 async def fetch_files_from_channel(bot, profile_id, channel, source):
     try:
         chat_id = channel if channel.startswith('@') else '@' + channel
-        # استفاده از متد صحیح برای دریافت تاریخچه
         chat = await bot.get_chat(chat_id)
         messages = await chat.get_history(limit=50)
         new_links = []
@@ -1705,6 +1725,11 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
         log.error(f"❌ Profile {profile_id} not found!")
         return 0, "profile not found"
 
+    # بررسی فعال بودن پروفایل
+    if not get_profile_enabled(profile_id):
+        log.info(f"⏸️ Profile {profile_id} is disabled, skipping cycle.")
+        return 0, "profile disabled"
+
     sources = get_profile_sources(profile_id)
     sources = [normalize_channel_input(s) for s in sources if normalize_channel_input(s)]
     if not sources:
@@ -1717,7 +1742,8 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
         return 0, "no destination"
 
     ping_mode = get_profile_ping_mode(profile_id)
-    log.info(f"📡 Sources: {len(sources)} | 🎯 {dest} | 🌍 Ping: {ping_mode}")
+    ping_enabled = get_profile_ping_enabled(profile_id)
+    log.info(f"📡 Sources: {len(sources)} | 🎯 {dest} | 🌍 Ping: {ping_mode} | Ping enabled: {ping_enabled}")
 
     all_configs = []
     all_proxies = []
@@ -1783,11 +1809,16 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
         to_test = new_configs[:test_limit]
         log.info(f"📊 Testing {len(to_test)} configs...")
         sem = asyncio.Semaphore(50)
+
         async def _check(item):
             u, src = item
             async with sem:
                 try:
-                    ping, ok, cnt = await check_full_link_ping(u, ping_mode)
+                    if ping_enabled:
+                        ping, ok, cnt = await check_full_link_ping(u, ping_mode)
+                    else:
+                        # اگر پینگ غیرفعال است، همه را قبول کن
+                        ping, ok, cnt = 0, True, 0
                     if ok:
                         log.info(f"✅ Config OK: {u[:50]}... ping={ping}ms")
                         return u, True, ping, cnt, src
@@ -1797,6 +1828,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                 except Exception as e:
                     log.debug(f"ping failed for {u[:30]}: {e}")
                     return u, False, 0, 0, src
+
         rs = await asyncio.gather(*[_check(item) for item in to_test], return_exceptions=True)
         for r in rs:
             if isinstance(r, Exception):
@@ -1813,15 +1845,20 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
         if valid_proxies:
             log.info(f"📊 Processing {len(valid_proxies)} proxies...")
             sem = asyncio.Semaphore(50)
+
             async def check_proxy(proxy_url):
                 async with sem:
-                    ping, ok, cnt = await check_full_link_ping(proxy_url, ping_mode)
+                    if ping_enabled:
+                        ping, ok, cnt = await check_full_link_ping(proxy_url, ping_mode)
+                    else:
+                        ping, ok = 0, True
                     host, _ = extract_host(proxy_url)
                     ip = await host_to_ip(host) if host else None
                     flag = "🌐"
                     if ip:
                         flag = await get_flag_for_ip(ip)
                     return proxy_url, ping if ok else 0, flag
+
             results = await asyncio.gather(
                 *[check_proxy(p) for p in valid_proxies[:100]], return_exceptions=True)
             for r in results:
@@ -1854,7 +1891,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     return total_configs + total_proxies, result_msg
 
 # ======================================================================
-# حلقه‌های خودکار (با تایم دقیق)
+# حلقه‌های خودکار
 # ======================================================================
 async def profile_loop_config(bot, profile_id):
     log.info(f"🔄 Starting config loop for profile {profile_id}")
@@ -1864,6 +1901,12 @@ async def profile_loop_config(bot, profile_id):
             if not profile:
                 log.error(f"❌ Profile {profile_id} not found, stopping config loop.")
                 break
+
+            # بررسی فعال بودن پروفایل
+            if not get_profile_enabled(profile_id):
+                log.info(f"⏸️ Profile {profile_id} is disabled, sleeping 60s")
+                await asyncio.sleep(60)
+                continue
 
             if not get_profile_post_configs(profile_id):
                 log.info(f"ℹ️ Config posting disabled for profile {profile_id}, sleeping 60s")
@@ -1889,7 +1932,7 @@ async def profile_loop_config(bot, profile_id):
                             f"⏰ تایمر پروفایل {dest_name} (ID: {profile_id}) به پایان رسید. ارسال خودکار از سر گرفته شد."
                         )
                         log.info(f"✅ Timer expired for profile {profile_id}, running cycle immediately")
-                        n, m = await run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_proxies=False, is_instant=(interval==0))
+                        n, m = await run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_proxies=False, is_instant=(interval == 0))
                         log.info(f"[config loop] result: {n} - {m}")
                         continue
                 except Exception as e:
@@ -1932,6 +1975,12 @@ async def profile_loop_proxy(bot, profile_id):
                 log.error(f"❌ Profile {profile_id} not found, stopping proxy loop.")
                 break
 
+            # بررسی فعال بودن پروفایل
+            if not get_profile_enabled(profile_id):
+                log.info(f"⏸️ Profile {profile_id} is disabled, sleeping 60s")
+                await asyncio.sleep(60)
+                continue
+
             if not get_profile_post_proxies(profile_id):
                 log.info(f"ℹ️ Proxy posting disabled for profile {profile_id}, sleeping 60s")
                 await asyncio.sleep(60)
@@ -1956,7 +2005,7 @@ async def profile_loop_proxy(bot, profile_id):
                             f"⏰ تایمر پروفایل {dest_name} (ID: {profile_id}) به پایان رسید. ارسال خودکار از سر گرفته شد."
                         )
                         log.info(f"✅ Timer expired for profile {profile_id}, running proxy cycle immediately")
-                        n, m = await run_cycle_for_profile(bot, profile_id, enable_configs=False, enable_proxies=True, is_instant=(interval==0))
+                        n, m = await run_cycle_for_profile(bot, profile_id, enable_configs=False, enable_proxies=True, is_instant=(interval == 0))
                         log.info(f"[proxy loop] result: {n} - {m}")
                         continue
                 except Exception as e:
@@ -1989,13 +2038,6 @@ async def profile_loop_proxy(bot, profile_id):
             log.error(f"❌ profile_loop_proxy error: {e}")
             log.error(traceback.format_exc())
             await asyncio.sleep(60)
-
-# ======================================================================
-# بقیه کدهای کمکی (بک‌آپ، لاگ، credit، ادمین، زبان، کیبوردها، دستورات، کالبک‌ها، هندلرها)
-# ======================================================================
-# ... ادامه کد با همان ساختار قبلی اما با اصلاحات اعمال شده
-# به دلیل محدودیت طول، بخش‌های باقی‌مانده را در ادامه ارائه می‌کنم
-# ======================================================================
 
 # ======================================================================
 # بک‌آپ خودکار
@@ -2165,7 +2207,8 @@ async def send_daily_report(app):
             timer = ""
             if p.get('timer_expiry'):
                 timer = " (⏳ تایمر فعال)"
-            lines.append(f"• {p['dest_name']} (ID:{p['id']}) – {src_count} منبع, بازه کانفیگ:{interval_cfg}m, بازه پروکسی:{interval_prx}m, #{last_num+1}{timer}")
+            enabled_status = "✅ فعال" if get_profile_enabled(p['id']) else "⛔ غیرفعال"
+            lines.append(f"• {p['dest_name']} (ID:{p['id']}) – {src_count} منبع, بازه کانفیگ:{interval_cfg}m, بازه پروکسی:{interval_prx}m, #{last_num+1}{timer} {enabled_status}")
 
         msg = "\n".join(lines)
         await app.bot.send_message(MAIN_ADMIN_ID, msg, parse_mode="HTML")
@@ -2181,31 +2224,17 @@ async def get_railway_credit():
         return None
     try:
         project_id = RAILWAY_PROJECT_ID
-        query = """
-        query {
-            me {
-                projects {
-                    edges {
-                        node {
-                            id
-                            name
-                            credit
-                        }
-                    }
-                }
-            }
-        }
-        """
-        if project_id:
-            query = f"""
-            query {{
-                project(id: "{project_id}") {{
-                    id
-                    name
-                    credit
-                }}
+        if not project_id:
+            return None
+        query = f"""
+        query {{
+            project(id: "{project_id}") {{
+                id
+                name
+                credit
             }}
-            """
+        }}
+        """
         async with httpx.AsyncClient(timeout=10) as client:
             headers = {
                 "Authorization": f"Bearer {RAILWAY_TOKEN}",
@@ -2221,17 +2250,9 @@ async def get_railway_credit():
                 if "errors" in data:
                     log.warning(f"Railway API errors: {data['errors']}")
                     return None
-                if project_id:
-                    credit = data.get("data", {}).get("project", {}).get("credit")
-                    if credit is not None:
-                        return float(credit)
-                else:
-                    projects = data.get("data", {}).get("me", {}).get("projects", {}).get("edges", [])
-                    if projects:
-                        node = projects[0].get("node", {})
-                        credit = node.get("credit")
-                        if credit is not None:
-                            return float(credit)
+                credit = data.get("data", {}).get("project", {}).get("credit")
+                if credit is not None:
+                    return float(credit)
             else:
                 log.warning(f"Railway API returned {resp.status_code}")
                 return None
@@ -2402,7 +2423,9 @@ T = {
                        "⏱️ تایمر: {timer_status}\n"
                        "📦 بک‌آپ هر {backup_interval} عدد\n"
                        "🏷️ قالب نام: {naming}\n"
-                       "🔗 لینک کانال: {channel_link}",
+                       "🔗 لینک کانال: {channel_link}\n"
+                       "🌍 پینگ: {ping_status}\n"
+                       "🔘 وضعیت: {profile_status}",
         "general_settings": "⚙️ **تنظیمات عمومی**\n\n"
                             "زبان فعلی: {lang}\n"
                             "تعداد ادمین‌ها: {admins_count}",
@@ -2564,6 +2587,10 @@ T = {
         "btn_set_channel_link": "🔗 لینک کانال",
         "channel_link_prompt": "🔗 لینک کانال را وارد کنید (مثلاً `MyChannel`):\n\nاین مقدار در قالب نام‌گذاری به جای `{CHANNEL_ID}` قرار می‌گیرد.\nاگر خالی بگذارید، از نام پروفایل استفاده می‌شود.",
         "channel_link_set": "✅ لینک کانال تنظیم شد: {link}",
+        "btn_toggle_ping": "🌍 پینگ: {status}",
+        "toggle_ping": "✅ پینگ {'فعال' if status else 'غیرفعال'} شد.",
+        "btn_toggle_profile": "🔘 پروفایل: {status}",
+        "toggle_profile": "✅ پروفایل {'فعال' if status else 'غیرفعال'} شد.",
     },
     "en": {
         "welcome": "🤖 **Config & Proxy Bot**\n\n"
@@ -2586,7 +2613,9 @@ T = {
                        "⏱️ Timer: {timer_status}\n"
                        "📦 Backup every {backup_interval}\n"
                        "🏷️ Naming: {naming}\n"
-                       "🔗 Channel link: {channel_link}",
+                       "🔗 Channel link: {channel_link}\n"
+                       "🌍 Ping: {ping_status}\n"
+                       "🔘 Status: {profile_status}",
         "general_settings": "⚙️ **General Settings**\n\n"
                             "Language: {lang}\n"
                             "Admins count: {admins_count}",
@@ -2748,6 +2777,10 @@ T = {
         "btn_set_channel_link": "🔗 Channel Link",
         "channel_link_prompt": "🔗 Enter channel link (e.g. `MyChannel`):\n\nThis value replaces `{CHANNEL_ID}` in the naming template.\nIf left empty, profile name will be used.",
         "channel_link_set": "✅ Channel link set: {link}",
+        "btn_toggle_ping": "🌍 Ping: {status}",
+        "toggle_ping": "✅ Ping {'enabled' if status else 'disabled'}.",
+        "btn_toggle_profile": "🔘 Profile: {status}",
+        "toggle_profile": "✅ Profile {'enabled' if status else 'disabled'}.",
     }
 }
 
@@ -2775,7 +2808,8 @@ def profiles_kb():
     profiles = get_profiles()
     btns = []
     for p in profiles:
-        btns.append([InlineKeyboardButton(f"{p['dest_name']} (ID:{p['id']})", callback_data=f"prof_{p['id']}", style="primary")])
+        status = "✅" if get_profile_enabled(p['id']) else "⛔"
+        btns.append([InlineKeyboardButton(f"{status} {p['dest_name']} (ID:{p['id']})", callback_data=f"prof_{p['id']}", style="primary")])
     btns.append([InlineKeyboardButton("➕ Add Profile", callback_data="prof_add", style="success")])
     btns.append([InlineKeyboardButton(msg("btn_back"), callback_data="back_home", style="primary")])
     return InlineKeyboardMarkup(btns)
@@ -2785,7 +2819,12 @@ def profile_admin_kb(profile_id):
     if not prof:
         return None
     ping_mode = prof["ping_mode"]
-    ping_label = "🌍 ایران‌فقط: روشن" if ping_mode == "iran" else "🌍 جهانی: روشن"
+    ping_label = "🌍 ایران‌فقط" if ping_mode == "iran" else "🌍 جهانی"
+    ping_enabled = get_profile_ping_enabled(profile_id)
+    ping_status = "✅" if ping_enabled else "❌"
+    profile_enabled = get_profile_enabled(profile_id)
+    profile_status = "✅" if profile_enabled else "❌"
+
     post_cfg = prof["post_configs"] == 1
     post_prx = prof["post_proxies"] == 1
     show_num = prof["show_numbers"] == 1
@@ -2826,10 +2865,12 @@ def profile_admin_kb(profile_id):
          InlineKeyboardButton("⏰ بازه پروکسی", callback_data=f"set_prx_interval_{profile_id}", style="primary")],
         [InlineKeyboardButton("📊 تعداد کانفیگ", callback_data=f"set_cfg_max_{profile_id}", style="primary"),
          InlineKeyboardButton("📊 تعداد پروکسی", callback_data=f"set_prx_max_{profile_id}", style="primary")],
-        [InlineKeyboardButton(ping_label, callback_data=f"tglping_{profile_id}", style="primary"),
-         InlineKeyboardButton(cfg_btn, callback_data=f"tglcfg_{profile_id}", style="primary")],
-        [InlineKeyboardButton(prx_btn, callback_data=f"tglproxy_{profile_id}", style="primary"),
-         InlineKeyboardButton(num_btn, callback_data=f"togglenum_{profile_id}", style="primary")],
+        [InlineKeyboardButton(f"{ping_label} {ping_status}", callback_data=f"tglping_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_toggle_ping", status=ping_status), callback_data=f"tgl_ping_{profile_id}", style="primary")],
+        [InlineKeyboardButton(cfg_btn, callback_data=f"tglcfg_{profile_id}", style="primary"),
+         InlineKeyboardButton(prx_btn, callback_data=f"tglproxy_{profile_id}", style="primary")],
+        [InlineKeyboardButton(num_btn, callback_data=f"togglenum_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_toggle_profile", status=profile_status), callback_data=f"tgl_profile_{profile_id}", style="danger")],
         [InlineKeyboardButton(f"📅 تاریخ کانفیگ: {date_cfg_status}", callback_data=f"tgl_date_cfg_{profile_id}", style="primary"),
          InlineKeyboardButton(f"📅 تاریخ پروکسی: {date_prx_status}", callback_data=f"tgl_date_prx_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_set_custom_query"), callback_data=f"setquery_{profile_id}", style="primary"),
@@ -3007,7 +3048,8 @@ async def show_profiles_list(msg_or_q):
     else:
         lines = []
         for p in profiles:
-            lines.append(f"• `{p['dest_name']}` (ID: {p['id']}) – {len(get_profile_sources(p['id']))} منبع, بازه کانفیگ:{p.get('interval_config',5)}m, بازه پروکسی:{p.get('interval_proxy',5)}m")
+            status = "✅" if get_profile_enabled(p['id']) else "⛔"
+            lines.append(f"• {status} `{p['dest_name']}` (ID: {p['id']}) – {len(get_profile_sources(p['id']))} منبع, بازه کانفیگ:{p.get('interval_config',5)}m, بازه پروکسی:{p.get('interval_proxy',5)}m")
         txt = msg("profile_list", list="\n".join(lines))
     kb = profiles_kb()
     try:
@@ -3029,6 +3071,9 @@ async def cmd_runnow(u, ctx):
         profiles = get_profiles()
         results = []
         for prof in profiles:
+            if not get_profile_enabled(prof['id']):
+                results.append(f"{prof['dest_name']}: غیرفعال")
+                continue
             log.info(f"🚀 /runnow for profile {prof['id']}")
             n, m = await run_cycle_for_profile(u.get_bot(), prof['id'], enable_configs=True, enable_proxies=True, is_instant=False)
             results.append(f"{prof['dest_name']}: {n} - {m}")
@@ -3046,6 +3091,9 @@ async def cmd_runall(u, ctx):
         profiles = get_profiles()
         results = []
         for prof in profiles:
+            if not get_profile_enabled(prof['id']):
+                results.append(f"{prof['dest_name']}: غیرفعال")
+                continue
             log.info(f"🚀 /runall for profile {prof['id']}")
             n, m = await run_cycle_for_profile(u.get_bot(), prof['id'], enable_configs=True, enable_proxies=True, is_instant=False)
             results.append(f"{prof['dest_name']}: {n} - {m}")
@@ -3079,7 +3127,9 @@ async def cmd_diag(update: Update, context):
     msg_lines.append(f"📌 تعداد پروفایل‌ها: {len(profiles)}")
     for prof in profiles:
         timer_status = "⏳ فعال" if prof.get("timer_expiry") else "⏹ غیرفعال"
-        msg_lines.append(f"  • {prof['dest_name']} (ID:{prof['id']}) - {len(get_profile_sources(prof['id']))} منبع, بازه کانفیگ:{prof.get('interval_config',5)}m, بازه پروکسی:{prof.get('interval_proxy',5)}m, پینگ {prof['ping_mode']}, تایمر: {timer_status}")
+        enabled_status = "✅ فعال" if get_profile_enabled(prof['id']) else "⛔ غیرفعال"
+        ping_enabled = "✅" if get_profile_ping_enabled(prof['id']) else "❌"
+        msg_lines.append(f"  • {prof['dest_name']} (ID:{prof['id']}) - {len(get_profile_sources(prof['id']))} منبع, بازه کانفیگ:{prof.get('interval_config',5)}m, بازه پروکسی:{prof.get('interval_proxy',5)}m, پینگ {prof['ping_mode']}, پینگ فعال:{ping_enabled}, تایمر: {timer_status}, وضعیت:{enabled_status}")
     msg_lines.append("")
     seen_cfg = c.execute("SELECT COUNT(*) FROM seen").fetchone()[0]
     seen_prx = c.execute("SELECT COUNT(*) FROM proxies_seen").fetchone()[0]
@@ -3720,6 +3770,9 @@ async def on_callback(u, ctx):
                 except ValueError:
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
+                if not get_profile_enabled(profile_id):
+                    await q.answer("⛔ پروفایل غیرفعال است!", show_alert=True)
+                    return
                 p = await q.edit_message_text("⏳ در حال اجرا...")
                 try:
                     n, m = await run_cycle_for_profile(u.get_bot(), profile_id, enable_configs=True, enable_proxies=True, is_instant=False)
@@ -3759,6 +3812,40 @@ async def on_callback(u, ctx):
                 new_mode = "global" if current == "iran" else "iran"
                 set_profile_ping_mode(profile_id, new_mode)
                 await q.answer(f"حالت پینگ: {'جهانی' if new_mode == 'global' else 'ایران'}")
+                await show_profile_admin(q.message, profile_id)
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("tgl_ping_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                current = get_profile_ping_enabled(profile_id)
+                new_val = not current
+                set_profile_ping_enabled(profile_id, new_val)
+                await q.answer(msg("toggle_ping", status=new_val))
+                await show_profile_admin(q.message, profile_id)
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("tgl_profile_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                current = get_profile_enabled(profile_id)
+                new_val = not current
+                set_profile_enabled(profile_id, new_val)
+                await q.answer(msg("toggle_profile", status=new_val))
                 await show_profile_admin(q.message, profile_id)
             else:
                 await q.answer("⚠️ خطا در داده")
@@ -4368,7 +4455,7 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # ===== تنظیم لینک کانال (جایگزین شناسه کانال) =====
+        # ===== تنظیم لینک کانال =====
         if d.startswith("set_channel_link_"):
             parts = d.split("_")
             if len(parts) >= 3:
@@ -4438,6 +4525,11 @@ async def show_profile_admin(msg_or_q, profile_id):
     sponsor_st = f"{sponsor['name']} ({'فعال' if sponsor['enabled'] else 'غیرفعال'})" if sponsor else "خالی"
     ping_mode = prof["ping_mode"]
     ping_display = "ایران" if ping_mode == "iran" else "جهانی"
+    ping_enabled = get_profile_ping_enabled(profile_id)
+    ping_status = "✅" if ping_enabled else "❌"
+    profile_enabled = get_profile_enabled(profile_id)
+    profile_status = "✅" if profile_enabled else "❌"
+
     post_cfg = prof["post_configs"] == 1
     post_prx = prof["post_proxies"] == 1
     cfg_status = "✅" if post_cfg else "❌"
@@ -4474,6 +4566,8 @@ async def show_profile_admin(msg_or_q, profile_id):
         backup_interval=backup_interval,
         naming=naming_template,
         channel_link=channel_link,
+        ping_status=ping_status,
+        profile_status=profile_status,
     )
     kb = profile_admin_kb(profile_id)
     try:
@@ -5157,11 +5251,11 @@ async def post_init(app):
     app.create_task(periodic_cleanup())
     log.info("🧹 Periodic cleanup task started")
 
-    if RAILWAY_TOKEN:
+    if RAILWAY_TOKEN and RAILWAY_PROJECT_ID:
         app.create_task(periodic_credit_check())
         log.info("💰 Credit check task started (Railway)")
     else:
-        log.info("💰 Credit check disabled (no RAILWAY_TOKEN)")
+        log.info("💰 Credit check disabled (no RAILWAY_TOKEN or PROJECT_ID)")
 
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()

@@ -74,6 +74,266 @@ def get_tehran_date() -> str:
     return datetime.now(TEHRAN_TZ).strftime('%Y-%m-%d')
 
 # ======================================================================
+# دیکشنری کشورها (انگلیسی و فارسی)
+# ======================================================================
+COUNTRIES = {
+    "AD": {"en": "Andorra", "fa": "آندورا"},
+    "AE": {"en": "United Arab Emirates", "fa": "امارات متحده عربی"},
+    "AF": {"en": "Afghanistan", "fa": "افغانستان"},
+    "AG": {"en": "Antigua and Barbuda", "fa": "آنتیگوا و باربودا"},
+    "AI": {"en": "Anguilla", "fa": "آنگویلا"},
+    "AL": {"en": "Albania", "fa": "آلبانی"},
+    "AM": {"en": "Armenia", "fa": "ارمنستان"},
+    "AO": {"en": "Angola", "fa": "آنگولا"},
+    "AQ": {"en": "Antarctica", "fa": "جنوبگان"},
+    "AR": {"en": "Argentina", "fa": "آرژانتین"},
+    "AS": {"en": "American Samoa", "fa": "ساموآی آمریکا"},
+    "AT": {"en": "Austria", "fa": "اتریش"},
+    "AU": {"en": "Australia", "fa": "استرالیا"},
+    "AW": {"en": "Aruba", "fa": "آروبا"},
+    "AX": {"en": "Åland Islands", "fa": "جزایر آلند"},
+    "AZ": {"en": "Azerbaijan", "fa": "جمهوری آذربایجان"},
+    "BA": {"en": "Bosnia and Herzegovina", "fa": "بوسنی و هرزگوین"},
+    "BB": {"en": "Barbados", "fa": "باربادوس"},
+    "BD": {"en": "Bangladesh", "fa": "بنگلادش"},
+    "BE": {"en": "Belgium", "fa": "بلژیک"},
+    "BF": {"en": "Burkina Faso", "fa": "بورکینافاسو"},
+    "BG": {"en": "Bulgaria", "fa": "بلغارستان"},
+    "BH": {"en": "Bahrain", "fa": "بحرین"},
+    "BI": {"en": "Burundi", "fa": "بوروندی"},
+    "BJ": {"en": "Benin", "fa": "بنین"},
+    "BL": {"en": "Saint Barthélemy", "fa": "سن بارتلمی"},
+    "BM": {"en": "Bermuda", "fa": "برمودا"},
+    "BN": {"en": "Brunei Darussalam", "fa": "برونئی"},
+    "BO": {"en": "Bolivia, Plurinational State of", "fa": "بولیوی"},
+    "BQ": {"en": "Bonaire, Sint Eustatius and Saba", "fa": "بونیر"},
+    "BR": {"en": "Brazil", "fa": "برزیل"},
+    "BS": {"en": "Bahamas", "fa": "باهاما"},
+    "BT": {"en": "Bhutan", "fa": "بوتان"},
+    "BV": {"en": "Bouvet Island", "fa": "جزیره بووه"},
+    "BW": {"en": "Botswana", "fa": "بوتسوانا"},
+    "BY": {"en": "Belarus", "fa": "بلاروس"},
+    "BZ": {"en": "Belize", "fa": "بلیز"},
+    "CA": {"en": "Canada", "fa": "کانادا"},
+    "CC": {"en": "Cocos (Keeling) Islands", "fa": "جزایر کوکوس"},
+    "CD": {"en": "Congo, Democratic Republic of the", "fa": "کنگو - کینشاسا"},
+    "CF": {"en": "Central African Republic", "fa": "جمهوری آفریقای مرکزی"},
+    "CG": {"en": "Congo", "fa": "کنگو - برازاویل"},
+    "CH": {"en": "Switzerland", "fa": "سوئیس"},
+    "CI": {"en": "Côte d'Ivoire", "fa": "ساحل عاج"},
+    "CK": {"en": "Cook Islands", "fa": "جزایر کوک"},
+    "CL": {"en": "Chile", "fa": "شیلی"},
+    "CM": {"en": "Cameroon", "fa": "کامرون"},
+    "CN": {"en": "China", "fa": "چین"},
+    "CO": {"en": "Colombia", "fa": "کلمبیا"},
+    "CR": {"en": "Costa Rica", "fa": "کاستاریکا"},
+    "CU": {"en": "Cuba", "fa": "کوبا"},
+    "CV": {"en": "Cape Verde", "fa": "کیپ ورد"},
+    "CW": {"en": "Curaçao", "fa": "کوراسائو"},
+    "CX": {"en": "Christmas Island", "fa": "جزیره کریسمس"},
+    "CY": {"en": "Cyprus", "fa": "قبرس"},
+    "CZ": {"en": "Czech Republic", "fa": "جمهوری چک"},
+    "DE": {"en": "Germany", "fa": "آلمان"},
+    "DJ": {"en": "Djibouti", "fa": "جیبوتی"},
+    "DK": {"en": "Denmark", "fa": "دانمارک"},
+    "DM": {"en": "Dominica", "fa": "دومینیکا"},
+    "DO": {"en": "Dominican Republic", "fa": "جمهوری دومینیکن"},
+    "DZ": {"en": "Algeria", "fa": "الجزایر"},
+    "EC": {"en": "Ecuador", "fa": "اکوادور"},
+    "EE": {"en": "Estonia", "fa": "استونی"},
+    "EG": {"en": "Egypt", "fa": "مصر"},
+    "EH": {"en": "Western Sahara", "fa": "صحرای غربی"},
+    "ER": {"en": "Eritrea", "fa": "اریتره"},
+    "ES": {"en": "Spain", "fa": "اسپانیا"},
+    "ET": {"en": "Ethiopia", "fa": "اتیوپی"},
+    "FI": {"en": "Finland", "fa": "فنلاند"},
+    "FJ": {"en": "Fiji", "fa": "فیجی"},
+    "FK": {"en": "Falkland Islands (Malvinas)", "fa": "جزایر فالکلند"},
+    "FM": {"en": "Micronesia, Federated States of", "fa": "میکرونزی"},
+    "FO": {"en": "Faroe Islands", "fa": "جزایر فارو"},
+    "FR": {"en": "France", "fa": "فرانسه"},
+    "GA": {"en": "Gabon", "fa": "گابن"},
+    "GB": {"en": "United Kingdom", "fa": "بریتانیا"},
+    "GD": {"en": "Grenada", "fa": "گرنادا"},
+    "GE": {"en": "Georgia", "fa": "گرجستان"},
+    "GF": {"en": "French Guiana", "fa": "گویان فرانسه"},
+    "GG": {"en": "Guernsey", "fa": "گرنزی"},
+    "GH": {"en": "Ghana", "fa": "غنا"},
+    "GI": {"en": "Gibraltar", "fa": "جبل‌الطارق"},
+    "GL": {"en": "Greenland", "fa": "گرینلند"},
+    "GM": {"en": "Gambia", "fa": "گامبیا"},
+    "GN": {"en": "Guinea", "fa": "گینه"},
+    "GP": {"en": "Guadeloupe", "fa": "گوادلوپ"},
+    "GQ": {"en": "Equatorial Guinea", "fa": "گینه استوایی"},
+    "GR": {"en": "Greece", "fa": "یونان"},
+    "GS": {"en": "South Georgia and the South Sandwich Islands", "fa": "جورجیا جنوبی و جزایر ساندویچ جنوبی"},
+    "GT": {"en": "Guatemala", "fa": "گواتمالا"},
+    "GU": {"en": "Guam", "fa": "گوام"},
+    "GW": {"en": "Guinea-Bissau", "fa": "گینه بیسائو"},
+    "GY": {"en": "Guyana", "fa": "گویان"},
+    "HK": {"en": "Hong Kong", "fa": "هنگ کنگ"},
+    "HM": {"en": "Heard Island and McDonald Islands", "fa": "جزیره هرد و جزایر مک‌دونالد"},
+    "HN": {"en": "Honduras", "fa": "هندوراس"},
+    "HR": {"en": "Croatia", "fa": "کرواسی"},
+    "HT": {"en": "Haiti", "fa": "هائیتی"},
+    "HU": {"en": "Hungary", "fa": "مجارستان"},
+    "ID": {"en": "Indonesia", "fa": "اندونزی"},
+    "IE": {"en": "Ireland", "fa": "ایرلند"},
+    "IL": {"en": "Israel", "fa": "اسرائیل"},
+    "IM": {"en": "Isle of Man", "fa": "جزیره من"},
+    "IN": {"en": "India", "fa": "هند"},
+    "IO": {"en": "British Indian Ocean Territory", "fa": "قلمرو بریتانیا در اقیانوس هند"},
+    "IQ": {"en": "Iraq", "fa": "عراق"},
+    "IR": {"en": "Iran, Islamic Republic of", "fa": "ایران"},
+    "IS": {"en": "Iceland", "fa": "ایسلند"},
+    "IT": {"en": "Italy", "fa": "ایتالیا"},
+    "JE": {"en": "Jersey", "fa": "جرزی"},
+    "JM": {"en": "Jamaica", "fa": "جامائیکا"},
+    "JO": {"en": "Jordan", "fa": "اردن"},
+    "JP": {"en": "Japan", "fa": "ژاپن"},
+    "KE": {"en": "Kenya", "fa": "کنیا"},
+    "KG": {"en": "Kyrgyzstan", "fa": "قرقیزستان"},
+    "KH": {"en": "Cambodia", "fa": "کامبوج"},
+    "KI": {"en": "Kiribati", "fa": "کیریباتی"},
+    "KM": {"en": "Comoros", "fa": "کومور"},
+    "KN": {"en": "Saint Kitts and Nevis", "fa": "سنت کیتس و نویس"},
+    "KP": {"en": "Korea, Democratic People's Republic of", "fa": "کره شمالی"},
+    "KR": {"en": "Korea, Republic of", "fa": "کره جنوبی"},
+    "KW": {"en": "Kuwait", "fa": "کویت"},
+    "KY": {"en": "Cayman Islands", "fa": "جزایر کیمن"},
+    "KZ": {"en": "Kazakhstan", "fa": "قزاقستان"},
+    "LA": {"en": "Lao People's Democratic Republic", "fa": "لائوس"},
+    "LB": {"en": "Lebanon", "fa": "لبنان"},
+    "LC": {"en": "Saint Lucia", "fa": "سنت لوسیا"},
+    "LI": {"en": "Liechtenstein", "fa": "لیختن‌اشتاین"},
+    "LK": {"en": "Sri Lanka", "fa": "سری‌لانکا"},
+    "LR": {"en": "Liberia", "fa": "لیبریا"},
+    "LS": {"en": "Lesotho", "fa": "لسوتو"},
+    "LT": {"en": "Lithuania", "fa": "لیتوانی"},
+    "LU": {"en": "Luxembourg", "fa": "لوکزامبورگ"},
+    "LV": {"en": "Latvia", "fa": "لتونی"},
+    "LY": {"en": "Libya", "fa": "لیبی"},
+    "MA": {"en": "Morocco", "fa": "مراکش"},
+    "MC": {"en": "Monaco", "fa": "موناکو"},
+    "MD": {"en": "Moldova, Republic of", "fa": "مولداوی"},
+    "ME": {"en": "Montenegro", "fa": "مونته‌نگرو"},
+    "MF": {"en": "Saint Martin (French part)", "fa": "سنت مارتین"},
+    "MG": {"en": "Madagascar", "fa": "ماداگاسکار"},
+    "MH": {"en": "Marshall Islands", "fa": "جزایر مارشال"},
+    "MK": {"en": "Macedonia, the former Yugoslav Republic of", "fa": "مقدونیه"},
+    "ML": {"en": "Mali", "fa": "مالی"},
+    "MM": {"en": "Myanmar", "fa": "میانمار"},
+    "MN": {"en": "Mongolia", "fa": "مغولستان"},
+    "MO": {"en": "Macao", "fa": "ماکائو"},
+    "MP": {"en": "Northern Mariana Islands", "fa": "جزایر ماریانای شمالی"},
+    "MQ": {"en": "Martinique", "fa": "مارتینیک"},
+    "MR": {"en": "Mauritania", "fa": "موریتانی"},
+    "MS": {"en": "Montserrat", "fa": "مونتسرات"},
+    "MT": {"en": "Malta", "fa": "مالت"},
+    "MU": {"en": "Mauritius", "fa": "موریس"},
+    "MV": {"en": "Maldives", "fa": "مالدیو"},
+    "MW": {"en": "Malawi", "fa": "مالاوی"},
+    "MX": {"en": "Mexico", "fa": "مکزیک"},
+    "MY": {"en": "Malaysia", "fa": "مالزی"},
+    "MZ": {"en": "Mozambique", "fa": "موزامبیک"},
+    "NA": {"en": "Namibia", "fa": "نامیبیا"},
+    "NC": {"en": "New Caledonia", "fa": "کالدونیای جدید"},
+    "NE": {"en": "Niger", "fa": "نیجر"},
+    "NF": {"en": "Norfolk Island", "fa": "جزیره نورفولک"},
+    "NG": {"en": "Nigeria", "fa": "نیجریه"},
+    "NI": {"en": "Nicaragua", "fa": "نیکاراگوئه"},
+    "NL": {"en": "Netherlands", "fa": "هلند"},
+    "NO": {"en": "Norway", "fa": "نروژ"},
+    "NP": {"en": "Nepal", "fa": "نپال"},
+    "NR": {"en": "Nauru", "fa": "نائورو"},
+    "NU": {"en": "Niue", "fa": "نیوئه"},
+    "NZ": {"en": "New Zealand", "fa": "نیوزیلند"},
+    "OM": {"en": "Oman", "fa": "عمان"},
+    "PA": {"en": "Panama", "fa": "پاناما"},
+    "PE": {"en": "Peru", "fa": "پرو"},
+    "PF": {"en": "French Polynesia", "fa": "پلی‌نزی فرانسه"},
+    "PG": {"en": "Papua New Guinea", "fa": "پاپوا گینه نو"},
+    "PH": {"en": "Philippines", "fa": "فیلیپین"},
+    "PK": {"en": "Pakistan", "fa": "پاکستان"},
+    "PL": {"en": "Poland", "fa": "لهستان"},
+    "PM": {"en": "Saint Pierre and Miquelon", "fa": "سن پیر و میکلون"},
+    "PN": {"en": "Pitcairn", "fa": "پیتکرن"},
+    "PR": {"en": "Puerto Rico", "fa": "پورتوریکو"},
+    "PS": {"en": "Palestine, State of", "fa": "فلسطین"},
+    "PT": {"en": "Portugal", "fa": "پرتغال"},
+    "PW": {"en": "Palau", "fa": "پالائو"},
+    "PY": {"en": "Paraguay", "fa": "پاراگوئه"},
+    "QA": {"en": "Qatar", "fa": "قطر"},
+    "RE": {"en": "Réunion", "fa": "رئونیون"},
+    "RO": {"en": "Romania", "fa": "رومانی"},
+    "RS": {"en": "Serbia", "fa": "صربستان"},
+    "RU": {"en": "Russian Federation", "fa": "روسیه"},
+    "RW": {"en": "Rwanda", "fa": "رواندا"},
+    "SA": {"en": "Saudi Arabia", "fa": "عربستان سعودی"},
+    "SB": {"en": "Solomon Islands", "fa": "جزایر سلیمان"},
+    "SC": {"en": "Seychelles", "fa": "سیشل"},
+    "SD": {"en": "Sudan", "fa": "سودان"},
+    "SE": {"en": "Sweden", "fa": "سوئد"},
+    "SG": {"en": "Singapore", "fa": "سنگاپور"},
+    "SH": {"en": "Saint Helena, Ascension and Tristan da Cunha", "fa": "سنت هلن"},
+    "SI": {"en": "Slovenia", "fa": "اسلوونی"},
+    "SJ": {"en": "Svalbard and Jan Mayen", "fa": "سوالبارد و یان ماین"},
+    "SK": {"en": "Slovakia", "fa": "اسلواکی"},
+    "SL": {"en": "Sierra Leone", "fa": "سیرالئون"},
+    "SM": {"en": "San Marino", "fa": "سان مارینو"},
+    "SN": {"en": "Senegal", "fa": "سنگال"},
+    "SO": {"en": "Somalia", "fa": "سومالی"},
+    "SR": {"en": "Suriname", "fa": "سورینام"},
+    "SS": {"en": "South Sudan", "fa": "سودان جنوبی"},
+    "ST": {"en": "Sao Tome and Principe", "fa": "سائوتومه و پرنسیپ"},
+    "SV": {"en": "El Salvador", "fa": "السالوادور"},
+    "SX": {"en": "Sint Maarten (Dutch part)", "fa": "سنت مارتن"},
+    "SY": {"en": "Syrian Arab Republic", "fa": "سوریه"},
+    "SZ": {"en": "Swaziland", "fa": "اسواتینی"},
+    "TC": {"en": "Turks and Caicos Islands", "fa": "جزایر تورکس و کایکوس"},
+    "TD": {"en": "Chad", "fa": "چاد"},
+    "TF": {"en": "French Southern Territories", "fa": "سرزمین‌های جنوبی فرانسه"},
+    "TG": {"en": "Togo", "fa": "توگو"},
+    "TH": {"en": "Thailand", "fa": "تایلند"},
+    "TJ": {"en": "Tajikistan", "fa": "تاجیکستان"},
+    "TK": {"en": "Tokelau", "fa": "توکلائو"},
+    "TL": {"en": "Timor-Leste", "fa": "تیمور شرقی"},
+    "TM": {"en": "Turkmenistan", "fa": "ترکمنستان"},
+    "TN": {"en": "Tunisia", "fa": "تونس"},
+    "TO": {"en": "Tonga", "fa": "تونگا"},
+    "TR": {"en": "Turkey", "fa": "ترکیه"},
+    "TT": {"en": "Trinidad and Tobago", "fa": "ترینیداد و توباگو"},
+    "TV": {"en": "Tuvalu", "fa": "تووالو"},
+    "TW": {"en": "Taiwan, Province of China", "fa": "تایوان"},
+    "TZ": {"en": "Tanzania, United Republic of", "fa": "تانزانیا"},
+    "UA": {"en": "Ukraine", "fa": "اوکراین"},
+    "UG": {"en": "Uganda", "fa": "اوگاندا"},
+    "UM": {"en": "United States Minor Outlying Islands", "fa": "جزایر کوچک حاشیه‌ای ایالات متحده"},
+    "US": {"en": "United States", "fa": "ایالات متحده"},
+    "UY": {"en": "Uruguay", "fa": "اروگوئه"},
+    "UZ": {"en": "Uzbekistan", "fa": "ازبکستان"},
+    "VA": {"en": "Holy See (Vatican City State)", "fa": "واتیکان"},
+    "VC": {"en": "Saint Vincent and the Grenadines", "fa": "سنت وینسنت و گرنادین‌ها"},
+    "VE": {"en": "Venezuela, Bolivarian Republic of", "fa": "ونزوئلا"},
+    "VG": {"en": "Virgin Islands, British", "fa": "جزایر ویرجین بریتانیا"},
+    "VI": {"en": "Virgin Islands, U.S.", "fa": "جزایر ویرجین ایالات متحده"},
+    "VN": {"en": "Viet Nam", "fa": "ویتنام"},
+    "VU": {"en": "Vanuatu", "fa": "وانواتو"},
+    "WF": {"en": "Wallis and Futuna", "fa": "والیس و فوتونا"},
+    "WS": {"en": "Samoa", "fa": "ساموآ"},
+    "YE": {"en": "Yemen", "fa": "یمن"},
+    "YT": {"en": "Mayotte", "fa": "مایوت"},
+    "ZA": {"en": "South Africa", "fa": "آفریقای جنوبی"},
+    "ZM": {"en": "Zambia", "fa": "زامبیا"},
+    "ZW": {"en": "Zimbabwe", "fa": "زیمبابوه"}
+}
+
+def get_country_name(code):
+    if code in COUNTRIES:
+        return COUNTRIES[code]["en"], COUNTRIES[code]["fa"]
+    return None, None
+
+# ======================================================================
 # اتصال به دیتابیس
 # ======================================================================
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -92,7 +352,7 @@ def ensure_column(table, column, col_type, default=None):
         pass
 
 # ======================================================================
-# ایجاد جداول (بدون تغییر)
+# ایجاد جداول
 # ======================================================================
 c.execute("""CREATE TABLE IF NOT EXISTS seen (
     uuid TEXT,
@@ -188,7 +448,9 @@ c.execute("""CREATE TABLE IF NOT EXISTS profiles (
     naming_template TEXT DEFAULT '{Flag} | ⚡️Telegram = {CHANNEL_ID}',
     channel_link TEXT DEFAULT '',
     ping_enabled INTEGER DEFAULT 1,
-    profile_enabled INTEGER DEFAULT 1
+    profile_enabled INTEGER DEFAULT 1,
+    show_country_name INTEGER DEFAULT 0,
+    show_ping INTEGER DEFAULT 1
 )""")
 conn.commit()
 
@@ -209,6 +471,8 @@ ensure_column("profiles", "naming_template", "TEXT DEFAULT '{Flag} | ⚡️Teleg
 ensure_column("profiles", "channel_link", "TEXT DEFAULT ''", "")
 ensure_column("profiles", "ping_enabled", "INTEGER DEFAULT 1", 1)
 ensure_column("profiles", "profile_enabled", "INTEGER DEFAULT 1", 1)
+ensure_column("profiles", "show_country_name", "INTEGER DEFAULT 0", 0)
+ensure_column("profiles", "show_ping", "INTEGER DEFAULT 1", 1)
 
 c.execute("""CREATE TABLE IF NOT EXISTS blacklist (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -265,7 +529,9 @@ def fix_column_types():
                     naming_template TEXT DEFAULT '{Flag} | ⚡️Telegram = {CHANNEL_ID}',
                     channel_link TEXT DEFAULT '',
                     ping_enabled INTEGER DEFAULT 1,
-                    profile_enabled INTEGER DEFAULT 1
+                    profile_enabled INTEGER DEFAULT 1,
+                    show_country_name INTEGER DEFAULT 0,
+                    show_ping INTEGER DEFAULT 1
                 )
             """)
             c.execute("""
@@ -275,20 +541,24 @@ def fix_column_types():
                      created_at, show_numbers, custom_query, show_date_config, show_date_proxy,
                      schedule_cron, last_backup_count, timer_expiry, timer_duration, backup_interval,
                      interval_config, interval_proxy, max_post_config, max_post_proxy,
-                     naming_template, channel_link, ping_enabled, profile_enabled)
+                     naming_template, channel_link, ping_enabled, profile_enabled,
+                     show_country_name, show_ping)
                 SELECT id, dest_name, sources, banner_config, banner_proxy, interval_min,
                        max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num,
                        created_at, show_numbers, custom_query, show_date_config, show_date_proxy,
                        schedule_cron, last_backup_count, timer_expiry, timer_duration, backup_interval,
                        interval_config, interval_proxy, max_post_config, max_post_proxy,
-                       naming_template, channel_link, ping_enabled, profile_enabled
-                FROM profiles
+                       naming_template, channel_link, ping_enabled, profile_enabled,
+                       0, 1 FROM profiles
             """)
             c.execute("DROP TABLE profiles")
             c.execute("ALTER TABLE profiles_new RENAME TO profiles")
             conn.commit()
-            log.info("✅ custom_query column fixed to TEXT.")
+            log.info("✅ custom_query column fixed and new columns added.")
             return
+    # اگر ستون‌های جدید وجود ندارند، اضافه کن
+    ensure_column("profiles", "show_country_name", "INTEGER DEFAULT 0", 0)
+    ensure_column("profiles", "show_ping", "INTEGER DEFAULT 1", 1)
     log.info("✅ custom_query column is TEXT (no fix needed).")
 
 fix_column_types()
@@ -431,14 +701,16 @@ def migrate_old_config():
              show_numbers, custom_query, show_date_config, show_date_proxy, schedule_cron, last_backup_count,
              timer_expiry, timer_duration, backup_interval,
              interval_config, interval_proxy, max_post_config, max_post_proxy,
-             naming_template, channel_link, ping_enabled, profile_enabled)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             naming_template, channel_link, ping_enabled, profile_enabled,
+             show_country_name, show_ping)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (dest, old_sources, old_banner_config, old_banner_proxy,
              old_interval, old_max_post, old_max_proxies,
              old_post_configs, old_post_proxies, old_ping_mode, old_last_num,
              datetime.now().isoformat(), 1, "", 1, 1, "", 0, None, 0, 1000,
              old_interval, old_interval, old_max_post, old_max_proxies,
-             "{Flag} | ⚡️Telegram = {CHANNEL_ID}", "", 1, 1))
+             "{Flag} | ⚡️Telegram = {CHANNEL_ID}", "", 1, 1,
+             0, 1))
     conn.commit()
     log.info(f"✅ Migrated {len(dest_list)} profiles.")
 
@@ -468,7 +740,7 @@ def normalize_channel_input(text: str) -> str:
     return clean_source_name(text)
 
 # ======================================================================
-# توابع پروفایل (بدون تغییر)
+# توابع پروفایل
 # ======================================================================
 def get_profiles():
     c.execute("SELECT * FROM profiles ORDER BY id")
@@ -495,7 +767,8 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
                    show_date_config=1, show_date_proxy=1, schedule_cron="", backup_interval=1000,
                    interval_config=5, interval_proxy=5, max_post_config=8, max_post_proxy=10,
                    naming_template="{Flag} | ⚡️Telegram = {CHANNEL_ID}", channel_link="",
-                   ping_enabled=1, profile_enabled=1):
+                   ping_enabled=1, profile_enabled=1,
+                   show_country_name=0, show_ping=1):
     if not banner_config:
         banner_config = "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
     if not banner_proxy:
@@ -506,15 +779,17 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
          show_numbers, custom_query, show_date_config, show_date_proxy, schedule_cron, last_backup_count,
          timer_expiry, timer_duration, backup_interval,
          interval_config, interval_proxy, max_post_config, max_post_proxy,
-         naming_template, channel_link, ping_enabled, profile_enabled)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         naming_template, channel_link, ping_enabled, profile_enabled,
+         show_country_name, show_ping)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (dest_name, sources, banner_config, banner_proxy,
          interval_min, max_post, max_proxies,
          post_configs, post_proxies, ping_mode, last_num,
          get_tehran_time(), show_numbers, custom_query,
          show_date_config, show_date_proxy, schedule_cron, 0, None, 0, backup_interval,
          interval_config, interval_proxy, max_post_config, max_post_proxy,
-         naming_template, channel_link, ping_enabled, profile_enabled))
+         naming_template, channel_link, ping_enabled, profile_enabled,
+         show_country_name, show_ping))
     conn.commit()
     return c.lastrowid
 
@@ -525,7 +800,8 @@ def update_profile(profile_id, **kwargs):
                "show_numbers", "custom_query", "show_date_config", "show_date_proxy",
                "schedule_cron", "last_backup_count", "timer_expiry", "timer_duration",
                "backup_interval", "interval_config", "interval_proxy", "max_post_config", "max_post_proxy",
-               "naming_template", "channel_link", "ping_enabled", "profile_enabled"]
+               "naming_template", "channel_link", "ping_enabled", "profile_enabled",
+               "show_country_name", "show_ping"]
     for key, value in kwargs.items():
         if key in allowed:
             c.execute(f"UPDATE profiles SET {key}=? WHERE id=?", (value, profile_id))
@@ -706,6 +982,20 @@ def get_profile_channel_link(profile_id):
 def set_profile_channel_link(profile_id, channel_link):
     update_profile(profile_id, channel_link=channel_link)
 
+def get_profile_show_country_name(profile_id):
+    prof = get_profile(profile_id)
+    return prof.get("show_country_name", 0) if prof else 0
+
+def set_profile_show_country_name(profile_id, enabled):
+    update_profile(profile_id, show_country_name=1 if enabled else 0)
+
+def get_profile_show_ping(profile_id):
+    prof = get_profile(profile_id)
+    return prof.get("show_ping", 1) if prof else 1
+
+def set_profile_show_ping(profile_id, enabled):
+    update_profile(profile_id, show_ping=1 if enabled else 0)
+
 def set_profile_timer(profile_id, minutes):
     if minutes <= 0:
         clear_profile_timer(profile_id)
@@ -739,7 +1029,7 @@ def get_profile_timer(profile_id):
         return None, 0
 
 # ======================================================================
-# توابع لیست سیاه و اسپانسر (بدون تغییر)
+# توابع لیست سیاه و اسپانسر
 # ======================================================================
 def get_blacklist(profile_id):
     rows = c.execute("SELECT word FROM blacklist WHERE profile_id=? ORDER BY id", (profile_id,)).fetchall()
@@ -821,7 +1111,7 @@ def update_sponsor_color(profile_id, color):
     conn.commit()
 
 # ======================================================================
-# توابع کمکی (پینگ، استخراج لینک و ...) - اصلاح شده برای تشخیص درست
+# توابع کمکی (پینگ، استخراج لینک و ...) - اصلاح شده
 # ======================================================================
 def country_to_flag(code):
     if not code or len(code) != 2 or not code.isalpha():
@@ -883,12 +1173,8 @@ def clean_config_url(url: str) -> str:
     return url
 
 def extract_links_from_text(text):
-    """
-    استخراج لینک‌های کانفیگ (vless, vmess, trojan, hy2, tuic, ss, socks, hysteria2, wireguard)
-    لینک‌های http/https معمولی (مانند cdn) و لینک‌های تصویر و svg نادیده گرفته می‌شوند.
-    """
+    """فقط لینک‌های کانفیگ با پروتکل‌های مشخص را استخراج می‌کند."""
     results = []
-    # فقط پروتکل‌های کانفیگ را بگیر، http/https را حذف کن
     pattern = re.compile(
         r'(vless|vmess|trojan|hy2|tuic|ss|socks|hysteria2|wireguard)://[^\s<>"\'{}()\[\]]+',
         re.IGNORECASE
@@ -899,23 +1185,8 @@ def extract_links_from_text(text):
         if len(link) > 10:
             results.append(link)
 
-    # اگر لینک مستقیم پیدا نشد، لینک‌های t.me که پیام هستند را نادیده می‌گیریم (چون پروکسی نیستند)
-    # دیگر telegram_msg_pattern را اضافه نمی‌کنیم چون باعث اسکرپ اضافی می‌شود
-
-    # اگر باز هم چیزی نبود، base64 decoding را امتحان کن (فقط برای کانفیگ)
+    # اگر لینک مستقیم پیدا نشد، base64 decoding را امتحان کن (فقط برای کانفیگ)
     if not results:
-        text_clean = text.replace('\n', '').replace('\r', '').strip()
-        if re.match(r'^[A-Za-z0-9+/=]+$', text_clean):
-            try:
-                decoded = base64.b64decode(text_clean, validate=True).decode('utf-8', errors='ignore')
-                for proto in ["vless://", "vmess://", "trojan://", "hy2://", "tuic://", "ss://", "socks://", "hysteria2://"]:
-                    for m in re.finditer(re.escape(proto) + r"[^\s<>\"']+", decoded):
-                        link = m.group().rstrip().strip(".,;(){}[]!؟'")
-                        if len(link) > len(proto) + 10:
-                            results.append(link)
-            except Exception:
-                pass
-
         for line in text.splitlines():
             line = line.strip()
             if not line or len(line) > 2000:
@@ -932,6 +1203,7 @@ def extract_links_from_text(text):
                 except:
                     pass
 
+    # اگر باز هم چیزی نبود، خط به خط چک کن
     if not results:
         for line in text.splitlines():
             line = line.strip()
@@ -951,6 +1223,7 @@ def normalize_proxy_url(url):
     return None
 
 def extract_proxy_links_from_text(text):
+    """استخراج لینک‌های پروکسی تلگرام (https://t.me/proxy و tg://proxy)"""
     results = []
     # الگوی https://t.me/proxy
     telegram_proxy_pattern = r'https?://t\.me/proxy\?[^\s<>"\']+'
@@ -1135,7 +1408,7 @@ def add_custom_query_to_url(url, custom_query, protocol):
     return new_base
 
 # ======================================================================
-# پینگ (بهینه‌شده)
+# پینگ
 # ======================================================================
 async def host_to_ip(host):
     try:
@@ -1240,7 +1513,7 @@ async def check_full_link_ping(url, ping_mode="iran"):
     return ping, ok, cnt
 
 # ======================================================================
-# اسکرپ (بهینه‌شده: فقط ۲ صفحه، بدون اسکرپ لینک‌های پیام)
+# اسکرپ (بهینه‌شده: فقط ۲ صفحه)
 # ======================================================================
 _USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -1250,10 +1523,6 @@ _USER_AGENTS = [
 ]
 
 async def scrape_channel_paginated(profile_id, channel, max_pages=2):
-    """
-    فقط حداکثر max_pages صفحه اسکرپ می‌کند.
-    لینک‌های کانفیگ و پروکسی را جداگانه استخراج می‌کند.
-    """
     clean_channel = normalize_channel_input(channel)
     if not clean_channel:
         log.warning(f"Invalid channel name: {channel}")
@@ -1277,7 +1546,6 @@ async def scrape_channel_paginated(profile_id, channel, max_pages=2):
         all_configs.extend(config_links)
         all_proxies.extend(proxy_links)
 
-        # برای صفحه بعدی، از oldest message id استفاده می‌کنیم
         numeric_ids = []
         for mid in msg_ids:
             parts = mid.split('/')
@@ -1317,12 +1585,9 @@ async def _scrape_single_page(url, channel):
             return [], [], []
         html_text = r.text
 
-        # استخراج لینک‌های کانفیگ (فقط پروتکل‌های مشخص)
         config_links = extract_links_from_text(html_text)
-        # استخراج لینک‌های پروکسی تلگرام
         proxy_links = extract_proxy_links_from_text(html_text)
 
-        # لینک‌های تکراری را حذف می‌کنیم
         config_links = list(set(config_links))
         proxy_links = list(set(proxy_links))
 
@@ -1335,7 +1600,7 @@ async def _scrape_single_page(url, channel):
         return config_links, proxy_links, msg_ids
 
 # ======================================================================
-# ارسال (بدون تغییر)
+# ارسال
 # ======================================================================
 async def send_with_retry(bot, chat_id, text, parse_mode="HTML", reply_markup=None, disable_web_page_preview=True, max_retries=3):
     retry_count = 0
@@ -1437,7 +1702,7 @@ def split_text(text, max_len=4096):
     return chunks
 
 # ======================================================================
-# ارسال کانفیگ‌ها و پروکسی‌ها (بدون تغییر)
+# ارسال کانفیگ‌ها و پروکسی‌ها - اصلاح شده با نام کشور و پینگ
 # ======================================================================
 async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=False, max_post_override=None):
     if not working:
@@ -1469,6 +1734,9 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
     if not channel_link:
         channel_link = dest if dest else ""
 
+    show_country_name = get_profile_show_country_name(profile_id)
+    show_ping = get_profile_show_ping(profile_id)
+
     sponsor = get_sponsor(profile_id)
     sponsor_button = None
     if sponsor and sponsor["enabled"]:
@@ -1480,32 +1748,50 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
         n = last_n + i
         host, _ = extract_host(url)
         flag = "🌐"
+        country_en = ""
+        country_fa = ""
         if host:
             ip = await host_to_ip(host)
             if ip:
                 flag = await get_flag_for_ip(ip)
+                # استخراج کد کشور از flag
+                if len(flag) == 2:
+                    # flag دو کاراکتری است
+                    pass
+                else:
+                    # پرچم ممکن است دو کاراکتر باشد
+                    pass
 
-        fragment_text = naming_template.replace("{Flag}", flag).replace("{CHANNEL_ID}", channel_link).replace("{COUNT}", str(n))
-        encoded_fragment = quote(fragment_text, safe='')
-        base_url = strip_url_fragment(url)
-        modified_url = base_url + "#" + encoded_fragment
+        # اگر flag دو کاراکتر نیست، سعی کن از cache استخراج کنی
+        # برای سادگی، از ip-api دوباره نمی‌گیریم، از flag استفاده می‌کنیم
 
-        protocol = url.split('://')[0].lower() if '://' in url else ''
-        if custom_query and protocol != 'vmess':
-            modified_url = add_custom_query_to_url(modified_url, custom_query, protocol)
+        # ساخت بخش نام کشور
+        country_str = ""
+        if show_country_name:
+            # استخراج کد کشور از پرچم
+            if len(flag) >= 4:
+                # ممکنه پرچم دو کاراکتر باشد
+                pass
+            # از cache استفاده می‌کنیم
+            cached = c.execute("SELECT country FROM country_cache WHERE flag=?", (flag,)).fetchone()
+            if cached:
+                country_code = cached[0]
+                en, fa = get_country_name(country_code)
+                if en and fa:
+                    country_str = f" {country_code} {en} • {fa}"
 
+        # نمایش پینگ
+        ping_str = ""
+        if show_ping and ping > 0:
+            ping_str = f" {ping}ms"
+
+        # ساخت header با قالب
         if show_numbers:
-            if ping > 0:
-                header = f"<b>#{n}</b> {dest if dest else '@VaslZone'} {flag} {ping}ms"
-            else:
-                header = f"<b>#{n}</b> {dest if dest else '@VaslZone'} {flag}"
+            header = f"<b>#{n}</b> {dest}{flag}{country_str}{ping_str}"
         else:
-            if ping > 0:
-                header = f"{dest if dest else '@VaslZone'} {flag} {ping}ms"
-            else:
-                header = f"{dest if dest else '@VaslZone'} {flag}"
+            header = f"{dest}{flag}{country_str}{ping_str}"
 
-        block = f"<pre>{modified_url}</pre>"
+        block = f"<pre>{url}</pre>"
         config_blocks.append(header + "\n" + block)
 
     configs_text = "\n\n".join(config_blocks)
@@ -1550,22 +1836,8 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
     sent_count = len(items)
     for i, (url, ping, node_count) in enumerate(items, 1):
         n = last_n + i
-        flag = "🌐"
-        host, _ = extract_host(url)
-        if host:
-            ip = await host_to_ip(host)
-            if ip:
-                flag = await get_flag_for_ip(ip)
-        fragment_text = naming_template.replace("{Flag}", flag).replace("{CHANNEL_ID}", channel_link).replace("{COUNT}", str(n))
-        encoded_fragment = quote(fragment_text, safe='')
-        base_url = strip_url_fragment(url)
-        modified_url = base_url + "#" + encoded_fragment
-        if custom_query:
-            protocol = url.split('://')[0].lower() if '://' in url else ''
-            if custom_query and protocol != 'vmess':
-                modified_url = add_custom_query_to_url(modified_url, custom_query, protocol)
-        if not is_already_posted(profile_id, modified_url):
-            mark_as_posted(profile_id, modified_url, source_for_seen, full_url=modified_url)
+        if not is_already_posted(profile_id, url):
+            mark_as_posted(profile_id, url, source_for_seen, full_url=url)
 
     if sent_count > 0:
         set_profile_last_num(profile_id, last_n + sent_count)
@@ -1582,6 +1854,9 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
         max_proxies = min(max_proxies, 3)
 
     show_date = get_profile_show_date_proxy(profile_id)
+    show_ping = get_profile_show_ping(profile_id)
+    show_country_name = get_profile_show_country_name(profile_id)
+
     proxy_text = ""
     count = 0
     for proxy_url, ping, flag in proxies_with_ping[:max_proxies]:
@@ -1591,7 +1866,23 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
             normalized_url = normalize_telegram_proxy(proxy_url)
             clean_url = clean_proxy_link(normalized_url)
             safe_url = html.escape(clean_url, quote=False)
-            proxy_text += f"• {flag} <a href=\"{safe_url}\">Telegram Proxy</a>\n"
+
+            # نام کشور
+            country_str = ""
+            if show_country_name:
+                cached = c.execute("SELECT country FROM country_cache WHERE flag=?", (flag,)).fetchone()
+                if cached:
+                    country_code = cached[0]
+                    en, fa = get_country_name(country_code)
+                    if en and fa:
+                        country_str = f" {country_code} {en} • {fa}"
+
+            # پینگ
+            ping_str = ""
+            if show_ping and ping > 0:
+                ping_str = f" {ping}ms"
+
+            proxy_text += f"• {flag}{country_str}{ping_str} <a href=\"{safe_url}\">Telegram Proxy</a>\n"
             mark_proxy_posted(profile_id, clean_url)
             count += 1
 
@@ -1630,7 +1921,7 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
     return count, (text, reply_markup)
 
 # ======================================================================
-# چرخه اصلی (بدون تغییر)
+# چرخه اصلی
 # ======================================================================
 async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_proxies=True, is_instant=False):
     log.info("=" * 50)
@@ -1678,7 +1969,6 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     all_proxies = []
     seen_urls = set()
 
-    # اسکرپ همه منابع به صورت همزمان با حداکثر ۲ صفحه
     async def scrape_one(src):
         config_links, proxy_links = await scrape_channel_paginated(profile_id, src, max_pages=2)
         return src, config_links, proxy_links
@@ -1703,7 +1993,6 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                 if norm:
                     all_proxies.append(norm)
 
-    # فیلتر کردن تکراری‌ها بر اساس دیتابیس
     new_configs = []
     for u, s in all_configs:
         if not is_already_posted(profile_id, u):
@@ -1718,7 +2007,6 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
 
     working = []
     if enable_configs and new_configs:
-        # تست حداکثر ۳۰ عدد برای سرعت
         test_limit = min(len(new_configs), 30)
         to_test = new_configs[:test_limit]
         log.info(f"📊 Testing {len(to_test)} configs...")
@@ -2251,7 +2539,7 @@ async def periodic_cleanup():
         await asyncio.sleep(300)
 
 # ======================================================================
-# مدیریت ادمین و زبان (بدون تغییر)
+# مدیریت ادمین و زبان
 # ======================================================================
 def is_admin(user_id: int) -> bool:
     if user_id == MAIN_ADMIN_ID:
@@ -2291,7 +2579,7 @@ def set_lang(lang: str):
     conn.commit()
 
 # ======================================================================
-# کیبوردها و پیام‌ها (بدون تغییر - از کد قبلی)
+# کیبوردها و پیام‌ها
 # ======================================================================
 BOT_REF = None
 
@@ -2319,7 +2607,9 @@ T = {
                        "🏷️ قالب نام: {naming}\n"
                        "🔗 لینک کانال: {channel_link}\n"
                        "🌍 پینگ: {ping_status}\n"
-                       "🔘 وضعیت: {profile_status}",
+                       "🔘 وضعیت: {profile_status}\n"
+                       "🏳️ نمایش نام کشور: {country_status}\n"
+                       "📊 نمایش پینگ: {ping_show_status}",
         "general_settings": "⚙️ **تنظیمات عمومی**\n\n"
                             "زبان فعلی: {lang}\n"
                             "تعداد ادمین‌ها: {admins_count}",
@@ -2485,6 +2775,10 @@ T = {
         "toggle_ping": "✅ پینگ {'فعال' if status else 'غیرفعال'} شد.",
         "btn_toggle_profile": "🔘 پروفایل: {status}",
         "toggle_profile": "✅ پروفایل {'فعال' if status else 'غیرفعال'} شد.",
+        "btn_toggle_country_name": "🏳️ نام کشور: {status}",
+        "toggle_country_name": "✅ نمایش نام کشور {'فعال' if status else 'غیرفعال'} شد.",
+        "btn_toggle_show_ping": "📊 نمایش پینگ: {status}",
+        "toggle_show_ping": "✅ نمایش پینگ {'فعال' if status else 'غیرفعال'} شد.",
     },
     "en": {
         "welcome": "🤖 **Config & Proxy Bot**\n\n"
@@ -2509,7 +2803,9 @@ T = {
                        "🏷️ Naming: {naming}\n"
                        "🔗 Channel link: {channel_link}\n"
                        "🌍 Ping: {ping_status}\n"
-                       "🔘 Status: {profile_status}",
+                       "🔘 Status: {profile_status}\n"
+                       "🏳️ Show country name: {country_status}\n"
+                       "📊 Show ping: {ping_show_status}",
         "general_settings": "⚙️ **General Settings**\n\n"
                             "Language: {lang}\n"
                             "Admins count: {admins_count}",
@@ -2675,6 +2971,10 @@ T = {
         "toggle_ping": "✅ Ping {'enabled' if status else 'disabled'}.",
         "btn_toggle_profile": "🔘 Profile: {status}",
         "toggle_profile": "✅ Profile {'enabled' if status else 'disabled'}.",
+        "btn_toggle_country_name": "🏳️ Country name: {status}",
+        "toggle_country_name": "✅ Country name display {'enabled' if status else 'disabled'}.",
+        "btn_toggle_show_ping": "📊 Show ping: {status}",
+        "toggle_show_ping": "✅ Ping display {'enabled' if status else 'disabled'}.",
     }
 }
 
@@ -2689,7 +2989,7 @@ def msg(key, **kwargs):
     return text
 
 # ======================================================================
-# کیبوردها (بدون تغییر)
+# کیبوردها
 # ======================================================================
 def main_menu_kb():
     return InlineKeyboardMarkup([
@@ -2729,6 +3029,11 @@ def profile_admin_kb(profile_id):
     num_status = "✅" if show_num else "❌"
     date_cfg_status = "✅" if show_date_cfg else "❌"
     date_prx_status = "✅" if show_date_prx else "❌"
+
+    show_country_name = get_profile_show_country_name(profile_id)
+    country_status = "✅" if show_country_name else "❌"
+    show_ping = get_profile_show_ping(profile_id)
+    show_ping_status = "✅" if show_ping else "❌"
 
     sponsor = get_sponsor(profile_id)
     if sponsor and sponsor["enabled"]:
@@ -2783,6 +3088,8 @@ def profile_admin_kb(profile_id):
          InlineKeyboardButton(msg("btn_log_menu"), callback_data=f"log_menu_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_set_naming_template"), callback_data=f"set_naming_{profile_id}", style="primary"),
          InlineKeyboardButton(msg("btn_set_channel_link"), callback_data=f"set_channel_link_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_toggle_country_name", status=country_status), callback_data=f"tgl_country_name_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_toggle_show_ping", status=show_ping_status), callback_data=f"tgl_show_ping_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_reset"), callback_data=f"rn_{profile_id}", style="primary"),
          InlineKeyboardButton(msg("btn_clear"), callback_data=f"cd1_{profile_id}", style="danger")],
         [InlineKeyboardButton("❌ Delete Profile", callback_data=f"delprof_{profile_id}", style="danger")],
@@ -2904,7 +3211,7 @@ def manage_admins_kb():
     ])
 
 # ======================================================================
-# دستورات (بدون تغییر)
+# دستورات
 # ======================================================================
 async def cmd_start(u, ctx):
     if not is_admin(u.effective_user.id):
@@ -3060,7 +3367,7 @@ async def cmd_status(update: Update, context):
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 # ======================================================================
-# کالبک (با پاسخ فوری)
+# کالبک
 # ======================================================================
 async def on_callback(u, ctx):
     q = u.callback_query
@@ -3859,6 +4166,38 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
+        if d.startswith("tgl_country_name_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                current = get_profile_show_country_name(profile_id)
+                set_profile_show_country_name(profile_id, not current)
+                await q.answer(msg("toggle_country_name", status=not current))
+                await show_profile_admin(q.message, profile_id)
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("tgl_show_ping_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                current = get_profile_show_ping(profile_id)
+                set_profile_show_ping(profile_id, not current)
+                await q.answer(msg("toggle_show_ping", status=not current))
+                await show_profile_admin(q.message, profile_id)
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
         if d.startswith("clearquery_"):
             parts = d.split("_")
             if len(parts) >= 2:
@@ -4463,6 +4802,11 @@ async def show_profile_admin(msg_or_q, profile_id):
     date_cfg_status = "✅" if show_date_cfg else "❌"
     date_prx_status = "✅" if show_date_prx else "❌"
 
+    show_country_name = get_profile_show_country_name(profile_id)
+    country_status = "✅" if show_country_name else "❌"
+    show_ping = get_profile_show_ping(profile_id)
+    show_ping_status = "✅" if show_ping else "❌"
+
     naming_template = get_profile_naming_template(profile_id)
     channel_link = get_profile_channel_link(profile_id) or "خالی"
 
@@ -4493,6 +4837,8 @@ async def show_profile_admin(msg_or_q, profile_id):
         channel_link=channel_link,
         ping_status=ping_status,
         profile_status=profile_status,
+        country_status=country_status,
+        ping_show_status=show_ping_status,
     )
     kb = profile_admin_kb(profile_id)
     try:
@@ -4507,7 +4853,7 @@ async def show_profile_admin(msg_or_q, profile_id):
             raise
 
 # ======================================================================
-# هندلرهای متنی و سند (بدون تغییر، حذف بخش فایل)
+# هندلرهای متنی و سند
 # ======================================================================
 async def on_text(u, ctx):
     if not is_admin(u.effective_user.id):
@@ -4978,7 +5324,7 @@ async def on_document(u, ctx):
         return
 
 # ======================================================================
-# ارسال دستی (بدون دانلود فایل)
+# ارسال دستی
 # ======================================================================
 async def process_manual_text(u, message, profile_id, is_document=False):
     p = await message.reply_text(msg("manual_send_processing"))

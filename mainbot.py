@@ -184,7 +184,9 @@ c.execute("""CREATE TABLE IF NOT EXISTS profiles (
     interval_config INTEGER DEFAULT 5,
     interval_proxy INTEGER DEFAULT 5,
     max_post_config INTEGER DEFAULT 8,
-    max_post_proxy INTEGER DEFAULT 10
+    max_post_proxy INTEGER DEFAULT 10,
+    naming_template TEXT DEFAULT '{Flag} | ⚡️Telegram = {CHANNEL_ID}',
+    channel_id TEXT DEFAULT ''
 )""")
 conn.commit()
 
@@ -201,6 +203,8 @@ ensure_column("profiles", "interval_config", "INTEGER DEFAULT 5", 5)
 ensure_column("profiles", "interval_proxy", "INTEGER DEFAULT 5", 5)
 ensure_column("profiles", "max_post_config", "INTEGER DEFAULT 8", 8)
 ensure_column("profiles", "max_post_proxy", "INTEGER DEFAULT 10", 10)
+ensure_column("profiles", "naming_template", "TEXT DEFAULT '{Flag} | ⚡️Telegram = {CHANNEL_ID}'", "{Flag} | ⚡️Telegram = {CHANNEL_ID}")
+ensure_column("profiles", "channel_id", "TEXT DEFAULT ''", "")
 
 c.execute("""CREATE TABLE IF NOT EXISTS blacklist (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -253,7 +257,9 @@ def fix_column_types():
                     interval_config INTEGER DEFAULT 5,
                     interval_proxy INTEGER DEFAULT 5,
                     max_post_config INTEGER DEFAULT 8,
-                    max_post_proxy INTEGER DEFAULT 10
+                    max_post_proxy INTEGER DEFAULT 10,
+                    naming_template TEXT DEFAULT '{Flag} | ⚡️Telegram = {CHANNEL_ID}',
+                    channel_id TEXT DEFAULT ''
                 )
             """)
             c.execute("""
@@ -262,12 +268,14 @@ def fix_column_types():
                      max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num,
                      created_at, show_numbers, custom_query, show_date_config, show_date_proxy,
                      schedule_cron, last_backup_count, timer_expiry, timer_duration, backup_interval,
-                     interval_config, interval_proxy, max_post_config, max_post_proxy)
+                     interval_config, interval_proxy, max_post_config, max_post_proxy,
+                     naming_template, channel_id)
                 SELECT id, dest_name, sources, banner_config, banner_proxy, interval_min,
                        max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num,
                        created_at, show_numbers, custom_query, show_date_config, show_date_proxy,
                        schedule_cron, last_backup_count, timer_expiry, timer_duration, backup_interval,
-                       interval_config, interval_proxy, max_post_config, max_post_proxy
+                       interval_config, interval_proxy, max_post_config, max_post_proxy,
+                       naming_template, channel_id
                 FROM profiles
             """)
             c.execute("DROP TABLE profiles")
@@ -422,13 +430,15 @@ def migrate_old_config():
              max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num, created_at,
              show_numbers, custom_query, show_date_config, show_date_proxy, schedule_cron, last_backup_count,
              timer_expiry, timer_duration, backup_interval,
-             interval_config, interval_proxy, max_post_config, max_post_proxy)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             interval_config, interval_proxy, max_post_config, max_post_proxy,
+             naming_template, channel_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (dest, old_sources, old_banner_config, old_banner_proxy,
              old_interval, old_max_post, old_max_proxies,
              old_post_configs, old_post_proxies, old_ping_mode, old_last_num,
              datetime.now().isoformat(), 1, "", 1, 1, "", 0, None, 0, 1000,
-             old_interval, old_interval, old_max_post, old_max_proxies))
+             old_interval, old_interval, old_max_post, old_max_proxies,
+             "{Flag} | ⚡️Telegram = {CHANNEL_ID}", ""))
     conn.commit()
     log.info(f"✅ Migrated {len(dest_list)} profiles.")
 
@@ -483,7 +493,8 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
                    post_configs=1, post_proxies=1, ping_mode="iran", last_num=0,
                    show_numbers=1, custom_query="",
                    show_date_config=1, show_date_proxy=1, schedule_cron="", backup_interval=1000,
-                   interval_config=5, interval_proxy=5, max_post_config=8, max_post_proxy=10):
+                   interval_config=5, interval_proxy=5, max_post_config=8, max_post_proxy=10,
+                   naming_template="{Flag} | ⚡️Telegram = {CHANNEL_ID}", channel_id=""):
     if not banner_config:
         banner_config = "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
     if not banner_proxy:
@@ -493,14 +504,16 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
          max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num, created_at,
          show_numbers, custom_query, show_date_config, show_date_proxy, schedule_cron, last_backup_count,
          timer_expiry, timer_duration, backup_interval,
-         interval_config, interval_proxy, max_post_config, max_post_proxy)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         interval_config, interval_proxy, max_post_config, max_post_proxy,
+         naming_template, channel_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (dest_name, sources, banner_config, banner_proxy,
          interval_min, max_post, max_proxies,
          post_configs, post_proxies, ping_mode, last_num,
          get_tehran_time(), show_numbers, custom_query,
          show_date_config, show_date_proxy, schedule_cron, 0, None, 0, backup_interval,
-         interval_config, interval_proxy, max_post_config, max_post_proxy))
+         interval_config, interval_proxy, max_post_config, max_post_proxy,
+         naming_template, channel_id))
     conn.commit()
     return c.lastrowid
 
@@ -510,7 +523,8 @@ def update_profile(profile_id, **kwargs):
                "post_proxies", "ping_mode", "last_num",
                "show_numbers", "custom_query", "show_date_config", "show_date_proxy",
                "schedule_cron", "last_backup_count", "timer_expiry", "timer_duration",
-               "backup_interval", "interval_config", "interval_proxy", "max_post_config", "max_post_proxy"]
+               "backup_interval", "interval_config", "interval_proxy", "max_post_config", "max_post_proxy",
+               "naming_template", "channel_id"]
     for key, value in kwargs.items():
         if key in allowed:
             c.execute(f"UPDATE profiles SET {key}=? WHERE id=?", (value, profile_id))
@@ -691,6 +705,21 @@ def get_profile_backup_interval(profile_id):
 
 def set_profile_backup_interval(profile_id, interval):
     update_profile(profile_id, backup_interval=interval)
+
+# ===== توابع جدید برای naming و channel_id =====
+def get_profile_naming_template(profile_id):
+    prof = get_profile(profile_id)
+    return prof.get("naming_template", "{Flag} | ⚡️Telegram = {CHANNEL_ID}") if prof else "{Flag} | ⚡️Telegram = {CHANNEL_ID}"
+
+def set_profile_naming_template(profile_id, template):
+    update_profile(profile_id, naming_template=template)
+
+def get_profile_channel_id(profile_id):
+    prof = get_profile(profile_id)
+    return prof.get("channel_id", "") if prof else ""
+
+def set_profile_channel_id(profile_id, channel_id):
+    update_profile(profile_id, channel_id=channel_id)
 
 # ===== توابع تایمر =====
 def set_profile_timer(profile_id, minutes):
@@ -874,7 +903,8 @@ def clean_config_url(url: str) -> str:
 
 def extract_links_from_text(text):
     results = []
-    pattern = re.compile(r'(vless|vmess|trojan|hy2|tuic|ss|socks)://[^\s<>"\'{}()\[\]]+', re.IGNORECASE)
+    # اضافه کردن hysteria2 و hy2
+    pattern = re.compile(r'(vless|vmess|trojan|hy2|tuic|ss|socks|hysteria2)://[^\s<>"\'{}()\[\]]+', re.IGNORECASE)
     for m in pattern.finditer(text):
         link = m.group(0).strip()
         link = re.sub(r'[.,;:!؟\'"`]+$', '', link)
@@ -884,7 +914,7 @@ def extract_links_from_text(text):
     if not results:
         for token in text.split():
             token = token.strip()
-            for proto in ['vless://', 'vmess://', 'trojan://', 'hy2://', 'tuic://', 'ss://', 'socks://']:
+            for proto in ['vless://', 'vmess://', 'trojan://', 'hy2://', 'tuic://', 'ss://', 'socks://', 'hysteria2://']:
                 if token.lower().startswith(proto):
                     clean = re.sub(r'[.,;:!؟\'"`]+$', '', token)
                     if len(clean) > len(proto) + 5:
@@ -895,7 +925,7 @@ def extract_links_from_text(text):
         if re.match(r'^[A-Za-z0-9+/=]+$', text_clean):
             try:
                 decoded = base64.b64decode(text_clean, validate=True).decode('utf-8', errors='ignore')
-                for proto in ["vless://", "vmess://", "trojan://", "hy2://", "tuic://", "ss://", "socks://"]:
+                for proto in ["vless://", "vmess://", "trojan://", "hy2://", "tuic://", "ss://", "socks://", "hysteria2://"]:
                     for m in re.finditer(re.escape(proto) + r"[^\s<>\"']+", decoded):
                         link = m.group().rstrip().strip(".,;(){}[]!؟'")
                         if len(link) > len(proto) + 10:
@@ -911,7 +941,7 @@ def extract_links_from_text(text):
                 try:
                     pad = "=" * (-len(line) % 4)
                     decoded = base64.b64decode(line + pad, validate=False).decode('utf-8', errors='ignore')
-                    for proto in ["vless://", "vmess://", "trojan://", "hy2://", "tuic://", "ss://", "socks://"]:
+                    for proto in ["vless://", "vmess://", "trojan://", "hy2://", "tuic://", "ss://", "socks://", "hysteria2://"]:
                         for m in re.finditer(re.escape(proto) + r"[^\s<>\"']+", decoded):
                             link = m.group().rstrip().strip(".,;(){}[]!؟'")
                             if len(link) > len(proto) + 10:
@@ -922,7 +952,7 @@ def extract_links_from_text(text):
     if not results:
         for line in text.splitlines():
             line = line.strip()
-            for proto in ['vless://', 'vmess://', 'trojan://', 'hy2://', 'tuic://', 'ss://', 'socks://']:
+            for proto in ['vless://', 'vmess://', 'trojan://', 'hy2://', 'tuic://', 'ss://', 'socks://', 'hysteria2://']:
                 if line.lower().startswith(proto):
                     results.append(line)
                     break
@@ -1110,14 +1140,8 @@ def add_custom_query_to_url(url, custom_query, protocol):
     return new_base
 
 def append_channel_and_flag_encoded(url, channel, flag, custom_query=""):
-    url = clean_config_url(url)
-    protocol = url.split('://')[0].lower() if '://' in url else ''
-    if custom_query and protocol != 'vmess':
-        url = add_custom_query_to_url(url, custom_query, protocol)
-    base = strip_url_fragment(url)
-    fragment = f"{channel} {flag}"
-    encoded = quote(fragment, safe='')
-    return f"{base}#{encoded}"
+    # این تابع دیگر استفاده نمی‌شود، اما برای سازگاری نگه داشته شده
+    return url
 
 # ======================================================================
 # پینگ
@@ -1244,10 +1268,6 @@ async def scrape_channel_with_retry(profile_id, channel, max_retries=2):
         return [], []
 
 async def scrape_channel_paginated(profile_id, channel):
-    """
-    اسکرپ کامل کانال با پیج‌بندی تا جایی که پیام‌های جدید پیدا شود.
-    از last_message_id برای تشخیص پیام‌های قبلاً دیده شده استفاده می‌کند.
-    """
     clean_channel = normalize_channel_input(channel)
     if not clean_channel:
         log.warning(f"Invalid channel name: {channel}")
@@ -1258,9 +1278,8 @@ async def scrape_channel_paginated(profile_id, channel):
     all_configs = []
     all_proxies = []
     current_url = base_url
-    max_pages = 10   # برای جلوگیری از حلقه بی‌نهایت
+    max_pages = 10
     page_count = 0
-    oldest_msg_id = None
 
     while page_count < max_pages:
         page_count += 1
@@ -1270,19 +1289,15 @@ async def scrape_channel_paginated(profile_id, channel):
             log.info(f"⚠️ No messages found on page {page_count} for {clean_channel}")
             break
 
-        # اگر آخرین پیام دیده شده وجود داشته باشد و در این صفحه باشد، یعنی به پیام‌های قبلی رسیدیم، متوقف می‌شویم.
         if last_seen_msg_id and last_seen_msg_id in msg_ids:
             log.info(f"✅ Reached last seen message {last_seen_msg_id} for {clean_channel}. Stopping pagination.")
-            # اما قبل از توقف، باید لینک‌های این صفحه را استخراج کنیم (چون ممکن است پیام‌های جدیدتری نسبت به last_seen_msg_id باشند)
             all_configs.extend(config_links)
             all_proxies.extend(proxy_links)
             break
 
-        # اگر پیام‌ها جدید هستند، آنها را اضافه می‌کنیم
         all_configs.extend(config_links)
         all_proxies.extend(proxy_links)
 
-        # پیدا کردن قدیمی‌ترین msg_id در این صفحه
         numeric_ids = []
         for mid in msg_ids:
             parts = mid.split('/')
@@ -1290,32 +1305,19 @@ async def scrape_channel_paginated(profile_id, channel):
                 numeric_ids.append(int(parts[1]))
         if numeric_ids:
             oldest = min(numeric_ids)
-            oldest_msg_id = f"{clean_channel.lstrip('@')}/{oldest}"
-            # اگر قدیمی‌ترین پیام این صفحه برابر با last_seen_msg_id است، توقف می‌کنیم (قبلاً بررسی کردیم)
-            if last_seen_msg_id and oldest_msg_id == last_seen_msg_id:
-                log.info(f"✅ Oldest message on page is last seen, stopping pagination.")
-                break
-            # ساخت URL صفحه بعدی با ?before=oldest
             current_url = f"{base_url}?before={oldest}"
         else:
-            # اگر نتوانستیم msg_id عددی استخراج کنیم، نمی‌توانیم ادامه دهیم
             break
-
-        # یک تاخیر کوچک برای جلوگیری از مسدود شدن
         await asyncio.sleep(0.5)
 
-    # به‌روزرسانی last_message_id با جدیدترین پیام دیده شده (اولین پیام در اولین صفحه)
     if msg_ids:
-        # جدیدترین پیام در اولین صفحه، اولین msg_id است
         newest_msg_id = msg_ids[0] if msg_ids else ""
         if newest_msg_id:
             update_last_message_id(profile_id, clean_channel, newest_msg_id)
             log.info(f"📝 Updated last_message_id for {clean_channel} to {newest_msg_id}")
 
-    # به‌روزرسانی زمان اسکرپ
     update_last_scrape_time(profile_id, clean_channel, get_tehran_time(), last_message_id=newest_msg_id if msg_ids else "")
 
-    # حذف لینک‌های تکراری
     all_configs = list(set(all_configs))
     all_proxies = list(set(all_proxies))
 
@@ -1343,29 +1345,23 @@ async def _scrape_single_page(profile_id, url, channel):
             return [], [], []
         html_text = r.text
 
-        # استخراج لینک‌ها
         config_links = extract_links_from_text(html_text)
         proxy_links = extract_proxy_links_from_text(html_text)
 
-        # استخراج شناسه‌های پیام (data-post)
         msg_ids = re.findall(r'data-post="([^"]+)"', html_text)
-        # اگر data-post وجود نداشت، از pattern دیگری استفاده می‌کنیم
         if not msg_ids:
-            # مثلاً از لینک‌های پیام
             msg_ids = re.findall(r'href="/([^/]+/\d+)"', html_text)
-        # تمیز کردن و یکتا سازی
         msg_ids = list(set(msg_ids))
 
         log.info(f"📄 Page {url}: found {len(config_links)} configs, {len(proxy_links)} proxies, {len(msg_ids)} messages")
         return config_links, proxy_links, msg_ids
 
 # ======================================================================
-# فایل‌ها (با افزایش محدودیت و اصلاح متد)
+# فایل‌ها
 # ======================================================================
 async def fetch_files_from_channel(bot, profile_id, channel, source):
     try:
         chat_id = channel if channel.startswith('@') else '@' + channel
-        # اصلاح: استفاده از bot.get_chat_history
         messages = await bot.get_chat_history(chat_id, limit=50)
         new_links = []
         for msg in messages:
@@ -1402,7 +1398,7 @@ async def fetch_files_from_channel(bot, profile_id, channel, source):
 
 def decrypt_subscription(data: bytes, passwords: list):
     protocols = ("vless://", "vmess://", "trojan://",
-                  "hy2://", "tuic://")
+                  "hy2://", "tuic://", "hysteria2://")
     try:
         text = data.decode('utf-8', errors='ignore')
         if any(p in text for p in protocols):
@@ -1433,7 +1429,8 @@ def get_v2ray_links_from_text(text):
         r'vmess://[^\s<>"\']+',
         r'trojan://[^\s<>"\']+',
         r'hy2://[^\s<>"\']+',
-        r'tuic://[^\s<>"\']+'
+        r'tuic://[^\s<>"\']+',
+        r'hysteria2://[^\s<>"\']+'
     ]
     for pattern in patterns:
         for m in re.finditer(pattern, text):
@@ -1498,7 +1495,6 @@ async def send_to_destination(bot, profile_id, text, buttons=None):
     chunks = split_text(text, 4096)
     success = True
     for idx, chunk in enumerate(chunks):
-        # اصلاح: buttons را به صورت لیست دو بعدی ارسال کنیم
         reply_markup = InlineKeyboardMarkup(buttons) if buttons and idx == 0 else None
         ok = await send_with_retry(
             bot, dest, chunk,
@@ -1548,13 +1544,13 @@ def split_text(text, max_len=4096):
     return chunks
 
 # ======================================================================
-# ارسال کانفیگ‌ها (فقط جدیدها)
+# ارسال کانفیگ‌ها (با template جدید و پشتیبانی از override)
 # ======================================================================
-async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=False):
+async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=False, max_post_override=None):
     if not working:
         return 0
 
-    max_post = get_profile_max_post_config(profile_id)
+    max_post = max_post_override if max_post_override is not None else get_profile_max_post_config(profile_id)
     if is_instant:
         max_post = min(max_post, 5)
 
@@ -1575,6 +1571,8 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
     custom_query = get_profile_custom_query(profile_id)
     dest = get_profile_dest(profile_id)
     banner_template = get_profile_banner_config(profile_id) or "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
+    naming_template = get_profile_naming_template(profile_id)
+    channel_id = get_profile_channel_id(profile_id)
 
     sponsor = get_sponsor(profile_id)
     sponsor_button = None
@@ -1592,19 +1590,27 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
             if ip:
                 flag = await get_flag_for_ip(ip)
 
-        channel_display = dest if dest else "@VaslZone"
-        modified_url = append_channel_and_flag_encoded(url, channel_display, flag, custom_query)
+        # ساخت fragment با استفاده از template
+        fragment_text = naming_template.replace("{Flag}", flag).replace("{CHANNEL_ID}", channel_id).replace("{COUNT}", str(n))
+        encoded_fragment = quote(fragment_text, safe='')
+        base_url = strip_url_fragment(url)
+        modified_url = base_url + "#" + encoded_fragment
+
+        # اگر custom_query وجود دارد و پروتکل vmess نیست، آن را اعمال کن
+        protocol = url.split('://')[0].lower() if '://' in url else ''
+        if custom_query and protocol != 'vmess':
+            modified_url = add_custom_query_to_url(modified_url, custom_query, protocol)
 
         if show_numbers:
             if ping > 0:
-                header = f"<b>#{n}</b> {channel_display} {flag} {ping}ms"
+                header = f"<b>#{n}</b> {dest if dest else '@VaslZone'} {flag} {ping}ms"
             else:
-                header = f"<b>#{n}</b> {channel_display} {flag}"
+                header = f"<b>#{n}</b> {dest if dest else '@VaslZone'} {flag}"
         else:
             if ping > 0:
-                header = f"{channel_display} {flag} {ping}ms"
+                header = f"{dest if dest else '@VaslZone'} {flag} {ping}ms"
             else:
-                header = f"{channel_display} {flag}"
+                header = f"{dest if dest else '@VaslZone'} {flag}"
 
         block = f"<pre>{modified_url}</pre>"
         config_blocks.append(header + "\n" + block)
@@ -1618,7 +1624,6 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
     buttons = []
     if sponsor_button:
         buttons.append(sponsor_button)
-    # اصلاح: buttons باید لیست دو بعدی باشد
     reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
 
     ok = await send_with_retry(
@@ -1643,7 +1648,21 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
 
     sent_count = len(items)
     for i, (url, ping, node_count) in enumerate(items, 1):
-        modified_url = append_channel_and_flag_encoded(url, dest if dest else "@VaslZone", "🌐", custom_query)
+        n = last_n + i
+        flag = "🌐"
+        host, _ = extract_host(url)
+        if host:
+            ip = await host_to_ip(host)
+            if ip:
+                flag = await get_flag_for_ip(ip)
+        fragment_text = naming_template.replace("{Flag}", flag).replace("{CHANNEL_ID}", channel_id).replace("{COUNT}", str(n))
+        encoded_fragment = quote(fragment_text, safe='')
+        base_url = strip_url_fragment(url)
+        modified_url = base_url + "#" + encoded_fragment
+        if custom_query:
+            protocol = url.split('://')[0].lower() if '://' in url else ''
+            if custom_query and protocol != 'vmess':
+                modified_url = add_custom_query_to_url(modified_url, custom_query, protocol)
         if not is_already_posted(profile_id, modified_url):
             mark_as_posted(profile_id, modified_url, source_for_seen, full_url=modified_url)
 
@@ -1654,13 +1673,13 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
     return sent_count
 
 # ======================================================================
-# ارسال پروکسی‌ها (فقط جدیدها)
+# ارسال پروکسی‌ها (با override)
 # ======================================================================
-async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False):
+async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max_proxies_override=None):
     if not proxies_with_ping:
         return 0, None
 
-    max_proxies = get_profile_max_post_proxy(profile_id)
+    max_proxies = max_proxies_override if max_proxies_override is not None else get_profile_max_post_proxy(profile_id)
     if is_instant:
         max_proxies = min(max_proxies, 3)
 
@@ -1699,12 +1718,11 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False):
     if sponsor and sponsor["enabled"]:
         btn_style = sponsor["color"] if sponsor["color"] in ["primary", "success", "danger"] else "primary"
         sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"], style=btn_style)
-    # اصلاح: buttons باید لیست دو بعدی باشد
     buttons = [[sponsor_button]] if sponsor_button else None
     return count, (text, buttons)
 
 # ======================================================================
-# چرخه اصلی (با جدا کردن کانفیگ و پروکسی)
+# چرخه اصلی
 # ======================================================================
 async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_proxies=True, is_instant=False):
     log.info("=" * 50)
@@ -1729,7 +1747,6 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     ping_mode = get_profile_ping_mode(profile_id)
     log.info(f"📡 Sources: {len(sources)} | 🎯 {dest} | 🌍 Ping: {ping_mode}")
 
-    # ==== اسکرپ همه منابع با پیج‌بندی کامل ====
     all_configs = []
     all_proxies = []
     seen_urls = set()
@@ -1758,7 +1775,6 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                 if norm:
                     all_proxies.append(norm)
 
-    # ==== فایل‌ها (با متد صحیح) ====
     file_tasks = [fetch_files_from_channel(bot, profile_id, src, src) for src in sources]
     file_results = await asyncio.gather(*file_tasks, return_exceptions=True)
     for i, res in enumerate(file_results):
@@ -1778,13 +1794,11 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                 else:
                     all_configs.append((link, src))
 
-    # ==== فیلتر تکراری با دیتابیس ====
     new_configs = [(u, s) for u, s in all_configs if not is_already_posted(profile_id, u)]
     new_proxies = [p for p in all_proxies if not is_proxy_posted(profile_id, p)]
 
     log.info(f"📊 New configs: {len(new_configs)}, New proxies: {len(new_proxies)}")
 
-    # ==== تست پینگ برای کانفیگ‌ها ====
     working = []
     if enable_configs and new_configs:
         test_limit = get_profile_max_post_config(profile_id) * 5
@@ -1794,7 +1808,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
             test_limit = min(test_limit, 100)
         to_test = new_configs[:test_limit]
         log.info(f"📊 Testing {len(to_test)} configs...")
-        sem = asyncio.Semaphore(50)  # افزایش همزمانی
+        sem = asyncio.Semaphore(50)
         async def _check(item):
             u, src = item
             async with sem:
@@ -1819,7 +1833,6 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     else:
         log.info("ℹ️ No configs to test")
 
-    # ==== پروکسی‌ها (بدون تست پینگ، فقط فلگ) ====
     proxy_with_ping = []
     if enable_proxies and new_proxies:
         valid_proxies = [p for p in new_proxies if "t.me/proxy" in p.lower()]
@@ -1845,7 +1858,6 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
         else:
             log.info("ℹ️ No valid Telegram proxies found.")
 
-    # ==== ارسال ====
     total_configs = 0
     total_proxies = 0
     if working and enable_configs:
@@ -1868,7 +1880,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     return total_configs + total_proxies, result_msg
 
 # ======================================================================
-# حلقه‌های خودکار جداگانه برای کانفیگ و پروکسی (با دقت زمانی)
+# حلقه‌های خودکار
 # ======================================================================
 async def profile_loop_config(bot, profile_id):
     log.info(f"🔄 Starting config loop for profile {profile_id}")
@@ -1879,7 +1891,6 @@ async def profile_loop_config(bot, profile_id):
                 log.error(f"❌ Profile {profile_id} not found, stopping config loop.")
                 break
 
-            # بررسی اینکه ارسال کانفیگ فعال باشد
             if not get_profile_post_configs(profile_id):
                 log.info(f"ℹ️ Config posting disabled for profile {profile_id}, sleeping 60s")
                 await asyncio.sleep(60)
@@ -1947,7 +1958,6 @@ async def profile_loop_proxy(bot, profile_id):
                 log.error(f"❌ Profile {profile_id} not found, stopping proxy loop.")
                 break
 
-            # بررسی اینکه ارسال پروکسی فعال باشد
             if not get_profile_post_proxies(profile_id):
                 log.info(f"ℹ️ Proxy posting disabled for profile {profile_id}, sleeping 60s")
                 await asyncio.sleep(60)
@@ -2081,7 +2091,7 @@ async def delete_file_after_delay(filepath, delay_seconds):
         log.error(f"Error deleting file {filepath}: {e}")
 
 # ======================================================================
-# متغیر سراسری برای زمان شروع بات (فیلتر لاگ)
+# متغیر سراسری برای زمان شروع بات
 # ======================================================================
 BOT_START_TIME = datetime.utcnow()
 
@@ -2389,7 +2399,6 @@ def set_lang(lang: str):
 # ======================================================================
 BOT_REF = None
 
-# دیکشنری ترجمه‌ها (فارسی و انگلیسی) - کامل
 T = {
     "fa": {
         "welcome": "🤖 **بات جمع‌آوری کانفیگ و پروکسی**\n\n"
@@ -2410,7 +2419,9 @@ T = {
                        "📅 تاریخ پروکسی: {date_prx}\n"
                        "⏰ کرون: {cron}\n"
                        "⏱️ تایمر: {timer_status}\n"
-                       "📦 بک‌آپ هر {backup_interval} عدد",
+                       "📦 بک‌آپ هر {backup_interval} عدد\n"
+                       "🏷️ قالب نام: {naming}\n"
+                       "🆔 شناسه کانال: {channel_id}",
         "general_settings": "⚙️ **تنظیمات عمومی**\n\n"
                             "زبان فعلی: {lang}\n"
                             "تعداد ادمین‌ها: {admins_count}",
@@ -2566,6 +2577,12 @@ T = {
         "btn_remove_admin": "❌ حذف ادمین",
         "btn_list_admins": "📋 لیست ادمین‌ها",
         "only_admin": "❌ فقط ادمین‌ها می‌توانند از این بات استفاده کنند.",
+        "btn_set_naming_template": "🏷️ قالب نام‌گذاری",
+        "naming_template_prompt": "🏷️ قالب نام‌گذاری را وارد کنید.\n\nمتغیرهای قابل استفاده:\n- `{Flag}` : پرچم کشور\n- `{CHANNEL_ID}` : شناسه کانال (تنظیم شده در پروفایل)\n- `{COUNT}` : شماره کانفیگ\n\nمثال:\n`{Flag} | ⚡️Telegram = {CHANNEL_ID}`\n\nبرای استفاده از شمارنده، حتماً `{COUNT}` را در قالب قرار دهید.",
+        "naming_template_set": "✅ قالب نام‌گذاری تنظیم شد: {template}",
+        "btn_set_channel_id": "🆔 شناسه کانال",
+        "channel_id_prompt": "🆔 شناسه کانال را وارد کنید (مثلاً `MyChannel`):\n\nاین مقدار در قالب نام‌گذاری به جای `{CHANNEL_ID}` قرار می‌گیرد.",
+        "channel_id_set": "✅ شناسه کانال تنظیم شد: {id}",
     },
     "en": {
         "welcome": "🤖 **Config & Proxy Bot**\n\n"
@@ -2586,7 +2603,9 @@ T = {
                        "📅 Date proxy: {date_prx}\n"
                        "⏰ Cron: {cron}\n"
                        "⏱️ Timer: {timer_status}\n"
-                       "📦 Backup every {backup_interval}",
+                       "📦 Backup every {backup_interval}\n"
+                       "🏷️ Naming: {naming}\n"
+                       "🆔 Channel ID: {channel_id}",
         "general_settings": "⚙️ **General Settings**\n\n"
                             "Language: {lang}\n"
                             "Admins count: {admins_count}",
@@ -2742,6 +2761,12 @@ T = {
         "btn_remove_admin": "❌ Remove Admin",
         "btn_list_admins": "📋 List Admins",
         "only_admin": "❌ Only admins can use this bot.",
+        "btn_set_naming_template": "🏷️ Naming Template",
+        "naming_template_prompt": "🏷️ Enter naming template.\n\nAvailable variables:\n- `{Flag}` : Country flag\n- `{CHANNEL_ID}` : Channel ID (set in profile)\n- `{COUNT}` : Config number\n\nExample:\n`{Flag} | ⚡️Telegram = {CHANNEL_ID}`\n\nMake sure to include `{COUNT}` if you want numbering.",
+        "naming_template_set": "✅ Naming template set: {template}",
+        "btn_set_channel_id": "🆔 Channel ID",
+        "channel_id_prompt": "🆔 Enter channel ID (e.g. `MyChannel`):\n\nThis value replaces `{CHANNEL_ID}` in the naming template.",
+        "channel_id_set": "✅ Channel ID set: {id}",
     }
 }
 
@@ -2840,6 +2865,8 @@ def profile_admin_kb(profile_id):
          InlineKeyboardButton(msg("btn_timer"), callback_data=f"timer_menu_{profile_id}", style="primary")],
         [InlineKeyboardButton(f"⏱️ {timer_status}", callback_data="dummy", style="primary"),
          InlineKeyboardButton(msg("btn_log_menu"), callback_data=f"log_menu_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_set_naming_template"), callback_data=f"set_naming_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_set_channel_id"), callback_data=f"set_channel_id_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_reset"), callback_data=f"rn_{profile_id}", style="primary"),
          InlineKeyboardButton(msg("btn_clear"), callback_data=f"cd1_{profile_id}", style="danger")],
         [InlineKeyboardButton("❌ Delete Profile", callback_data=f"delprof_{profile_id}", style="danger")],
@@ -3188,7 +3215,7 @@ async def on_callback(u, ctx):
                 await q.message.edit_text("❌ " + msg("backup_failed"))
             return
 
-        # ===== بقیه دکمه‌های قدیمی =====
+        # ===== پروفایل‌ها =====
         if d == "prof_add":
             ctx.user_data["action"] = "prof_add"
             await q.edit_message_text(msg("profile_add_prompt"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="profiles_list", style="primary")]]))
@@ -3553,7 +3580,7 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # دکمه‌های interval و max (نگاشت به تنظیمات جدید)
+        # دکمه‌های interval و max
         if d.startswith("set_cfg_interval_"):
             parts = d.split("_")
             if len(parts) >= 4:
@@ -4263,6 +4290,7 @@ async def on_callback(u, ctx):
                 await q.message.edit_text("❌ " + msg("backup_failed"))
             return
 
+        # ===== حذف پروفایل =====
         if d.startswith("delprof_"):
             parts = d.split("_")
             if len(parts) >= 2:
@@ -4330,6 +4358,76 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
+        # ===== تنظیم قالب نام‌گذاری =====
+        if d.startswith("set_naming_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                ctx.user_data["action"] = f"set_naming_{profile_id}"
+                current = get_profile_naming_template(profile_id)
+                await q.edit_message_text(
+                    f"قالب فعلی:\n`{current}`\n\n" + msg("naming_template_prompt"),
+                    parse_mode="HTML",
+                    reply_markup=empty_button_kb(profile_id, f"empty_naming_{profile_id}")
+                )
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("empty_naming_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                set_profile_naming_template(profile_id, "{Flag} | ⚡️Telegram = {CHANNEL_ID}")
+                await q.answer("✅ قالب به پیش‌فرض برگردانده شد.")
+                await show_profile_admin(q.message, profile_id)
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        # ===== تنظیم شناسه کانال =====
+        if d.startswith("set_channel_id_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                ctx.user_data["action"] = f"set_channel_id_{profile_id}"
+                current = get_profile_channel_id(profile_id) or "خالی"
+                await q.edit_message_text(
+                    f"شناسه کانال فعلی: `{current}`\n\n" + msg("channel_id_prompt"),
+                    parse_mode="HTML",
+                    reply_markup=empty_button_kb(profile_id, f"empty_channel_id_{profile_id}")
+                )
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("empty_channel_id_"):
+            parts = d.split("_")
+            if len(parts) >= 3:
+                try:
+                    profile_id = int(parts[2])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                set_profile_channel_id(profile_id, "")
+                await q.answer("✅ شناسه کانال پاک شد.")
+                await show_profile_admin(q.message, profile_id)
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
         # در انتها اگر هیچکدام نبود، به لیست پروفایل‌ها برگردیم.
         await show_profiles_list(q.message)
 
@@ -4374,6 +4472,9 @@ async def show_profile_admin(msg_or_q, profile_id):
     date_cfg_status = "✅" if show_date_cfg else "❌"
     date_prx_status = "✅" if show_date_prx else "❌"
 
+    naming_template = get_profile_naming_template(profile_id)
+    channel_id = get_profile_channel_id(profile_id) or "خالی"
+
     expiry, remaining = get_profile_timer(profile_id)
     if expiry:
         timer_status = msg("timer_status_active", remaining=remaining)
@@ -4397,6 +4498,8 @@ async def show_profile_admin(msg_or_q, profile_id):
         cron=cron,
         timer_status=timer_status,
         backup_interval=backup_interval,
+        naming=naming_template,
+        channel_id=channel_id,
     )
     kb = profile_admin_kb(profile_id)
     try:
@@ -4871,6 +4974,33 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
+    # تنظیم قالب نام‌گذاری
+    if a.startswith("set_naming_"):
+        profile_id = int(a.split("_")[2])
+        template = t.strip()
+        if not template:
+            await u.message.reply_text("❌ قالب خالی است.")
+            return
+        # اعتبارسنجی ساده: حداقل باید {Flag} یا {CHANNEL_ID} یا {COUNT} داشته باشد
+        if "{Flag}" not in template and "{CHANNEL_ID}" not in template and "{COUNT}" not in template:
+            await u.message.reply_text("❌ قالب باید حداقل یکی از متغیرهای {Flag}، {CHANNEL_ID} یا {COUNT} را داشته باشد.")
+            return
+        set_profile_naming_template(profile_id, template)
+        await u.message.reply_text(msg("naming_template_set", template=template))
+        del ctx.user_data["action"]
+        await show_profile_admin(u.message, profile_id)
+        return
+
+    # تنظیم شناسه کانال
+    if a.startswith("set_channel_id_"):
+        profile_id = int(a.split("_")[2])
+        channel_id = t.strip()
+        set_profile_channel_id(profile_id, channel_id)
+        await u.message.reply_text(msg("channel_id_set", id=channel_id if channel_id else "خالی"))
+        del ctx.user_data["action"]
+        await show_profile_admin(u.message, profile_id)
+        return
+
 async def on_document(u, ctx):
     if not is_admin(u.effective_user.id):
         return
@@ -4885,7 +5015,7 @@ async def on_document(u, ctx):
         return
 
 # ======================================================================
-# ارسال دستی
+# ارسال دستی (با تقسیم به چند بخش)
 # ======================================================================
 async def process_manual_text(u, message, profile_id, is_document=False):
     p = await message.reply_text(msg("manual_send_processing"))
@@ -4934,25 +5064,50 @@ async def process_manual_text(u, message, profile_id, is_document=False):
         if not new_configs and not new_proxies:
             return await p.edit_text("❌ هیچ لینک جدیدی برای ارسال وجود ندارد.")
 
-        await p.edit_text(f"⏳ آماده‌سازی {len(new_configs)} کانفیگ و {len(new_proxies)} پروکسی...")
+        # گرفتن max_post_config و max_post_proxy
+        max_post_cfg = get_profile_max_post_config(profile_id)
+        max_post_prx = get_profile_max_post_proxy(profile_id)
 
-        working = [(url, 0, 0) for url in new_configs]
-        proxy_with_ping = []
-        for proxy_url in new_proxies:
-            host, _ = extract_host(proxy_url)
-            flag = "🌐"
-            if host:
-                ip = await host_to_ip(host)
-                if ip:
-                    flag = await get_flag_for_ip(ip)
-            proxy_with_ping.append((proxy_url, 0, flag))
+        # تقسیم کانفیگ‌ها به چند بخش
+        config_chunks = [new_configs[i:i+max_post_cfg] for i in range(0, len(new_configs), max_post_cfg)]
+        proxy_chunks = []
+        if new_proxies:
+            # برای پروکسی‌ها هم به همین ترتیب
+            valid_proxies = [p for p in new_proxies if "t.me/proxy" in p.lower()]
+            if valid_proxies:
+                proxy_chunks = [valid_proxies[i:i+max_post_prx] for i in range(0, len(valid_proxies), max_post_prx)]
 
-        dest = get_profile_dest(profile_id)
-        if not dest:
-            return await p.edit_text("❌ مقصد تنظیم نشده است.")
+        total_configs_sent = 0
+        total_proxies_sent = 0
 
-        n, m = await post_working_configs(u.get_bot(), profile_id, working, proxy_with_ping, force=True, skip_duplicate=True)
-        await p.edit_text(msg("doc_done", n=n, p=len(proxy_with_ping)))
+        # ارسال هر تکه کانفیگ
+        for chunk in config_chunks:
+            working = [(url, 0, 0) for url in chunk]
+            sent = await post_configs(u.get_bot(), profile_id, working, source_for_seen="manual", is_instant=False, max_post_override=len(chunk))
+            if sent > 0:
+                total_configs_sent += sent
+            await asyncio.sleep(1)  # کمی تاخیر بین ارسال‌ها
+
+        # ارسال هر تکه پروکسی
+        for chunk in proxy_chunks:
+            proxy_with_ping = []
+            for proxy_url in chunk:
+                host, _ = extract_host(proxy_url)
+                flag = "🌐"
+                if host:
+                    ip = await host_to_ip(host)
+                    if ip:
+                        flag = await get_flag_for_ip(ip)
+                proxy_with_ping.append((proxy_url, 0, flag))
+            cnt, payload = await post_proxies(u.get_bot(), profile_id, proxy_with_ping, is_instant=False, max_proxies_override=len(chunk))
+            if cnt > 0 and payload:
+                text_p, buttons = payload
+                sent = await send_to_destination(u.get_bot(), profile_id, text_p, buttons)
+                if sent:
+                    total_proxies_sent += cnt
+            await asyncio.sleep(1)
+
+        await p.edit_text(msg("doc_done", n=total_configs_sent, p=total_proxies_sent))
     except Exception as e:
         log.error(f"manual send error: {e}")
         await p.edit_text(f"❌ {str(e)[:200]}")

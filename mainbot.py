@@ -71,34 +71,34 @@ TEHRAN_TZ = pytz.timezone('Asia/Tehran')
 
 
 def header_modes_menu(profile_id):
+    """Per-profile independent header display settings for configs and Telegram proxies."""
     cm, pm = get_header_modes(profile_id)
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"⚙️ حالت نام کانفیگ: {header_mode_label(cm)}",
-                              callback_data=f"hm_config_{'protocol' if cm == 'channel' else 'channel'}_{profile_id}")],
-        [InlineKeyboardButton(f"⚙️ حالت نام پروکسی: {header_mode_label(pm)}",
-                              callback_data=f"hm_proxy_{'protocol' if pm == 'channel' else 'channel'}_{profile_id}")],
-        [InlineKeyboardButton("🔧 تنظیم دقیق کانفیگ", callback_data=f"hm_config_menu_{profile_id}")],
-        [InlineKeyboardButton("🔧 تنظیم دقیق پروکسی", callback_data=f"hm_proxy_menu_{profile_id}")],
-        [InlineKeyboardButton("↩️ بازگشت", callback_data=f"profile_{profile_id}")]
+        [InlineKeyboardButton(
+            f"⚙️ حالت نمایش کانفیگ: {'نام کانال' if cm == 'channel' else 'پروتکل'}",
+            callback_data=f"hm_config_menu_{profile_id}", style="primary"
+        )],
+        [InlineKeyboardButton(
+            f"⚙️ حالت نمایش پروکسی: {'نام کانال' if pm == 'channel' else 'پروتکل'}",
+            callback_data=f"hm_proxy_menu_{profile_id}", style="primary"
+        )],
+        [InlineKeyboardButton("↩️ بازگشت", callback_data=f"profile_{profile_id}", style="primary")]
     ])
 
 def header_mode_keyboard(profile_id, kind):
     config_mode, proxy_mode = get_header_modes(profile_id)
     mode = config_mode if kind == "config" else proxy_mode
-    other = "proxy" if kind == "config" else "config"
     title = "کانفیگ" if kind == "config" else "پروکسی"
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                f"✅ نام کانال" if mode == "channel" else "نام کانال",
-                callback_data=f"hm_{kind}_channel_{profile_id}"
-            ),
-            InlineKeyboardButton(
-                f"✅ پروتکل" if mode == "protocol" else "پروتکل",
-                callback_data=f"hm_{kind}_protocol_{profile_id}"
-            ),
-        ],
-        [InlineKeyboardButton("↩️ بازگشت", callback_data=f"profile_{profile_id}")]
+        [InlineKeyboardButton(
+            f"{'◉' if mode == 'channel' else '○'} نام کانال",
+            callback_data=f"hm_{kind}_channel_{profile_id}", style="primary"
+        )],
+        [InlineKeyboardButton(
+            f"{'◉' if mode == 'protocol' else '○'} پروتکل",
+            callback_data=f"hm_{kind}_protocol_{profile_id}", style="primary"
+        )],
+        [InlineKeyboardButton("↩️ بازگشت", callback_data=f"profile_{profile_id}", style="primary")]
     ])
 
 def get_header_modes(profile_id):
@@ -130,30 +130,27 @@ def header_mode_label(mode):
 
 
 def detect_proxy_protocol(proxy_url):
+    """Return ONLY the two supported Telegram proxy protocol labels."""
     u = (proxy_url or "").strip().lower()
-    if u.startswith(("tg://proxy", "https://t.me/proxy", "http://t.me/proxy")):
+    if u.startswith(("tg://proxy?", "https://t.me/proxy?")):
         return "MTPROTO"
     if u.startswith("socks5://"):
         return "SOCKS5"
-    return "Unknown"
+    return ""
 
 
 def detect_config_protocol(config_url):
+    """Return ONLY one of the exact config protocol families requested."""
     u = (config_url or "").strip().lower()
     if u.startswith("vless://"): return "VLESS"
     if u.startswith("vmess://"): return "VMESS"
-    if u.startswith(("wireguard://", "wg://")): return "WIREGUARD"
-    if u.startswith(("hysteria2://", "hy2://")): return "HYSTERIA2"
-    if u.startswith("hysteria://"): return "HYSTERIA"
     if u.startswith("trojan://"): return "TROJAN"
+    if u.startswith(("wireguard://", "wg://")): return "WIREGUARD"
     if u.startswith(("shadowsocks://", "ss://")): return "SHADOWSOCKS"
-    if u.startswith("socks5://"): return "SOCKS5"
-    if u.startswith("socks4://"): return "SOCKS4"
-    if u.startswith("socks://"): return "SOCKS"
-    if u.startswith("https://"): return "HTTPS"
-    if u.startswith("http://"): return "HTTP"
-    if u.startswith(("tuic://",)): return "TUIC"
-    return "CONFIG"
+    if u.startswith(("socks://", "socks4://", "socks5://")): return "SOCKS"
+    if u.startswith(("http://", "https://")): return "HTTP"
+    if u.startswith(("hysteria2://", "hy2://")): return "HYSTERIA2"
+    return ""
 
 
 def format_server_header(profile_id, country_text="", item_url="", kind="config"):
@@ -682,6 +679,8 @@ def migrate_old_config():
     log.info(f"✅ Migrated {len(dest_list)} profiles.")
 
 migrate_old_config()
+# Header display modes are per-profile and migrated safely after profiles exists.
+migrate_header_modes()
 # Normalize missing Ping mode to the new default (Global) without overwriting explicit user choices.
 c.execute("UPDATE profiles SET ping_mode=? WHERE ping_mode IS NULL OR TRIM(ping_mode)=?", ("global", ""))
 conn.commit()
@@ -1927,7 +1926,7 @@ def is_telegram_proxy_url(url):
     if not url:
         return False
     u = html.unescape(str(url)).strip()
-    if u.lower().startswith(("tg://proxy?", "https://t.me/proxy?", "http://t.me/proxy?")):
+    if u.lower().startswith(("tg://proxy?", "https://t.me/proxy?")):
         return validate_telegram_proxy_url(u)[0]
     if u.lower().startswith("socks5://"):
         return validate_telegram_proxy_url(u)[0]
@@ -1954,6 +1953,8 @@ def validate_config_link(url):
     if not url:
         return False, "empty"
     url = clean_config_url(url.strip())
+    if is_telegram_proxy_url(url):
+        return False, "telegram proxy is not a config"
     scheme = urlparse(url).scheme.lower()
     if scheme == "vless": return validate_vless(url)
     if scheme == "vmess": return validate_vmess(url)
@@ -2020,7 +2021,7 @@ def validate_telegram_proxy_url(url):
     try:
         p = urlparse(u)
         scheme = p.scheme.lower()
-        if scheme in ("http", "https") and p.hostname and p.hostname.lower() == "t.me" and p.path.lower() == "/proxy":
+        if scheme == "https" and p.hostname and p.hostname.lower() == "t.me" and p.path.lower() == "/proxy":
             q = parse_qs(p.query, keep_blank_values=True)
             server = (q.get("server") or [""])[0].strip()
             port_raw = (q.get("port") or [""])[0].strip()
@@ -2062,8 +2063,6 @@ def canonical_telegram_proxy_url(url):
         return None
     if kind == "MTPROTO":
         if norm.lower().startswith("tg://proxy?"):
-            norm = "https://t.me/proxy?" + norm.split("?", 1)[1]
-        elif norm.lower().startswith("http://t.me/proxy?"):
             norm = "https://t.me/proxy?" + norm.split("?", 1)[1]
         p = urlparse(norm)
         q = parse_qs(p.query, keep_blank_values=True)
@@ -4124,6 +4123,14 @@ def profile_admin_kb(profile_id):
          InlineKeyboardButton("⏰ بازه پروکسی", callback_data=f"set_prx_interval_{profile_id}", style="primary")],
         [InlineKeyboardButton("📊 تعداد کانفیگ", callback_data=f"set_cfg_max_{profile_id}", style="primary"),
          InlineKeyboardButton("📊 تعداد پروکسی", callback_data=f"set_prx_max_{profile_id}", style="primary")],
+        [InlineKeyboardButton(
+            f"⚙️ حالت نمایش کانفیگ: {'نام کانال' if get_header_modes(profile_id)[0] == 'channel' else 'پروتکل'}",
+            callback_data=f"hm_config_menu_{profile_id}", style="primary"
+        ),
+         InlineKeyboardButton(
+            f"⚙️ حالت نمایش پروکسی: {'نام کانال' if get_header_modes(profile_id)[1] == 'channel' else 'پروتکل'}",
+            callback_data=f"hm_proxy_menu_{profile_id}", style="primary"
+        )],
         [InlineKeyboardButton(f"🌐 حالت پروکسی: {'شیشه‌ای • پروتکل' if get_profile_proxy_post_mode(profile_id) == 1 else 'عادی'}", callback_data=f"tgl_prx_mode_{profile_id}", style="primary"),
          InlineKeyboardButton(f"📡 تست Ping: {'✅' if ping_testing else '❌'}", callback_data=f"tgl_ping_test_{profile_id}", style="primary")],
         [InlineKeyboardButton(f"👁 نمایش Ping: {'✅' if prof.get('show_ping', 1) else '❌'}", callback_data=f"tgl_show_ping_{profile_id}", style="primary"),
@@ -4598,6 +4605,51 @@ async def on_callback(u, ctx):
                 await show_profile_admin(q.message, profile_id)
             else:
                 await q.answer("⚠️ خطا در داده")
+            return
+
+        # ===================== INDEPENDENT HEADER DISPLAY MODES =====================
+        if d.startswith("hm_config_menu_") or d.startswith("hm_proxy_menu_"):
+            try:
+                profile_id = int(d.rsplit("_", 1)[1])
+            except Exception:
+                await q.answer("⚠️ شناسه نامعتبر", show_alert=True)
+                return
+            if not get_profile(profile_id):
+                await q.answer("⚠️ پروفایل یافت نشد", show_alert=True)
+                return
+            kind = "config" if d.startswith("hm_config_menu_") else "proxy"
+            title = "کانفیگ" if kind == "config" else "پروکسی"
+            await q.edit_message_text(
+                f"⚙️ حالت نمایش {title} را انتخاب کنید:",
+                reply_markup=header_mode_keyboard(profile_id, kind)
+            )
+            return
+
+        if d.startswith("hm_config_") or d.startswith("hm_proxy_"):
+            parts = d.split("_")
+            if len(parts) != 4 or parts[0] != "hm":
+                await q.answer("⚠️ داده نامعتبر", show_alert=True)
+                return
+            kind, mode = parts[1], parts[2]
+            try:
+                profile_id = int(parts[3])
+            except ValueError:
+                await q.answer("⚠️ شناسه نامعتبر", show_alert=True)
+                return
+            if kind not in ("config", "proxy") or mode not in ("channel", "protocol") or not get_profile(profile_id):
+                await q.answer("⚠️ تنظیم نامعتبر", show_alert=True)
+                return
+            if set_header_mode(profile_id, kind, mode):
+                title = "کانفیگ" if kind == "config" else "پروکسی"
+                label = "نام کانال" if mode == "channel" else "پروتکل"
+                await q.answer(f"✅ حالت نمایش {title}: {label}")
+                await q.edit_message_text(
+                    f"⚙️ حالت نمایش {title}: <b>{label}</b>",
+                    parse_mode="HTML",
+                    reply_markup=header_mode_keyboard(profile_id, kind)
+                )
+            else:
+                await q.answer("⚠️ ذخیره تنظیمات انجام نشد", show_alert=True)
             return
 
         # ===================== SPONSOR NEW =====================

@@ -1761,6 +1761,54 @@ def validate_wireguard(url):
     except Exception:
         return False, "parse error"
 
+def validate_http_proxy(url):
+    """Validate HTTP/HTTPS proxy-style URLs without accepting arbitrary web links."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False, "not http"
+        if not parsed.hostname:
+            return False, "missing host"
+        if not parsed.port or not (1 <= parsed.port <= 65535):
+            return False, "invalid port"
+        # HTTP proxy URLs normally have credentials or an explicit proxy-like port.
+        # Accept explicit host:port URLs because source channels commonly publish them.
+        return True, "valid"
+    except Exception:
+        return False, "parse error"
+
+def validate_hysteria(url):
+    """Validate Hysteria v1 URL structure."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme != "hysteria":
+            return False, "not hysteria"
+        if not parsed.hostname:
+            return False, "missing host"
+        if not parsed.port or not (1 <= parsed.port <= 65535):
+            return False, "invalid port"
+        return True, "valid"
+    except Exception:
+        return False, "parse error"
+
+def detect_protocol_name(url):
+    """Return a stable human-readable protocol name for configs and proxies."""
+    u = (url or "").strip().lower()
+    if u.startswith("vless://"): return "VLESS"
+    if u.startswith("vmess://"): return "VMESS"
+    if u.startswith("trojan://"): return "TROJAN"
+    if u.startswith("wireguard://"): return "WireGuard"
+    if u.startswith("hysteria2://") or u.startswith("hy2://"): return "Hysteria2"
+    if u.startswith("hysteria://"): return "Hysteria"
+    if u.startswith("tuic://"): return "TUIC"
+    if u.startswith("ss://"): return "Shadowsocks"
+    if u.startswith("socks5://"): return "SOCKS5"
+    if u.startswith("socks4://"): return "SOCKS4"
+    if u.startswith("socks://"): return "SOCKS"
+    if u.startswith("http://") or u.startswith("https://"): return "HTTP"
+    if "t.me/proxy?" in u or "tg://proxy?" in u or "tg://proxy" in u: return "MTProto"
+    return "Unknown"
+
 def validate_config_link(url):
     """Validate a config link and return (is_valid, reason)."""
     if not url:
@@ -1781,6 +1829,12 @@ def validate_config_link(url):
         return validate_tuic(url)
     elif url.startswith("wireguard://"):
         return validate_wireguard(url)
+    elif url.startswith("hysteria2://"):
+        return validate_hy2(url.replace("hysteria2://", "hy2://", 1))
+    elif url.startswith("hysteria://"):
+        return validate_hysteria(url)
+    elif url.startswith("http://") or url.startswith("https://"):
+        return validate_http_proxy(url)
     else:
         return False, "unknown protocol"
 
@@ -1794,7 +1848,7 @@ def extract_links_from_text(text):
     """
     results = []
     pattern = re.compile(
-        r'(vless|vmess|trojan|hy2|tuic|ss|socks|hysteria2|wireguard)://[^\s<>"\'{}()\[\]]+',
+        r'(vless|vmess|trojan|hy2|hysteria2|hysteria|tuic|ss|socks|socks5|socks4|wireguard|http|https)://[^\s<>"\'{}()\[\]]+',
         re.IGNORECASE
     )
     for m in pattern.finditer(text):
@@ -1814,7 +1868,7 @@ def extract_links_from_text(text):
         if re.match(r'^[A-Za-z0-9+/=]+$', text_clean):
             try:
                 decoded = base64.b64decode(text_clean, validate=True).decode('utf-8', errors='ignore')
-                for proto in ["vless://", "vmess://", "trojan://", "hy2://", "tuic://", "ss://", "socks://", "hysteria2://"]:
+                for proto in ["vless://", "vmess://", "trojan://", "hy2://", "hysteria2://", "hysteria://", "tuic://", "ss://", "socks://", "socks5://", "socks4://", "wireguard://", "http://", "https://"]:
                     for m in re.finditer(re.escape(proto) + r"[^\s<>\"']+", decoded):
                         link = m.group().rstrip().strip(".,;(){}[]!؟'")
                         if len(link) > len(proto) + 10:
@@ -1832,7 +1886,7 @@ def extract_links_from_text(text):
                 try:
                     pad = "=" * (-len(line) % 4)
                     decoded = base64.b64decode(line + pad, validate=False).decode('utf-8', errors='ignore')
-                    for proto in ["vless://", "vmess://", "trojan://", "hy2://", "tuic://", "ss://", "socks://", "hysteria2://"]:
+                    for proto in ["vless://", "vmess://", "trojan://", "hy2://", "hysteria2://", "hysteria://", "tuic://", "ss://", "socks://", "socks5://", "socks4://", "wireguard://", "http://", "https://"]:
                         for m in re.finditer(re.escape(proto) + r"[^\s<>\"']+", decoded):
                             link = m.group().rstrip().strip(".,;(){}[]!؟'")
                             if len(link) > len(proto) + 10:
@@ -2727,8 +2781,16 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
             continue
         if len(entries) >= max_proxies:
             break
-        channel = get_profile_channel_link(profile_id) or "VaslZone"
-        header_parts = [f"@{channel.lstrip('@')}" if channel else "@VaslZone"]
+        channel = get_profile_channel_link(profile_id)
+        if channel:
+            channel_label = f"@{channel.lstrip('@')}"
+        else:
+            # Per-profile fallback: never use a hard-coded @VaslZone for another profile.
+            prof = get_profile(profile_id) or {}
+            fallback = str(prof.get("dest_name") or "").strip()
+            channel_label = fallback if fallback.startswith("@") else (f"@{fallback}" if fallback else "@Channel")
+        # Proxy post mode: 0 = normal text + channel name, 1 = glass buttons + protocol header.
+        header_parts = [detect_protocol_name(norm) if mode == 1 else channel_label]
         if country_display == 1:
             en = COUNTRY_NAMES_EN.get(country_code, "")
             if flag and flag != "🌐":
@@ -2771,9 +2833,11 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
     # Glass mode: maximum 3 proxy buttons per row. Sponsor is always isolated
     # in the final row and never shares a row with proxy buttons.
     proxy_buttons = []
-    for i, (norm, _header) in enumerate(entries):
+    for i, (norm, header) in enumerate(entries):
         style = ("primary", "success", "danger")[(i) % 3]
-        proxy_buttons.append(InlineKeyboardButton(f"پروکسی {i+1}", url=norm, style=style))
+        # The protocol is already shown in the header in glass mode; keep button text concise.
+        button_label = "پروکسی" if mode == 1 else f"پروکسی {i+1}"
+        proxy_buttons.append(InlineKeyboardButton(button_label, url=norm, style=style))
     rows = [proxy_buttons[i:i+3] for i in range(0, len(proxy_buttons), 3)]
     visible = "\n".join(header for _norm, header in entries)
     try:
@@ -3906,7 +3970,7 @@ def profile_admin_kb(profile_id):
          InlineKeyboardButton("⏰ بازه پروکسی", callback_data=f"set_prx_interval_{profile_id}", style="primary")],
         [InlineKeyboardButton("📊 تعداد کانفیگ", callback_data=f"set_cfg_max_{profile_id}", style="primary"),
          InlineKeyboardButton("📊 تعداد پروکسی", callback_data=f"set_prx_max_{profile_id}", style="primary")],
-        [InlineKeyboardButton(f"🌐 حالت پروکسی: {'شیشه‌ای' if get_profile_proxy_post_mode(profile_id) == 1 else 'عادی'}", callback_data=f"tgl_prx_mode_{profile_id}", style="primary"),
+        [InlineKeyboardButton(f"🌐 حالت پروکسی: {'شیشه‌ای • پروتکل' if get_profile_proxy_post_mode(profile_id) == 1 else 'عادی'}", callback_data=f"tgl_prx_mode_{profile_id}", style="primary"),
          InlineKeyboardButton(f"📡 تست Ping: {'✅' if ping_testing else '❌'}", callback_data=f"tgl_ping_test_{profile_id}", style="primary")],
         [InlineKeyboardButton(f"👁 نمایش Ping: {'✅' if prof.get('show_ping', 1) else '❌'}", callback_data=f"tgl_show_ping_{profile_id}", style="primary"),
          InlineKeyboardButton(f"📍 منطقه Ping: {'🇮🇷 ایران' if ping_mode == 'iran' else '🌍 جهانی'}", callback_data=f"tglping_{profile_id}", style="primary")],

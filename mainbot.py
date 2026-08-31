@@ -131,19 +131,11 @@ def header_mode_label(mode):
 
 def detect_proxy_protocol(proxy_url):
     u = (proxy_url or "").strip().lower()
-    if u.startswith(("tg://proxy", "https://t.me/proxy")):
+    if u.startswith(("tg://proxy", "https://t.me/proxy", "http://t.me/proxy")):
         return "MTPROTO"
     if u.startswith("socks5://"):
         return "SOCKS5"
-    if u.startswith("socks4://"):
-        return "SOCKS4"
-    if u.startswith("socks://"):
-        return "SOCKS"
-    if u.startswith("https://"):
-        return "HTTPS"
-    if u.startswith("http://"):
-        return "HTTP"
-    return "PROXY"
+    return "Unknown"
 
 
 def detect_config_protocol(config_url):
@@ -1930,159 +1922,180 @@ def validate_hysteria(url):
     except Exception:
         return False, "parse error"
 
+def is_telegram_proxy_url(url):
+    """Strictly accept Telegram proxies: MTProto links or SOCKS5 links."""
+    if not url:
+        return False
+    u = html.unescape(str(url)).strip()
+    if u.lower().startswith(("tg://proxy?", "https://t.me/proxy?", "http://t.me/proxy?")):
+        return validate_telegram_proxy_url(u)[0]
+    if u.lower().startswith("socks5://"):
+        return validate_telegram_proxy_url(u)[0]
+    return False
+
+
 def detect_protocol_name(url):
-    """Return a stable human-readable protocol name for configs and proxies."""
+    """Return a human-readable protocol name for ONLY the supported config/proxy schemes."""
     u = (url or "").strip().lower()
     if u.startswith("vless://"): return "VLESS"
     if u.startswith("vmess://"): return "VMESS"
     if u.startswith("trojan://"): return "TROJAN"
-    if u.startswith("wireguard://"): return "WireGuard"
-    if u.startswith("hysteria2://") or u.startswith("hy2://"): return "Hysteria2"
-    if u.startswith("hysteria://"): return "Hysteria"
-    if u.startswith("tuic://"): return "TUIC"
-    if u.startswith("ss://"): return "Shadowsocks"
-    if u.startswith("socks5://"): return "SOCKS5"
-    if u.startswith("socks4://"): return "SOCKS4"
-    if u.startswith("socks://"): return "SOCKS"
-    if u.startswith("http://") or u.startswith("https://"): return "HTTP"
-    if "t.me/proxy?" in u or "tg://proxy?" in u or "tg://proxy" in u: return "MTProto"
+    if u.startswith(("wireguard://", "wg://")): return "WIREGUARD"
+    if u.startswith(("hysteria2://", "hy2://")): return "HYSTERIA2"
+    if u.startswith(("shadowsocks://", "ss://")): return "SHADOWSOCKS"
+    if u.startswith(("socks://", "socks4://", "socks5://")): return "SOCKS"
+    if u.startswith(("http://", "https://")): return "HTTP"
+    if is_telegram_proxy_url(u):
+        return "MTPROTO" if u.startswith(("tg://proxy", "https://t.me/proxy")) else "SOCKS5"
     return "Unknown"
 
 def validate_config_link(url):
-    """Validate a config link and return (is_valid, reason)."""
+    """Strict validation for the exact config protocols requested by the bot owner."""
     if not url:
         return False, "empty"
-    if url.startswith("vless://"):
-        return validate_vless(url)
-    elif url.startswith("vmess://"):
-        return validate_vmess(url)
-    elif url.startswith("trojan://"):
-        return validate_trojan(url)
-    elif url.startswith("ss://"):
-        return validate_ss(url)
-    elif url.startswith("socks://") or url.startswith("socks5://"):
-        return validate_socks(url)
-    elif url.startswith("hy2://"):
-        return validate_hy2(url)
-    elif url.startswith("tuic://"):
-        return validate_tuic(url)
-    elif url.startswith("wireguard://"):
-        return validate_wireguard(url)
-    elif url.startswith("hysteria2://"):
-        return validate_hy2(url.replace("hysteria2://", "hy2://", 1))
-    elif url.startswith("hysteria://"):
-        return validate_hysteria(url)
-    elif url.startswith("http://") or url.startswith("https://"):
-        return validate_http_proxy(url)
-    else:
-        return False, "unknown protocol"
+    url = clean_config_url(url.strip())
+    scheme = urlparse(url).scheme.lower()
+    if scheme == "vless": return validate_vless(url)
+    if scheme == "vmess": return validate_vmess(url)
+    if scheme == "trojan": return validate_trojan(url)
+    if scheme in ("wireguard", "wg"): return validate_wireguard(url.replace("wg://", "wireguard://", 1))
+    if scheme in ("shadowsocks", "ss"): return validate_ss(url.replace("shadowsocks://", "ss://", 1))
+    if scheme in ("socks", "socks4", "socks5"): return validate_socks(url)
+    if scheme in ("http", "https"): return validate_http_proxy(url)
+    if scheme in ("hysteria2", "hy2"): return validate_hy2(url.replace("hysteria2://", "hy2://", 1))
+    return False, "unsupported protocol"
 
 # ======================================================================
 # استخراج لینک‌ها با اعتبارسنجی
 # ======================================================================
 def extract_links_from_text(text):
-    """
-    استخراج لینک‌های کانفیگ (vless, vmess, trojan, hy2, tuic, ss, socks, hysteria2, wireguard)
-    و اعتبارسنجی آنها.
-    """
+    """Extract ONLY supported configs, preserving source/message order."""
+    if not text:
+        return []
     results = []
+    seen = set()
     pattern = re.compile(
-        r'(vless|vmess|trojan|hy2|hysteria2|hysteria|tuic|ss|socks|socks5|socks4|wireguard|http|https)://[^\s<>"\'{}()\[\]]+',
+        r'(?:vless|vmess|trojan|wireguard|wg|shadowsocks|ss|socks5|socks4|socks|http|https|hysteria2|hy2)://[^\s<>\"\'{}()\[\]]+',
         re.IGNORECASE
     )
-    for m in pattern.finditer(text):
-        link = m.group(0).strip()
+
+    def add_candidate(link):
+        link = clean_config_url(link.strip())
         link = re.sub(r'[.,;:!؟\'"`]+$', '', link)
-        if len(link) > 10:
-            # Validate
-            is_valid, reason = validate_config_link(link)
-            if is_valid:
+        ok, reason = validate_config_link(link)
+        if ok:
+            ident = canonical_config_identity(link)
+            if ident not in seen:
+                seen.add(ident)
                 results.append(link)
-            else:
-                log.debug(f"Invalid config link: {link} - {reason}")
+        else:
+            log.debug(f"Invalid/unsupported config skipped: {link[:120]} - {reason}")
 
-    # Attempt base64 decoding
+    for m in pattern.finditer(html.unescape(text)):
+        add_candidate(m.group(0))
+
+    # Preserve the existing base64 extraction capability, but apply the same strict whitelist.
     if not results:
+        candidates = []
         text_clean = text.replace('\n', '').replace('\r', '').strip()
-        if re.match(r'^[A-Za-z0-9+/=]+$', text_clean):
+        if text_clean and re.fullmatch(r'[A-Za-z0-9+/=]+', text_clean):
+            candidates.append(text_clean)
+        candidates.extend(line.strip() for line in text.splitlines()
+                         if line.strip() and len(line.strip()) <= 2000 and re.fullmatch(r'[A-Za-z0-9+/=]+', line.strip()))
+        for encoded in candidates:
             try:
-                decoded = base64.b64decode(text_clean, validate=True).decode('utf-8', errors='ignore')
-                for proto in ["vless://", "vmess://", "trojan://", "hy2://", "hysteria2://", "hysteria://", "tuic://", "ss://", "socks://", "socks5://", "socks4://", "wireguard://", "http://", "https://"]:
-                    for m in re.finditer(re.escape(proto) + r"[^\s<>\"']+", decoded):
-                        link = m.group().rstrip().strip(".,;(){}[]!؟'")
-                        if len(link) > len(proto) + 10:
-                            is_valid, _ = validate_config_link(link)
-                            if is_valid:
-                                results.append(link)
+                decoded = base64.b64decode(encoded + '=' * (-len(encoded) % 4), validate=False).decode('utf-8', errors='ignore')
+                for m in pattern.finditer(decoded):
+                    add_candidate(m.group(0))
             except Exception:
-                pass
-
-        for line in text.splitlines():
-            line = line.strip()
-            if not line or len(line) > 2000:
                 continue
-            if re.match(r'^[A-Za-z0-9+/=]+$', line):
-                try:
-                    pad = "=" * (-len(line) % 4)
-                    decoded = base64.b64decode(line + pad, validate=False).decode('utf-8', errors='ignore')
-                    for proto in ["vless://", "vmess://", "trojan://", "hy2://", "hysteria2://", "hysteria://", "tuic://", "ss://", "socks://", "socks5://", "socks4://", "wireguard://", "http://", "https://"]:
-                        for m in re.finditer(re.escape(proto) + r"[^\s<>\"']+", decoded):
-                            link = m.group().rstrip().strip(".,;(){}[]!؟'")
-                            if len(link) > len(proto) + 10:
-                                is_valid, _ = validate_config_link(link)
-                                if is_valid:
-                                    results.append(link)
-                except:
-                    pass
 
-    if not results:
-        for line in text.splitlines():
-            line = line.strip()
-            for proto in ['vless://', 'vmess://', 'trojan://', 'hy2://', 'tuic://', 'ss://', 'socks://', 'hysteria2://']:
-                if line.lower().startswith(proto):
-                    is_valid, _ = validate_config_link(line)
-                    if is_valid:
-                        results.append(line)
-                    break
+    return results
 
-    return list(set(results))
+def validate_telegram_proxy_url(url):
+    """Strict Telegram proxy validation: MTProto or SOCKS5 only."""
+    if not url:
+        return False, "empty"
+    u = html.unescape(clean_proxy_link(str(url))).strip()
+    try:
+        p = urlparse(u)
+        scheme = p.scheme.lower()
+        if scheme in ("http", "https") and p.hostname and p.hostname.lower() == "t.me" and p.path.lower() == "/proxy":
+            q = parse_qs(p.query, keep_blank_values=True)
+            server = (q.get("server") or [""])[0].strip()
+            port_raw = (q.get("port") or [""])[0].strip()
+            secret = (q.get("secret") or [""])[0].strip()
+            if not server or not secret or not port_raw.isdigit():
+                return False, "missing server/port/secret"
+            port = int(port_raw)
+            if not (1 <= port <= 65535):
+                return False, "invalid port"
+            return True, "MTPROTO"
+        if scheme == "tg" and p.netloc.lower() == "proxy":
+            q = parse_qs(p.query, keep_blank_values=True)
+            server = (q.get("server") or [""])[0].strip()
+            port_raw = (q.get("port") or [""])[0].strip()
+            secret = (q.get("secret") or [""])[0].strip()
+            if not server or not secret or not port_raw.isdigit():
+                return False, "missing server/port/secret"
+            if not (1 <= int(port_raw) <= 65535):
+                return False, "invalid port"
+            return True, "MTPROTO"
+        if scheme == "socks5":
+            if not p.hostname:
+                return False, "missing host"
+            if p.port is None or not (1 <= p.port <= 65535):
+                return False, "invalid port"
+            return True, "SOCKS5"
+    except Exception as e:
+        return False, f"parse error: {e}"
+    return False, "not a Telegram proxy"
 
 def canonical_telegram_proxy_url(url):
-    """Return a Telegram proxy URL that is safe for Telegram messages/buttons."""
+    """Canonical Telegram proxy URL. MTProto is normalized to t.me/proxy; SOCKS5 is preserved."""
     norm = normalize_telegram_proxy(url or "")
     if not norm:
         return None
-    norm = norm.replace("&amp;", "&")
-    if norm.lower().startswith("tg://proxy?"):
-        return "https://t.me/proxy?" + norm.split("?", 1)[1]
-    if re.match(r"^https?://t\.me/proxy\?", norm, re.I):
-        return norm
-    return None
+    norm = html.unescape(norm).strip()
+    ok, kind = validate_telegram_proxy_url(norm)
+    if not ok:
+        return None
+    if kind == "MTPROTO":
+        if norm.lower().startswith("tg://proxy?"):
+            norm = "https://t.me/proxy?" + norm.split("?", 1)[1]
+        elif norm.lower().startswith("http://t.me/proxy?"):
+            norm = "https://t.me/proxy?" + norm.split("?", 1)[1]
+        p = urlparse(norm)
+        q = parse_qs(p.query, keep_blank_values=True)
+        query = urlencode(sorted((k.lower(), v) for k, vals in q.items() for v in vals), doseq=True)
+        return "https://t.me/proxy?" + query
+    p = urlparse(norm)
+    q = urlencode(sorted((k.lower(), v) for k, vals in parse_qs(p.query, keep_blank_values=True).items() for v in vals), doseq=True)
+    return urlunparse(("socks5", p.netloc, p.path, p.params, q, ""))
 
 def normalize_proxy_url(url):
-    if not url:
-        return None
-    url = clean_proxy_link(url.strip())
     return canonical_telegram_proxy_url(url)
 
 def extract_proxy_links_from_text(text):
-    """Extract Telegram MTProto proxy links from visible text AND raw HTML hrefs."""
+    """Extract ONLY Telegram MTProto and Telegram SOCKS5 links, including raw href attributes."""
     if not text:
         return []
     source = html.unescape(text)
     results = []
+    seen = set()
     patterns = [
-        r'https?://t\.me/proxy\?[^\s<>"]+',
-        r'tg://proxy\?[^\s<>"]+',
+        r'https?://t\.me/proxy\?[^\s<>"\']+',
+        r'tg://proxy\?[^\s<>"\']+',
+        r'socks5://[^\s<>"\']+',
     ]
     for pattern in patterns:
         for m in re.finditer(pattern, source, re.IGNORECASE):
-            link = clean_proxy_link(m.group(0))
-            # Strip HTML/Markdown punctuation that cannot belong to the URL.
-            link = link.rstrip('.,;:!?)]}\'')
-            norm = canonical_telegram_proxy_url(link)
-            if norm and norm not in results:
-                results.append(norm)
+            norm = canonical_telegram_proxy_url(clean_proxy_link(m.group(0)).rstrip('.,;:!?)]}\'"'))
+            if norm:
+                ident = canonical_proxy_identity(norm)
+                if ident not in seen:
+                    seen.add(ident)
+                    results.append(norm)
     return results
 
 def extract_uuid_and_address(url):
@@ -2946,7 +2959,7 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
                     header_parts.append(f"{flag} <b>{fa}</b>")
                 else:
                     header_parts.append(flag)
-        entries.append((norm, " ".join(header_parts)))
+        entries.append((norm, " ".join(header_parts), flag))
         selected.append(norm)
     if not entries:
         return 0, None, []
@@ -2956,7 +2969,7 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
         # Plain URL lines are intentionally used. Telegram clients recognize
         # t.me/proxy links reliably, while HTML href can be rejected for some
         # proxy URL variants.
-        proxy_blocks = [f"{header}\n{norm}" for norm, header in entries]
+        proxy_blocks = [f"{header}\n{norm}" for norm, header, _flag in entries]
         proxy_text = "\n\n".join(proxy_blocks)
         try:
             text = banner.format(date=get_tehran_date() if show_date else "", count=len(entries), proxies=proxy_text)
@@ -2972,13 +2985,15 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
     # Glass mode: maximum 3 proxy buttons per row. Sponsor is always isolated
     # in the final row and never shares a row with proxy buttons.
     proxy_buttons = []
-    for i, (norm, header) in enumerate(entries):
+    for i, (norm, header, proxy_flag) in enumerate(entries):
         style = ("primary", "success", "danger")[(i) % 3]
-        # The protocol is already shown in the header in glass mode; keep button text concise.
-        button_label = "پروکسی" if mode == 1 else f"پروکسی {i+1}"
+        # The button MUST reuse the exact flag already resolved for this proxy.
+        # This keeps header country and glass-button country perfectly consistent.
+        button_flag = proxy_flag if (country_display != 0 and proxy_flag and proxy_flag != "🌐") else ""
+        button_label = f"Proxy {button_flag}".strip()
         proxy_buttons.append(InlineKeyboardButton(button_label, url=norm, style=style))
     rows = [proxy_buttons[i:i+3] for i in range(0, len(proxy_buttons), 3)]
-    visible = "\n".join(header for _norm, header in entries)
+    visible = "\n".join(header for _norm, header, _flag in entries)
     try:
         text = banner.format(date=get_tehran_date() if show_date else "", count=len(entries), proxies=visible)
     except Exception:
@@ -3153,7 +3168,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
 
     proxy_with_ping = []
     if enable_proxies and new_proxies:
-        valid_proxies = [p for p in new_proxies if "t.me/proxy" in p.lower() or p.startswith("tg://proxy")]
+        valid_proxies = [p for p in new_proxies if is_telegram_proxy_url(p)]
         if valid_proxies:
             log.info(f"📊 Processing {len(valid_proxies)} proxies...")
             sem = asyncio.Semaphore(50)
@@ -6731,7 +6746,7 @@ async def process_manual_text(u, message, profile_id, is_document=False):
         config_chunks = [new_configs[i:i+max_post_cfg] for i in range(0, len(new_configs), max_post_cfg)]
         proxy_chunks = []
         if new_proxies:
-            valid_proxies = [p for p in new_proxies if "t.me/proxy" in p.lower() or p.startswith("tg://proxy")]
+            valid_proxies = [p for p in new_proxies if is_telegram_proxy_url(p)]
             if valid_proxies:
                 proxy_chunks = [valid_proxies[i:i+max_post_prx] for i in range(0, len(valid_proxies), max_post_prx)]
 

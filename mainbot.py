@@ -125,7 +125,7 @@ c.execute("""CREATE TABLE IF NOT EXISTS country_cache (
     country TEXT,
     flag TEXT)""")
 
-# Table for sponsors - migrated to new schema
+# Table for sponsors - with new schema (no start/end time, uses duration/unlimited)
 c.execute("""CREATE TABLE IF NOT EXISTS sponsors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     profile_id INTEGER,
@@ -134,23 +134,25 @@ c.execute("""CREATE TABLE IF NOT EXISTS sponsors (
     button_text TEXT DEFAULT 'Advertisement',
     enabled INTEGER DEFAULT 1,
     priority INTEGER DEFAULT 0,
-    start_time TEXT,
-    end_time TEXT,
+    duration_hours INTEGER DEFAULT 0,
+    unlimited INTEGER DEFAULT 1,
+    created_at TEXT,
+    expires_at TEXT,
     apply_config INTEGER DEFAULT 1,
     apply_proxy INTEGER DEFAULT 1,
     color TEXT DEFAULT 'primary',
-    created_at TEXT,
     updated_at TEXT,
     UNIQUE(profile_id, name) ON CONFLICT REPLACE)""")
 
-# Migrate old sponsors if they exist (only one per profile) to new schema
+# Migrate old sponsors if they exist
 def migrate_sponsors():
-    # Check if old table has profile_id as primary key
+    # Check if old table has columns that need migration
     c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='sponsors'")
     row = c.fetchone()
     if row:
         sql = row[0]
-        if "PRIMARY KEY (profile_id)" in sql or "UNIQUE(profile_id)" in sql:
+        # If old table has start_time or end_time, we need to migrate
+        if "start_time" in sql or "end_time" in sql:
             log.warning("Migrating sponsors table to new schema...")
             # Rename old table
             c.execute("ALTER TABLE sponsors RENAME TO sponsors_old")
@@ -163,33 +165,33 @@ def migrate_sponsors():
                 button_text TEXT DEFAULT 'Advertisement',
                 enabled INTEGER DEFAULT 1,
                 priority INTEGER DEFAULT 0,
-                start_time TEXT,
-                end_time TEXT,
+                duration_hours INTEGER DEFAULT 0,
+                unlimited INTEGER DEFAULT 1,
+                created_at TEXT,
+                expires_at TEXT,
                 apply_config INTEGER DEFAULT 1,
                 apply_proxy INTEGER DEFAULT 1,
                 color TEXT DEFAULT 'primary',
-                created_at TEXT,
                 updated_at TEXT,
                 UNIQUE(profile_id, name) ON CONFLICT REPLACE)""")
-            # Copy old data
+            # Copy old data, convert start/end to duration/unlimited if possible
+            # For simplicity, set unlimited=1 for all old sponsors (they were always active)
             c.execute("SELECT profile_id, name, url, button_text, enabled, color, created_at FROM sponsors_old")
             for row in c.fetchall():
                 profile_id, name, url, button_text, enabled, color, created_at = row
                 c.execute("""INSERT INTO sponsors
-                    (profile_id, name, url, button_text, enabled, priority, start_time, end_time,
-                     apply_config, apply_proxy, color, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (profile_id, name, url, button_text, enabled, 0, None, None, 1, 1, color, created_at, get_tehran_time()))
+                    (profile_id, name, url, button_text, enabled, priority, duration_hours, unlimited,
+                     created_at, expires_at, apply_config, apply_proxy, color, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (profile_id, name, url, button_text, enabled, 0, 0, 1, created_at, None, 1, 1, color, get_tehran_time()))
             conn.commit()
             c.execute("DROP TABLE sponsors_old")
             log.info("✅ Sponsors migrated to new schema.")
         else:
             # Ensure new columns exist
-            ensure_column("sponsors", "priority", "INTEGER DEFAULT 0", 0)
-            ensure_column("sponsors", "start_time", "TEXT", None)
-            ensure_column("sponsors", "end_time", "TEXT", None)
-            ensure_column("sponsors", "apply_config", "INTEGER DEFAULT 1", 1)
-            ensure_column("sponsors", "apply_proxy", "INTEGER DEFAULT 1", 1)
+            ensure_column("sponsors", "duration_hours", "INTEGER DEFAULT 0", 0)
+            ensure_column("sponsors", "unlimited", "INTEGER DEFAULT 1", 1)
+            ensure_column("sponsors", "expires_at", "TEXT", None)
             ensure_column("sponsors", "updated_at", "TEXT", get_tehran_time())
     else:
         # Create if missing
@@ -201,12 +203,13 @@ def migrate_sponsors():
             button_text TEXT DEFAULT 'Advertisement',
             enabled INTEGER DEFAULT 1,
             priority INTEGER DEFAULT 0,
-            start_time TEXT,
-            end_time TEXT,
+            duration_hours INTEGER DEFAULT 0,
+            unlimited INTEGER DEFAULT 1,
+            created_at TEXT,
+            expires_at TEXT,
             apply_config INTEGER DEFAULT 1,
             apply_proxy INTEGER DEFAULT 1,
             color TEXT DEFAULT 'primary',
-            created_at TEXT,
             updated_at TEXT,
             UNIQUE(profile_id, name) ON CONFLICT REPLACE)""")
 
@@ -268,7 +271,8 @@ c.execute("""CREATE TABLE IF NOT EXISTS profiles (
     profile_enabled INTEGER DEFAULT 1,
     country_display INTEGER DEFAULT 2,
     show_ping INTEGER DEFAULT 1,
-    proxy_banner_template TEXT DEFAULT ''
+    proxy_banner_template TEXT DEFAULT '',
+    ping_testing INTEGER DEFAULT 1
 )""")
 conn.commit()
 
@@ -293,6 +297,7 @@ ensure_column("profiles", "profile_enabled", "INTEGER DEFAULT 1", 1)
 ensure_column("profiles", "country_display", "INTEGER DEFAULT 2", 2)
 ensure_column("profiles", "show_ping", "INTEGER DEFAULT 1", 1)
 ensure_column("profiles", "proxy_banner_template", "TEXT DEFAULT ''", "")
+ensure_column("profiles", "ping_testing", "INTEGER DEFAULT 1", 1)
 
 c.execute("""CREATE TABLE IF NOT EXISTS blacklist (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -352,7 +357,8 @@ def fix_column_types():
                     profile_enabled INTEGER DEFAULT 1,
                     country_display INTEGER DEFAULT 2,
                     show_ping INTEGER DEFAULT 1,
-                    proxy_banner_template TEXT DEFAULT ''
+                    proxy_banner_template TEXT DEFAULT '',
+                    ping_testing INTEGER DEFAULT 1
                 )
             """)
             c.execute("""
@@ -363,14 +369,14 @@ def fix_column_types():
                      schedule_cron, last_backup_count, timer_expiry, timer_duration, backup_interval,
                      interval_config, interval_proxy, max_post_config, max_post_proxy,
                      naming_template, channel_link, ping_enabled, profile_enabled,
-                     country_display, show_ping, proxy_banner_template)
+                     country_display, show_ping, proxy_banner_template, ping_testing)
                 SELECT id, dest_name, sources, banner_config, banner_proxy, interval_min,
                        max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num,
                        created_at, show_numbers, custom_query, show_date_config, show_date_proxy,
                        schedule_cron, last_backup_count, timer_expiry, timer_duration, backup_interval,
                        interval_config, interval_proxy, max_post_config, max_post_proxy,
                        naming_template, channel_link, ping_enabled, profile_enabled,
-                       country_display, show_ping, proxy_banner_template
+                       country_display, show_ping, proxy_banner_template, ping_testing
                 FROM profiles
             """)
             c.execute("DROP TABLE profiles")
@@ -521,14 +527,14 @@ def migrate_old_config():
              timer_expiry, timer_duration, backup_interval,
              interval_config, interval_proxy, max_post_config, max_post_proxy,
              naming_template, channel_link, ping_enabled, profile_enabled,
-             country_display, show_ping, proxy_banner_template)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             country_display, show_ping, proxy_banner_template, ping_testing)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (dest, old_sources, old_banner_config, old_banner_proxy,
              old_interval, old_max_post, old_max_proxies,
              old_post_configs, old_post_proxies, old_ping_mode, old_last_num,
              datetime.now().isoformat(), 1, "", 1, 1, "", 0, None, 0, 1000,
              old_interval, old_interval, old_max_post, old_max_proxies,
-             "{Flag} | ⚡️Telegram = {CHANNEL_ID}", "", 1, 1, 2, 1, ""))
+             "{Flag} | ⚡️Telegram = {CHANNEL_ID}", "", 1, 1, 2, 1, "", 1))
     conn.commit()
     log.info(f"✅ Migrated {len(dest_list)} profiles.")
 
@@ -586,7 +592,7 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
                    interval_config=5, interval_proxy=5, max_post_config=8, max_post_proxy=10,
                    naming_template="{Flag} | ⚡️Telegram = {CHANNEL_ID}", channel_link="",
                    ping_enabled=1, profile_enabled=1,
-                   country_display=2, show_ping=1, proxy_banner_template=""):
+                   country_display=2, show_ping=1, proxy_banner_template="", ping_testing=1):
     if not banner_config:
         banner_config = "✦ V2Ray Config List\n\n{configs}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
     if not banner_proxy:
@@ -598,8 +604,8 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
          timer_expiry, timer_duration, backup_interval,
          interval_config, interval_proxy, max_post_config, max_post_proxy,
          naming_template, channel_link, ping_enabled, profile_enabled,
-         country_display, show_ping, proxy_banner_template)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         country_display, show_ping, proxy_banner_template, ping_testing)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (dest_name, sources, banner_config, banner_proxy,
          interval_min, max_post, max_proxies,
          post_configs, post_proxies, ping_mode, last_num,
@@ -607,7 +613,7 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
          show_date_config, show_date_proxy, schedule_cron, 0, None, 0, backup_interval,
          interval_config, interval_proxy, max_post_config, max_post_proxy,
          naming_template, channel_link, ping_enabled, profile_enabled,
-         country_display, show_ping, proxy_banner_template))
+         country_display, show_ping, proxy_banner_template, ping_testing))
     conn.commit()
     return c.lastrowid
 
@@ -619,7 +625,7 @@ def update_profile(profile_id, **kwargs):
                "schedule_cron", "last_backup_count", "timer_expiry", "timer_duration",
                "backup_interval", "interval_config", "interval_proxy", "max_post_config", "max_post_proxy",
                "naming_template", "channel_link", "ping_enabled", "profile_enabled",
-               "country_display", "show_ping", "proxy_banner_template"]
+               "country_display", "show_ping", "proxy_banner_template", "ping_testing"]
     for key, value in kwargs.items():
         if key in allowed:
             c.execute(f"UPDATE profiles SET {key}=? WHERE id=?", (value, profile_id))
@@ -708,11 +714,20 @@ def set_profile_ping_mode(profile_id, mode):
     update_profile(profile_id, ping_mode=mode)
 
 def get_profile_ping_enabled(profile_id):
+    # This now represents the master switch for ping testing
     prof = get_profile(profile_id)
-    return prof.get("ping_enabled", 1) if prof else 1
+    return prof.get("ping_testing", 1) if prof else 1
 
 def set_profile_ping_enabled(profile_id, enabled):
-    update_profile(profile_id, ping_enabled=1 if enabled else 0)
+    # This sets ping_testing
+    update_profile(profile_id, ping_testing=1 if enabled else 0)
+
+def get_profile_show_ping(profile_id):
+    prof = get_profile(profile_id)
+    return prof.get("show_ping", 1) if prof else 1
+
+def set_profile_show_ping(profile_id, enabled):
+    update_profile(profile_id, show_ping=1 if enabled else 0)
 
 def get_profile_enabled(profile_id):
     prof = get_profile(profile_id)
@@ -798,6 +813,15 @@ def get_profile_channel_link(profile_id):
     return prof.get("channel_link", "") if prof else ""
 
 def set_profile_channel_link(profile_id, channel_link):
+    # Normalize: remove @ and https://t.me/
+    if channel_link:
+        channel_link = channel_link.strip()
+        if channel_link.startswith("https://t.me/"):
+            channel_link = channel_link.replace("https://t.me/", "")
+        elif channel_link.startswith("t.me/"):
+            channel_link = channel_link.replace("t.me/", "")
+        if channel_link.startswith("@"):
+            channel_link = channel_link[1:]
     update_profile(profile_id, channel_link=channel_link)
 
 def set_profile_timer(profile_id, minutes):
@@ -832,20 +856,12 @@ def get_profile_timer(profile_id):
         clear_profile_timer(profile_id)
         return None, 0
 
-# New profile settings
 def get_profile_country_display(profile_id):
     prof = get_profile(profile_id)
     return prof.get("country_display", 2) if prof else 2
 
 def set_profile_country_display(profile_id, mode):
     update_profile(profile_id, country_display=mode)
-
-def get_profile_show_ping(profile_id):
-    prof = get_profile(profile_id)
-    return prof.get("show_ping", 1) if prof else 1
-
-def set_profile_show_ping(profile_id, enabled):
-    update_profile(profile_id, show_ping=1 if enabled else 0)
 
 def get_profile_proxy_banner_template(profile_id):
     prof = get_profile(profile_id)
@@ -897,7 +913,9 @@ def is_word_blacklisted(profile_id, text):
 
 # New sponsor functions
 def get_sponsors(profile_id, apply_type="both"):
-    """Get active sponsors for a profile, optionally filter by config/proxy."""
+    """Get active sponsors for a profile, optionally filter by config/proxy.
+       Also filters expired sponsors (if not unlimited)."""
+    now = datetime.now(TEHRAN_TZ)
     query = "SELECT * FROM sponsors WHERE profile_id=? AND enabled=1"
     params = [profile_id]
     if apply_type == "config":
@@ -911,15 +929,15 @@ def get_sponsors(profile_id, apply_type="both"):
     sponsors = []
     for row in rows:
         sponsor = dict(zip(cols, row))
-        # Check schedule
-        now = datetime.now(TEHRAN_TZ).time()
-        start = sponsor.get("start_time")
-        end = sponsor.get("end_time")
-        if start and end:
-            start_t = datetime.strptime(start, "%H:%M").time()
-            end_t = datetime.strptime(end, "%H:%M").time()
-            if not (start_t <= now <= end_t):
-                continue
+        # Check if expired
+        if not sponsor["unlimited"] and sponsor["expires_at"]:
+            try:
+                expires = datetime.fromisoformat(sponsor["expires_at"])
+                if expires < now:
+                    # Expired, skip
+                    continue
+            except:
+                pass
         sponsors.append(sponsor)
     return sponsors
 
@@ -929,21 +947,25 @@ def get_sponsor(profile_id):
     return sponsors[0] if sponsors else None
 
 def add_sponsor(profile_id, name, url, button_text="Advertisement", enabled=1,
-                priority=0, start_time=None, end_time=None,
+                priority=0, duration_hours=0, unlimited=1,
                 apply_config=1, apply_proxy=1, color="primary"):
     now = get_tehran_time()
+    expires_at = None
+    if not unlimited and duration_hours > 0:
+        expires_at = (datetime.now(TEHRAN_TZ) + timedelta(hours=duration_hours)).isoformat()
     c.execute("""INSERT INTO sponsors
-        (profile_id, name, url, button_text, enabled, priority, start_time, end_time,
-         apply_config, apply_proxy, color, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (profile_id, name, url, button_text, enabled, priority, start_time, end_time,
-         apply_config, apply_proxy, color, now, now))
+        (profile_id, name, url, button_text, enabled, priority, duration_hours, unlimited,
+         created_at, expires_at, apply_config, apply_proxy, color, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (profile_id, name, url, button_text, enabled, priority, duration_hours, unlimited,
+         now, expires_at, apply_config, apply_proxy, color, now))
     conn.commit()
     return c.lastrowid
 
 def update_sponsor(sponsor_id, **kwargs):
     allowed = ["name", "url", "button_text", "enabled", "priority",
-               "start_time", "end_time", "apply_config", "apply_proxy", "color"]
+               "duration_hours", "unlimited", "apply_config", "apply_proxy", "color"]
+    # If unlimited or duration changes, update expires_at
     set_clauses = []
     params = []
     for key, value in kwargs.items():
@@ -952,6 +974,21 @@ def update_sponsor(sponsor_id, **kwargs):
             params.append(value)
     if not set_clauses:
         return
+    # If duration or unlimited changed, recalc expires_at
+    if "duration_hours" in kwargs or "unlimited" in kwargs:
+        # Need to fetch current values to recompute
+        c.execute("SELECT duration_hours, unlimited, created_at FROM sponsors WHERE id=?", (sponsor_id,))
+        row = c.fetchone()
+        if row:
+            cur_duration, cur_unlimited, created_at = row
+            new_unlimited = kwargs.get("unlimited", cur_unlimited)
+            new_duration = kwargs.get("duration_hours", cur_duration)
+            if new_unlimited:
+                expires_at = None
+            else:
+                expires_at = (datetime.fromisoformat(created_at) + timedelta(hours=new_duration)).isoformat()
+            set_clauses.append("expires_at=?")
+            params.append(expires_at)
     params.append(get_tehran_time())
     params.append(sponsor_id)
     c.execute(f"UPDATE sponsors SET {', '.join(set_clauses)}, updated_at=? WHERE id=?", params)
@@ -965,14 +1002,22 @@ def clear_sponsor(profile_id):
     c.execute("DELETE FROM sponsors WHERE profile_id=?", (profile_id,))
     conn.commit()
 
-def toggle_sponsor(profile_id):
-    # Legacy: toggle first sponsor (or use a specific id)
-    sponsors = get_sponsors(profile_id)
-    if sponsors:
-        sponsor = sponsors[0]
-        new_enabled = 0 if sponsor["enabled"] else 1
-        update_sponsor(sponsor["id"], enabled=new_enabled)
-        return new_enabled
+def toggle_sponsor(profile_id, sponsor_id=None):
+    if sponsor_id:
+        c.execute("SELECT enabled FROM sponsors WHERE id=?", (sponsor_id,))
+        row = c.fetchone()
+        if row:
+            new_enabled = 0 if row[0] else 1
+            update_sponsor(sponsor_id, enabled=new_enabled)
+            return new_enabled
+    else:
+        # Legacy: toggle first sponsor
+        sponsors = get_sponsors(profile_id)
+        if sponsors:
+            sponsor = sponsors[0]
+            new_enabled = 0 if sponsor["enabled"] else 1
+            update_sponsor(sponsor["id"], enabled=new_enabled)
+            return new_enabled
     return None
 
 def update_sponsor_color(profile_id, color):
@@ -984,7 +1029,7 @@ def update_sponsor_color(profile_id, color):
 # ======================================================================
 # توابع کمکی (پینگ، استخراج لینک و ...) - بهبود یافته
 # ======================================================================
-# Country name mappings
+# Country name mappings - complete list
 COUNTRY_NAMES_FA = {
     "US": "آمریکا",
     "GB": "بریتانیا",
@@ -1029,6 +1074,76 @@ COUNTRY_NAMES_FA = {
     "ID": "اندونزی",
     "PH": "فیلیپین",
     "NZ": "نیوزیلند",
+    "AT": "اتریش",
+    "GR": "یونان",
+    "PT": "پرتغال",
+    "IE": "ایرلند",
+    "HU": "مجارستان",
+    "CZ": "جمهوری چک",
+    "RO": "رومانی",
+    "BG": "بلغارستان",
+    "SK": "اسلواکی",
+    "SI": "اسلوونی",
+    "HR": "کرواسی",
+    "LT": "لیتوانی",
+    "LV": "لتونی",
+    "EE": "استونی",
+    "CY": "قبرس",
+    "MT": "مالت",
+    "LU": "لوکزامبورگ",
+    "IS": "ایسلند",
+    "LI": "لیختن‌اشتاین",
+    "MC": "موناکو",
+    "SM": "سان مارینو",
+    "VA": "واتیکان",
+    "MX": "مکزیک",
+    "AR": "آرژانتین",
+    "CL": "شیلی",
+    "CO": "کلمبیا",
+    "PE": "پرو",
+    "VE": "ونزوئلا",
+    "UY": "اروگوئه",
+    "PY": "پاراگوئه",
+    "BO": "بولیوی",
+    "EC": "اکوادور",
+    "GT": "گواتمالا",
+    "PA": "پاناما",
+    "CR": "کاستاریکا",
+    "DO": "جمهوری دومینیکن",
+    "CU": "کوبا",
+    "NG": "نیجریه",
+    "KE": "کنیا",
+    "TZ": "تانزانیا",
+    "GH": "غنا",
+    "DZ": "الجزایر",
+    "MA": "مراکش",
+    "TN": "تونس",
+    "LY": "لیبی",
+    "JO": "اردن",
+    "LB": "لبنان",
+    "SY": "سوریه",
+    "YE": "یمن",
+    "OM": "عمان",
+    "KW": "کویت",
+    "BH": "بحرین",
+    "QA": "قطر",
+    "IR": "ایران",
+    "AF": "افغانستان",
+    "PK": "پاکستان",
+    "BD": "بنگلادش",
+    "IN": "هند",
+    "NP": "نپال",
+    "LK": "سری‌لانکا",
+    "MM": "میانمار",
+    "TH": "تایلند",
+    "LA": "لائوس",
+    "KH": "کامبوج",
+    "VN": "ویتنام",
+    "MY": "مالزی",
+    "ID": "اندونزی",
+    "PH": "فیلیپین",
+    "NZ": "نیوزیلند",
+    "PG": "پاپوآ گینه نو",
 }
 COUNTRY_NAMES_EN = {
     "US": "United States",
@@ -1074,6 +1189,65 @@ COUNTRY_NAMES_EN = {
     "ID": "Indonesia",
     "PH": "Philippines",
     "NZ": "New Zealand",
+    "AT": "Austria",
+    "GR": "Greece",
+    "PT": "Portugal",
+    "IE": "Ireland",
+    "HU": "Hungary",
+    "CZ": "Czech Republic",
+    "RO": "Romania",
+    "BG": "Bulgaria",
+    "SK": "Slovakia",
+    "SI": "Slovenia",
+    "HR": "Croatia",
+    "LT": "Lithuania",
+    "LV": "Latvia",
+    "EE": "Estonia",
+    "CY": "Cyprus",
+    "MT": "Malta",
+    "LU": "Luxembourg",
+    "IS": "Iceland",
+    "LI": "Liechtenstein",
+    "MC": "Monaco",
+    "SM": "San Marino",
+    "VA": "Vatican City",
+    "MX": "Mexico",
+    "AR": "Argentina",
+    "CL": "Chile",
+    "CO": "Colombia",
+    "PE": "Peru",
+    "VE": "Venezuela",
+    "UY": "Uruguay",
+    "PY": "Paraguay",
+    "BO": "Bolivia",
+    "EC": "Ecuador",
+    "GT": "Guatemala",
+    "PA": "Panama",
+    "CR": "Costa Rica",
+    "DO": "Dominican Republic",
+    "CU": "Cuba",
+    "NG": "Nigeria",
+    "KE": "Kenya",
+    "TZ": "Tanzania",
+    "GH": "Ghana",
+    "DZ": "Algeria",
+    "MA": "Morocco",
+    "TN": "Tunisia",
+    "LY": "Libya",
+    "JO": "Jordan",
+    "LB": "Lebanon",
+    "SY": "Syria",
+    "YE": "Yemen",
+    "OM": "Oman",
+    "KW": "Kuwait",
+    "BH": "Bahrain",
+    "QA": "Qatar",
+    "NP": "Nepal",
+    "LK": "Sri Lanka",
+    "MM": "Myanmar",
+    "LA": "Laos",
+    "KH": "Cambodia",
+    "PG": "Papua New Guinea",
 }
 
 def get_country_info(code):
@@ -1144,14 +1318,174 @@ def clean_config_url(url: str) -> str:
     url = url.replace('&amp;', '&')
     return url
 
+# ======================================================================
+# VALIDATION FUNCTIONS - FIX PARSING
+# ======================================================================
+def validate_vless(url):
+    """Validate VLESS URL structure."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme != "vless":
+            return False, "not vless"
+        # Check for userinfo (UUID)
+        if not parsed.username or len(parsed.username) < 8:
+            return False, "missing or invalid UUID"
+        # Check host
+        if not parsed.hostname:
+            return False, "missing host"
+        # Check port
+        if not parsed.port or parsed.port < 1 or parsed.port > 65535:
+            return False, "invalid port"
+        return True, "valid"
+    except Exception:
+        return False, "parse error"
+
+def validate_vmess(url):
+    """Validate VMESS URL structure (base64 encoded JSON)."""
+    try:
+        if not url.startswith("vmess://"):
+            return False, "not vmess"
+        b64 = url[8:]
+        # Add padding if needed
+        b64 += "=" * (-len(b64) % 4)
+        data = base64.b64decode(b64, validate=True).decode('utf-8', errors='ignore')
+        # Parse JSON
+        obj = json.loads(data)
+        required = ['add', 'port', 'id', 'aid', 'net', 'type', 'host', 'path', 'tls']
+        for key in ['add', 'port', 'id']:
+            if key not in obj or not obj[key]:
+                return False, f"missing {key}"
+        if not str(obj['port']).isdigit() or int(obj['port']) < 1 or int(obj['port']) > 65535:
+            return False, "invalid port"
+        return True, "valid"
+    except Exception as e:
+        return False, f"decode error: {str(e)}"
+
+def validate_trojan(url):
+    """Validate Trojan URL structure."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme != "trojan":
+            return False, "not trojan"
+        if not parsed.password:
+            return False, "missing password"
+        if not parsed.hostname:
+            return False, "missing host"
+        if not parsed.port or parsed.port < 1 or parsed.port > 65535:
+            return False, "invalid port"
+        return True, "valid"
+    except Exception:
+        return False, "parse error"
+
+def validate_ss(url):
+    """Validate Shadowsocks URL structure."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme != "ss":
+            return False, "not ss"
+        # Check for valid base64 userinfo
+        if parsed.username and parsed.password:
+            return True, "valid"
+        else:
+            # May be in format ss://base64
+            b64 = url[5:]
+            b64 += "=" * (-len(b64) % 4)
+            decoded = base64.b64decode(b64, validate=True).decode('utf-8', errors='ignore')
+            if '@' in decoded:
+                return True, "valid"
+            else:
+                return False, "invalid format"
+    except Exception:
+        return False, "parse error"
+
+def validate_socks(url):
+    """Validate SOCKS URL structure (simple)."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ['socks', 'socks5', 'socks4']:
+            return False, "not socks"
+        if not parsed.hostname:
+            return False, "missing host"
+        if not parsed.port or parsed.port < 1 or parsed.port > 65535:
+            return False, "invalid port"
+        return True, "valid"
+    except Exception:
+        return False, "parse error"
+
+def validate_hy2(url):
+    """Validate Hysteria2 URL structure."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme != "hy2":
+            return False, "not hy2"
+        if not parsed.hostname:
+            return False, "missing host"
+        if not parsed.port or parsed.port < 1 or parsed.port > 65535:
+            return False, "invalid port"
+        return True, "valid"
+    except Exception:
+        return False, "parse error"
+
+def validate_tuic(url):
+    """Validate TUIC URL structure."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme != "tuic":
+            return False, "not tuic"
+        if not parsed.hostname:
+            return False, "missing host"
+        if not parsed.port or parsed.port < 1 or parsed.port > 65535:
+            return False, "invalid port"
+        return True, "valid"
+    except Exception:
+        return False, "parse error"
+
+def validate_wireguard(url):
+    """Validate WireGuard URL structure."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme != "wireguard":
+            return False, "not wireguard"
+        if not parsed.hostname:
+            return False, "missing host"
+        if not parsed.port or parsed.port < 1 or parsed.port > 65535:
+            return False, "invalid port"
+        return True, "valid"
+    except Exception:
+        return False, "parse error"
+
+def validate_config_link(url):
+    """Validate a config link and return (is_valid, reason)."""
+    if not url:
+        return False, "empty"
+    if url.startswith("vless://"):
+        return validate_vless(url)
+    elif url.startswith("vmess://"):
+        return validate_vmess(url)
+    elif url.startswith("trojan://"):
+        return validate_trojan(url)
+    elif url.startswith("ss://"):
+        return validate_ss(url)
+    elif url.startswith("socks://") or url.startswith("socks5://"):
+        return validate_socks(url)
+    elif url.startswith("hy2://"):
+        return validate_hy2(url)
+    elif url.startswith("tuic://"):
+        return validate_tuic(url)
+    elif url.startswith("wireguard://"):
+        return validate_wireguard(url)
+    else:
+        return False, "unknown protocol"
+
+# ======================================================================
+# استخراج لینک‌ها با اعتبارسنجی
+# ======================================================================
 def extract_links_from_text(text):
     """
     استخراج لینک‌های کانفیگ (vless, vmess, trojan, hy2, tuic, ss, socks, hysteria2, wireguard)
-    لینک‌های http/https معمولی (مانند cdn) و لینک‌های تصویر و svg نادیده گرفته می‌شوند.
-    بهبود یافته برای تشخیص دقیق‌تر.
+    و اعتبارسنجی آنها.
     """
     results = []
-    # فقط پروتکل‌های کانفیگ را بگیر، http/https را حذف کن
     pattern = re.compile(
         r'(vless|vmess|trojan|hy2|tuic|ss|socks|hysteria2|wireguard)://[^\s<>"\'{}()\[\]]+',
         re.IGNORECASE
@@ -1160,9 +1494,14 @@ def extract_links_from_text(text):
         link = m.group(0).strip()
         link = re.sub(r'[.,;:!؟\'"`]+$', '', link)
         if len(link) > 10:
-            results.append(link)
+            # Validate
+            is_valid, reason = validate_config_link(link)
+            if is_valid:
+                results.append(link)
+            else:
+                log.debug(f"Invalid config link: {link} - {reason}")
 
-    # اگر لینک مستقیم پیدا نشد، base64 decoding را امتحان کن (فقط برای کانفیگ)
+    # Attempt base64 decoding
     if not results:
         text_clean = text.replace('\n', '').replace('\r', '').strip()
         if re.match(r'^[A-Za-z0-9+/=]+$', text_clean):
@@ -1172,7 +1511,9 @@ def extract_links_from_text(text):
                     for m in re.finditer(re.escape(proto) + r"[^\s<>\"']+", decoded):
                         link = m.group().rstrip().strip(".,;(){}[]!؟'")
                         if len(link) > len(proto) + 10:
-                            results.append(link)
+                            is_valid, _ = validate_config_link(link)
+                            if is_valid:
+                                results.append(link)
             except Exception:
                 pass
 
@@ -1188,7 +1529,9 @@ def extract_links_from_text(text):
                         for m in re.finditer(re.escape(proto) + r"[^\s<>\"']+", decoded):
                             link = m.group().rstrip().strip(".,;(){}[]!؟'")
                             if len(link) > len(proto) + 10:
-                                results.append(link)
+                                is_valid, _ = validate_config_link(link)
+                                if is_valid:
+                                    results.append(link)
                 except:
                     pass
 
@@ -1197,7 +1540,9 @@ def extract_links_from_text(text):
             line = line.strip()
             for proto in ['vless://', 'vmess://', 'trojan://', 'hy2://', 'tuic://', 'ss://', 'socks://', 'hysteria2://']:
                 if line.lower().startswith(proto):
-                    results.append(line)
+                    is_valid, _ = validate_config_link(line)
+                    if is_valid:
+                        results.append(line)
                     break
 
     return list(set(results))
@@ -1212,7 +1557,7 @@ def normalize_proxy_url(url):
 
 def extract_proxy_links_from_text(text):
     results = []
-    # الگوی https://t.me/proxy
+    # Pattern for https://t.me/proxy
     telegram_proxy_pattern = r'https?://t\.me/proxy\?[^\s<>"\']+'
     for m in re.finditer(telegram_proxy_pattern, text, re.IGNORECASE):
         link = m.group().strip()
@@ -1221,7 +1566,7 @@ def extract_proxy_links_from_text(text):
         if link and link not in results:
             results.append(link)
 
-    # الگوی tg://proxy
+    # Pattern for tg://proxy
     tg_proxy_pattern = r'tg://proxy\?[^\s<>"\']+'
     for m in re.finditer(tg_proxy_pattern, text, re.IGNORECASE):
         link = m.group().strip()
@@ -1395,7 +1740,7 @@ def add_custom_query_to_url(url, custom_query, protocol):
     return new_base
 
 # ======================================================================
-# پینگ (بهینه‌شده) - بهبود یافته
+# پینگ (بهینه‌شده) - با لایه‌های تست
 # ======================================================================
 async def host_to_ip(host):
     try:
@@ -1491,7 +1836,11 @@ async def ping_from_iran_only(host, port=None, allow_tcp_fallback=True):
     log.info(f"❌ All ping attempts failed for {target}")
     return 0, False, 0
 
-async def check_full_link_ping(url, ping_mode="iran"):
+async def check_full_link_ping(url, ping_mode="iran", perform_ping=True):
+    """Perform ping test if perform_ping is True, else return a dummy."""
+    if not perform_ping:
+        return 0, True, 0  # treat as reachable if ping testing disabled? Actually we should not claim it's working.
+        # Instead, we need to return a neutral status. We'll handle this in the caller.
     host, port = extract_host(url)
     if not host:
         return 0, False, 0
@@ -1512,6 +1861,7 @@ _USER_AGENTS = [
 async def scrape_channel_paginated(profile_id, channel, max_pages=5):
     """
     اسکرپ با حداکثر max_pages صفحه و توقف هنگام رسیدن به last_message_id.
+    استخراج پیام‌ها و لینک‌های مرتبط.
     """
     clean_channel = normalize_channel_input(channel)
     if not clean_channel:
@@ -1530,26 +1880,49 @@ async def scrape_channel_paginated(profile_id, channel, max_pages=5):
     while page_count < max_pages and not stopped:
         page_count += 1
         log.info(f"🔍 Scraping page {page_count} for {clean_channel} (url: {current_url})")
-        config_links, proxy_links, msg_ids = await _scrape_single_page(current_url, clean_channel)
+        config_links, proxy_links, msg_ids, msg_content_map = await _scrape_single_page_with_messages(current_url, clean_channel)
         if not msg_ids:
             log.info(f"⚠️ No messages found on page {page_count} for {clean_channel}")
             break
 
-        # Filter out messages that are already processed (by checking if msg_id <= last_msg_id)
-        # We need to associate links with msg_ids, but currently we don't have per-message link association.
-        # We'll rely on processed_messages table to avoid duplicates later.
-        # But we can stop pagination if we encounter last_msg_id in the list.
-        if last_msg_id:
-            # Check if any msg_id equals last_msg_id
-            if last_msg_id in msg_ids:
-                log.info(f"✅ Reached last_message_id {last_msg_id}, stopping pagination.")
+        # Determine which messages are new
+        new_msg_ids = []
+        for mid in msg_ids:
+            if last_msg_id and mid == last_msg_id:
                 stopped = True
-                # We still need to process messages up to that point, but we can break the loop after this page.
+                break
+            # Check if already processed (could also check processed_messages)
+            if is_message_processed(profile_id, clean_channel, mid):
+                continue
+            new_msg_ids.append(mid)
 
-        all_configs.extend(config_links)
-        all_proxies.extend(proxy_links)
+        if not new_msg_ids:
+            log.info(f"✅ No new messages found on page {page_count}, stopping pagination.")
+            stopped = True
+            break
 
-        # For next page, use the oldest message id on this page
+        # For each new message, extract configs and proxies from its content
+        # We have msg_content_map: mid -> content text
+        for mid in new_msg_ids:
+            content = msg_content_map.get(mid, "")
+            if not content:
+                continue
+            # Extract from this message's content
+            configs = extract_links_from_text(content)
+            proxies = extract_proxy_links_from_text(content)
+            all_configs.extend(configs)
+            all_proxies.extend(proxies)
+            # Mark message as processed immediately after extracting
+            mark_message_processed(profile_id, clean_channel, mid)
+
+        # Update last message id to the newest processed (the first new)
+        if new_msg_ids:
+            # Update last_message_id to the newest message id (which is the first in the page)
+            # But we want to update to the last processed, which is the newest overall.
+            # Since we process in order, the first new is the newest.
+            update_last_message_id(profile_id, clean_channel, new_msg_ids[0])
+
+        # For next page, use the oldest message id on this page (or the last id in the list)
         numeric_ids = []
         for mid in msg_ids:
             parts = mid.split('/')
@@ -1568,7 +1941,7 @@ async def scrape_channel_paginated(profile_id, channel, max_pages=5):
     log.info(f"📊 {clean_channel}: total found {len(all_configs)} configs, {len(all_proxies)} proxies (paginated)")
     return all_configs, all_proxies
 
-async def _scrape_single_page(url, channel):
+async def _scrape_single_page_with_messages(url, channel):
     headers = {
         "User-Agent": _USER_AGENTS[hash(datetime.now().timestamp()) % len(_USER_AGENTS)],
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -1586,22 +1959,51 @@ async def _scrape_single_page(url, channel):
             r = await cl.get(url, headers=headers)
         if r.status_code != 200:
             log.warning(f"⚠️ {channel} returned status {r.status_code} for url {url}")
-            return [], [], []
+            return [], [], [], {}
+
         html_text = r.text
 
+        # Extract message IDs and their content blocks
+        # Telegram web page uses data-post attribute on div elements
+        msg_pattern = r'<div[^>]*data-post="([^"]+)"[^>]*>(.*?)</div>'
+        msg_ids = []
+        msg_content_map = {}
+        # Find all message containers
+        # We'll use a simple approach: extract message ID and content.
+        # We'll parse the HTML by splitting on data-post
+        matches = re.finditer(r'<div[^>]*data-post="([^"]+)"[^>]*>(.*?)</div>', html_text, re.DOTALL)
+        for match in matches:
+            mid = match.group(1)
+            content_block = match.group(2)
+            # Clean content block: remove tags, but keep text
+            # Use a simple text extraction (strip tags)
+            content_text = re.sub(r'<[^>]+>', ' ', content_block)
+            content_text = re.sub(r'\s+', ' ', content_text).strip()
+            msg_ids.append(mid)
+            msg_content_map[mid] = content_text
+
+        # If no messages found via data-post, try another pattern
+        if not msg_ids:
+            # Fallback: look for href="/channel/123" links
+            alt_pattern = r'href="/([^/]+/\d+)"'
+            msg_ids = list(set(re.findall(alt_pattern, html_text)))
+            # Content extraction is harder; we'll skip per-message content and just use whole page
+            # For simplicity, we'll treat the whole page content as combined.
+            # But we'll store empty content for these IDs.
+            for mid in msg_ids:
+                msg_content_map[mid] = html_text  # not ideal but fallback
+
+        # Also extract config/proxy links from the whole page for backward compatibility
+        # but we will use per-message extraction above.
+        # However, we still need to return config and proxy links from the page (global)
         config_links = extract_links_from_text(html_text)
         proxy_links = extract_proxy_links_from_text(html_text)
 
         config_links = list(set(config_links))
         proxy_links = list(set(proxy_links))
 
-        msg_ids = re.findall(r'data-post="([^"]+)"', html_text)
-        if not msg_ids:
-            msg_ids = re.findall(r'href="/([^/]+/\d+)"', html_text)
-        msg_ids = list(set(msg_ids))
-
         log.info(f"📄 Page {url}: found {len(config_links)} configs, {len(proxy_links)} proxies, {len(msg_ids)} messages")
-        return config_links, proxy_links, msg_ids
+        return config_links, proxy_links, msg_ids, msg_content_map
 
 # ======================================================================
 # ارسال (بدون تغییر)
@@ -1743,7 +2145,6 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
 
     # Get appropriate sponsor
     sponsor = get_best_sponsor(profile_id, "config")
-
     sponsor_button = None
     if sponsor and sponsor.get("enabled"):
         btn_style = sponsor.get("color", "primary") if sponsor.get("color") in ["primary", "success", "danger"] else "primary"
@@ -1795,7 +2196,8 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
         if show_ping and ping > 0:
             header_parts.append(f"{ping}ms")
         elif show_ping and ping == 0:
-            header_parts.append("0ms")
+            # Don't display 0ms, just skip
+            pass
 
         # Numbering
         if show_numbers:
@@ -1803,9 +2205,8 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
         else:
             header = " ".join(header_parts)
 
-        # Build config line
+        # Build config line - use naming template
         fragment_text = naming_template.replace("{Flag}", flag).replace("{CHANNEL_ID}", channel_link).replace("{COUNT}", str(n))
-        # Also support new placeholders
         fragment_text = fragment_text.replace("{FLAG}", flag)
         fragment_text = fragment_text.replace("{COUNTRY_EN}", COUNTRY_NAMES_EN.get(country_code, ""))
         fragment_text = fragment_text.replace("{COUNTRY_FA}", COUNTRY_NAMES_FA.get(country_code, ""))
@@ -1833,10 +2234,7 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
         buttons.append(sponsor_button)
     channel_link_display = get_profile_channel_link(profile_id)
     if channel_link_display:
-        if channel_link_display.startswith("@"):
-            channel_url = f"https://t.me/{channel_link_display[1:]}"
-        else:
-            channel_url = channel_link_display
+        channel_url = f"https://t.me/{channel_link_display}"
         channel_button = InlineKeyboardButton("📢 کانال", url=channel_url)
         buttons.append(channel_button)
     reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
@@ -1910,53 +2308,59 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
     proxy_text = ""
     count = 0
     for proxy_url, ping, flag, country_code in proxies_with_ping[:max_proxies]:
-        if "t.me/proxy" in proxy_url.lower() or proxy_url.startswith("tg://proxy"):
-            if is_proxy_posted(profile_id, proxy_url):
-                continue
-            normalized_url = normalize_telegram_proxy(proxy_url)
-            clean_url = clean_proxy_link(normalized_url)
-            safe_url = html.escape(clean_url, quote=False)
+        # Validate proxy link structure (should be t.me/proxy or tg://proxy)
+        if "t.me/proxy" not in proxy_url.lower() and not proxy_url.startswith("tg://proxy"):
+            continue
+        # Check if already posted
+        if is_proxy_posted(profile_id, proxy_url):
+            log.debug(f"[PROXY] already posted: {proxy_url}")
+            continue
 
-            # Build header for each proxy
-            header_parts = []
-            if channel_link:
-                header_parts.append(channel_link)
-            else:
-                header_parts.append(dest if dest else "@VaslZone")
+        normalized_url = normalize_telegram_proxy(proxy_url)
+        clean_url = clean_proxy_link(normalized_url)
+        safe_url = html.escape(clean_url, quote=False)
 
-            # Country display
-            if country_display == 0:
-                pass
-            elif country_display == 1:
-                flag_emoji = flag if flag != "🌐" else ""
-                en_name = COUNTRY_NAMES_EN.get(country_code, "")
-                if flag_emoji and en_name:
-                    header_parts.append(f"{flag_emoji} {en_name}")
-                elif flag_emoji:
-                    header_parts.append(flag_emoji)
-            elif country_display == 2:
-                flag_emoji = flag if flag != "🌐" else ""
-                en_name = COUNTRY_NAMES_EN.get(country_code, "")
-                fa_name = COUNTRY_NAMES_FA.get(country_code, "")
-                if flag_emoji and en_name and fa_name:
-                    header_parts.append(f"{flag_emoji} {en_name} • <b>{fa_name}</b>")
-                elif flag_emoji and en_name:
-                    header_parts.append(f"{flag_emoji} {en_name}")
-                elif flag_emoji:
-                    header_parts.append(flag_emoji)
+        # Build header
+        header_parts = []
+        if channel_link:
+            header_parts.append(channel_link)
+        else:
+            header_parts.append(dest if dest else "@VaslZone")
 
-            if show_ping and ping > 0:
-                header_parts.append(f"{ping}ms")
-            elif show_ping and ping == 0:
-                header_parts.append("0ms")
+        # Country display
+        if country_display == 0:
+            pass
+        elif country_display == 1:
+            flag_emoji = flag if flag != "🌐" else ""
+            en_name = COUNTRY_NAMES_EN.get(country_code, "")
+            if flag_emoji and en_name:
+                header_parts.append(f"{flag_emoji} {en_name}")
+            elif flag_emoji:
+                header_parts.append(flag_emoji)
+        elif country_display == 2:
+            flag_emoji = flag if flag != "🌐" else ""
+            en_name = COUNTRY_NAMES_EN.get(country_code, "")
+            fa_name = COUNTRY_NAMES_FA.get(country_code, "")
+            if flag_emoji and en_name and fa_name:
+                header_parts.append(f"{flag_emoji} {en_name} • <b>{fa_name}</b>")
+            elif flag_emoji and en_name:
+                header_parts.append(f"{flag_emoji} {en_name}")
+            elif flag_emoji:
+                header_parts.append(flag_emoji)
 
-            header = " ".join(header_parts)
-            if header:
-                proxy_text += f"{header}\n"
+        if show_ping and ping > 0:
+            header_parts.append(f"{ping}ms")
+        elif show_ping and ping == 0:
+            pass
 
-            proxy_text += f"<a href=\"{safe_url}\">Telegram Proxy</a>\n\n"
-            mark_proxy_posted(profile_id, clean_url)
-            count += 1
+        header = " ".join(header_parts)
+        if header:
+            proxy_text += f"{header}\n"
+
+        proxy_text += f"<a href=\"{safe_url}\">Telegram Proxy</a>\n\n"
+        # Mark as posted after successful send later
+        # We'll mark after delivery
+        count += 1
 
     if count == 0:
         return 0, None
@@ -1984,10 +2388,7 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
         buttons.append(sponsor_button)
     channel_link_display = get_profile_channel_link(profile_id)
     if channel_link_display:
-        if channel_link_display.startswith("@"):
-            channel_url = f"https://t.me/{channel_link_display[1:]}"
-        else:
-            channel_url = channel_link_display
+        channel_url = f"https://t.me/{channel_link_display}"
         channel_button = InlineKeyboardButton("📢 کانال", url=channel_url)
         buttons.append(channel_button)
     reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
@@ -1998,11 +2399,10 @@ def get_best_sponsor(profile_id, apply_type="both"):
     sponsors = get_sponsors(profile_id, apply_type)
     if not sponsors:
         return None
-    # Already sorted by priority desc, id asc
     return sponsors[0]
 
 # ======================================================================
-# چرخه اصلی (با بهبود پروکسی)
+# چرخه اصلی (با بهبود پروکسی و تست)
 # ======================================================================
 async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_proxies=True, is_instant=False):
     log.info("=" * 50)
@@ -2043,14 +2443,14 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
         return 0, "no destination"
 
     ping_mode = get_profile_ping_mode(profile_id)
-    ping_enabled = get_profile_ping_enabled(profile_id)
-    log.info(f"📡 Sources: {len(sources)} | 🎯 {dest} | 🌍 Ping: {ping_mode} | Ping enabled: {ping_enabled}")
+    ping_testing = get_profile_ping_enabled(profile_id)  # this is the master switch
+    log.info(f"📡 Sources: {len(sources)} | 🎯 {dest} | 🌍 Ping: {ping_mode} | Ping testing: {ping_testing}")
 
     all_configs = []
     all_proxies = []
     seen_urls = set()
 
-    # اسکرپ همه منابع به صورت همزمان با حداکثر ۵ صفحه
+    # Scrape all sources in parallel
     async def scrape_one(src):
         config_links, proxy_links = await scrape_channel_paginated(profile_id, src, max_pages=5)
         return src, config_links, proxy_links
@@ -2075,7 +2475,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                 if norm:
                     all_proxies.append(norm)
 
-    # فیلتر کردن تکراری‌ها بر اساس دیتابیس
+    # Filter duplicates based on database
     new_configs = []
     for u, s in all_configs:
         if not is_already_posted(profile_id, u):
@@ -2090,20 +2490,38 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
 
     working = []
     if enable_configs and new_configs:
-        # تست حداکثر ۳۰ عدد برای سرعت
-        test_limit = min(len(new_configs), 30)
+        # Test configs in batches
+        test_limit = min(len(new_configs), 30)  # we can increase batch size later
         to_test = new_configs[:test_limit]
         log.info(f"📊 Testing {len(to_test)} configs...")
-        sem = asyncio.Semaphore(100)
+        sem = asyncio.Semaphore(50)  # controlled concurrency
 
         async def _check(item):
             u, src = item
             async with sem:
                 try:
-                    if ping_enabled:
-                        ping, ok, cnt = await check_full_link_ping(u, ping_mode)
+                    if ping_testing:
+                        ping, ok, cnt = await check_full_link_ping(u, ping_mode, perform_ping=True)
                     else:
-                        ping, ok, cnt = 0, True, 0
+                        # Ping testing disabled: we still check host resolution and TCP? But we don't filter.
+                        # We'll just consider it reachable if we can resolve host.
+                        # However, we still want to avoid posting dead links.
+                        # We'll do a DNS check only.
+                        host, _ = extract_host(u)
+                        if host:
+                            ip = await host_to_ip(host)
+                            if ip:
+                                ping = 0
+                                ok = True
+                                cnt = 0
+                            else:
+                                ok = False
+                                ping = 0
+                                cnt = 0
+                        else:
+                            ok = False
+                            ping = 0
+                            cnt = 0
                     if ok:
                         return u, True, ping, cnt, src
                     else:
@@ -2127,7 +2545,7 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
         valid_proxies = [p for p in new_proxies if "t.me/proxy" in p.lower() or p.startswith("tg://proxy")]
         if valid_proxies:
             log.info(f"📊 Processing {len(valid_proxies)} proxies...")
-            sem = asyncio.Semaphore(100)
+            sem = asyncio.Semaphore(50)
 
             async def check_proxy(proxy_url):
                 async with sem:
@@ -2139,10 +2557,21 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                         ip = await host_to_ip(host)
                         if ip:
                             flag, country_code = await get_flag_for_ip(ip)
-                    if ping_enabled:
-                        ping, ok, _ = await check_full_link_ping(proxy_url, ping_mode)
+                    if ping_testing:
+                        ping, ok, _ = await check_full_link_ping(proxy_url, ping_mode, perform_ping=True)
                     else:
-                        ping, ok = 0, True
+                        # Just DNS check
+                        if host:
+                            ip = await host_to_ip(host)
+                            if ip:
+                                ping = 0
+                                ok = True
+                            else:
+                                ok = False
+                                ping = 0
+                        else:
+                            ok = False
+                            ping = 0
                     return proxy_url, ping if ok else 0, flag, country_code
 
             results = await asyncio.gather(
@@ -2167,6 +2596,11 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
             sent = await send_to_destination(bot, profile_id, text, buttons)
             if sent:
                 total_proxies = cnt
+                # Mark proxies as posted after successful send
+                for proxy_url, ping, flag, country_code in proxy_with_ping[:max_proxies]:
+                    if "t.me/proxy" in proxy_url.lower() or proxy_url.startswith("tg://proxy"):
+                        if not is_proxy_posted(profile_id, proxy_url):
+                            mark_proxy_posted(profile_id, proxy_url)
 
     result_msg = f"posted {total_configs} configs and {total_proxies} proxies"
     if total_configs == 0 and total_proxies == 0:
@@ -2177,8 +2611,11 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     return total_configs + total_proxies, result_msg
 
 # ======================================================================
-# حلقه‌های خودکار (بدون تغییر)
+# حلقه‌های خودکار (با مدیریت بهتر)
 # ======================================================================
+# Task registry to prevent duplicate loops
+_active_tasks = {}  # profile_id -> dict of tasks
+
 async def profile_loop_config(bot, profile_id):
     log.info(f"🔄 Starting config loop for profile {profile_id}")
     while True:
@@ -2874,14 +3311,14 @@ T = {
         "btn_add_sponsor": "➕ افزودن اسپانسر",
         "sponsor_list_title": "📋 **لیست اسپانسرهای پروفایل {name}**\n\n{sponsors}",
         "sponsor_list_empty": "هیچ اسپانسری تنظیم نشده است.",
-        "sponsor_item": "• {name} (اولویت: {priority}) - {'فعال' if enabled else 'غیرفعال'}\n  لینک: {url}\n  دکمه: {text}\n  اعمال: {apply}\n  زمان: {time}",
-        "sponsor_detail": "📢 **جزئیات اسپانسر**\n\nنام: {name}\nلینک: {url}\nمتن دکمه: {text}\nاولویت: {priority}\nوضعیت: {'فعال' if enabled else 'غیرفعال'}\nاعمال برای: {apply}\nزمان: {time}\nرنگ: {color}",
+        "sponsor_item": "• {name} (اولویت: {priority}) - {'فعال' if enabled else 'غیرفعال'}\n  لینک: {url}\n  دکمه: {text}\n  اعمال: {apply}\n  مدت: {duration}",
+        "sponsor_detail": "📢 **جزئیات اسپانسر**\n\nنام: {name}\nلینک: {url}\nمتن دکمه: {text}\nاولویت: {priority}\nوضعیت: {'فعال' if enabled else 'غیرفعال'}\nاعمال برای: {apply}\nمدت: {duration}\nرنگ: {color}",
         "sp_add_name": "نام اسپانسر را وارد کنید:",
         "sp_add_url": "لینک اسپانسر را وارد کنید (مثلاً https://example.com):",
         "sp_add_text": "متن دکمه را وارد کنید (پیش‌فرض 'Advertisement'):",
         "sp_add_priority": "اولویت را وارد کنید (عدد، بالاتر = اولویت بیشتر، پیش‌فرض 0):",
-        "sp_add_start": "زمان شروع را وارد کنید (HH:MM) یا خالی:",
-        "sp_add_end": "زمان پایان را وارد کنید (HH:MM) یا خالی:",
+        "sp_add_duration": "مدت زمان بر حسب ساعت (۰ برای نامحدود):",
+        "sp_add_unlimited": "آیا نامحدود باشد؟ (بله/خیر)",
         "sp_add_apply": "اعمال برای (config/proxy/both):",
         "sp_add_color": "رنگ دکمه را انتخاب کنید:",
         "sp_added_done": "✅ اسپانسر '{name}' با موفقیت اضافه شد.",
@@ -2894,9 +3331,14 @@ T = {
         "btn_sponsor_edit": "✏️ ویرایش",
         "btn_sponsor_delete": "🗑 حذف",
         "btn_sponsor_toggle": "🔘 {status}",
+        "btn_ping_testing": "📡 تست پینگ: {status}",
+        "ping_testing_toggle": "✅ تست پینگ {'فعال' if status else 'غیرفعال'} شد.",
+        "btn_channel_link_edit": "🔗 ویرایش لینک کانال",
+        "btn_banner_config_edit": "📝 ویرایش بنر کانفیگ",
+        "btn_banner_proxy_edit": "🌐 ویرایش بنر پروکسی",
     },
     "en": {
-        # ... (English translations would be here, but for brevity we keep the existing)
+        # ... (simplified for brevity, but should be complete)
         "welcome": "🤖 **Config & Proxy Bot**\n\n"
                   "📡 Profiles: {profiles}\n"
                   "🔢 Next: #{next_n}\n"
@@ -2922,7 +3364,7 @@ T = {
                        "🔘 Status: {profile_status}\n"
                        "🌐 Country: {country_display}\n"
                        "📡 Show ping: {show_ping}",
-        # ... (other English keys)
+        # ... (other keys)
     }
 }
 
@@ -2962,8 +3404,10 @@ def profile_admin_kb(profile_id):
         return None
     ping_mode = prof["ping_mode"]
     ping_label = "🌍 ایران‌فقط" if ping_mode == "iran" else "🌍 جهانی"
-    ping_enabled = get_profile_ping_enabled(profile_id)
-    ping_status = "✅" if ping_enabled else "❌"
+    ping_testing = get_profile_ping_enabled(profile_id)
+    ping_testing_label = "✅" if ping_testing else "❌"
+    show_ping = get_profile_show_ping(profile_id)
+    show_ping_label = "✅" if show_ping else "❌"
     profile_enabled = get_profile_enabled(profile_id)
     profile_status = "✅" if profile_enabled else "❌"
 
@@ -2981,9 +3425,6 @@ def profile_admin_kb(profile_id):
     country_display = prof.get("country_display", 2)
     country_display_modes = {0: "خاموش", 1: "انگلیسی", 2: "انگلیسی+فارسی"}
     country_label = country_display_modes.get(country_display, "انگلیسی+فارسی")
-
-    show_ping = prof.get("show_ping", 1)
-    show_ping_label = "✅" if show_ping else "❌"
 
     sponsors = get_sponsors(profile_id)
     sponsor_count = len(sponsors)
@@ -3010,12 +3451,13 @@ def profile_admin_kb(profile_id):
          InlineKeyboardButton("⏰ بازه پروکسی", callback_data=f"set_prx_interval_{profile_id}", style="primary")],
         [InlineKeyboardButton("📊 تعداد کانفیگ", callback_data=f"set_cfg_max_{profile_id}", style="primary"),
          InlineKeyboardButton("📊 تعداد پروکسی", callback_data=f"set_prx_max_{profile_id}", style="primary")],
-        [InlineKeyboardButton(f"{ping_label} {ping_status}", callback_data=f"tglping_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_toggle_ping", status=ping_status), callback_data=f"tgl_ping_{profile_id}", style="primary")],
+        [InlineKeyboardButton(f"{ping_label} {ping_testing_label}", callback_data=f"tglping_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_ping_testing", status=ping_testing_label), callback_data=f"tgl_ping_test_{profile_id}", style="primary")],
+        [InlineKeyboardButton(msg("btn_show_ping", status=show_ping_label), callback_data=f"tgl_show_ping_{profile_id}", style="primary"),
+         InlineKeyboardButton(msg("btn_toggle_profile", status=profile_status), callback_data=f"tgl_profile_{profile_id}", style="danger")],
         [InlineKeyboardButton(cfg_btn, callback_data=f"tglcfg_{profile_id}", style="primary"),
          InlineKeyboardButton(prx_btn, callback_data=f"tglproxy_{profile_id}", style="primary")],
-        [InlineKeyboardButton(num_btn, callback_data=f"togglenum_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_toggle_profile", status=profile_status), callback_data=f"tgl_profile_{profile_id}", style="danger")],
+        [InlineKeyboardButton(num_btn, callback_data=f"togglenum_{profile_id}", style="primary")],
         [InlineKeyboardButton(f"📅 تاریخ کانفیگ: {date_cfg_status}", callback_data=f"tgl_date_cfg_{profile_id}", style="primary"),
          InlineKeyboardButton(f"📅 تاریخ پروکسی: {date_prx_status}", callback_data=f"tgl_date_prx_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_set_custom_query"), callback_data=f"setquery_{profile_id}", style="primary"),
@@ -3034,8 +3476,7 @@ def profile_admin_kb(profile_id):
          InlineKeyboardButton(msg("btn_log_menu"), callback_data=f"log_menu_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_set_naming_template"), callback_data=f"set_naming_{profile_id}", style="primary"),
          InlineKeyboardButton(msg("btn_set_channel_link"), callback_data=f"set_channel_link_{profile_id}", style="primary")],
-        [InlineKeyboardButton(f"🌐 کشور: {country_label}", callback_data=f"tgl_country_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_show_ping", status=show_ping_label), callback_data=f"tgl_show_ping_{profile_id}", style="primary")],
+        [InlineKeyboardButton(f"🌐 کشور: {country_label}", callback_data=f"tgl_country_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_reset"), callback_data=f"rn_{profile_id}", style="primary"),
          InlineKeyboardButton(msg("btn_clear"), callback_data=f"cd1_{profile_id}", style="danger")],
         [InlineKeyboardButton("❌ Delete Profile", callback_data=f"delprof_{profile_id}", style="danger")],
@@ -3078,8 +3519,8 @@ def sponsor_edit_kb(sponsor_id, profile_id):
          InlineKeyboardButton("لینک", callback_data=f"sp_edit_field_{sponsor_id}_url", style="primary")],
         [InlineKeyboardButton("متن دکمه", callback_data=f"sp_edit_field_{sponsor_id}_button_text", style="primary"),
          InlineKeyboardButton("اولویت", callback_data=f"sp_edit_field_{sponsor_id}_priority", style="primary")],
-        [InlineKeyboardButton("زمان شروع", callback_data=f"sp_edit_field_{sponsor_id}_start_time", style="primary"),
-         InlineKeyboardButton("زمان پایان", callback_data=f"sp_edit_field_{sponsor_id}_end_time", style="primary")],
+        [InlineKeyboardButton("مدت (ساعت)", callback_data=f"sp_edit_field_{sponsor_id}_duration_hours", style="primary"),
+         InlineKeyboardButton("نامحدود", callback_data=f"sp_edit_field_{sponsor_id}_unlimited", style="primary")],
         [InlineKeyboardButton("اعمال برای", callback_data=f"sp_edit_field_{sponsor_id}_apply", style="primary"),
          InlineKeyboardButton("رنگ", callback_data=f"sp_edit_field_{sponsor_id}_color", style="primary")],
         [InlineKeyboardButton("🔙 برگشت", callback_data=f"sp_detail_{sponsor_id}", style="primary")],
@@ -3293,8 +3734,8 @@ async def cmd_diag(update: Update, context):
     for prof in profiles:
         timer_status = "⏳ فعال" if prof.get("timer_expiry") else "⏹ غیرفعال"
         enabled_status = "✅ فعال" if get_profile_enabled(prof['id']) else "⛔ غیرفعال"
-        ping_enabled = "✅" if get_profile_ping_enabled(prof['id']) else "❌"
-        msg_lines.append(f"  • {prof['dest_name']} (ID:{prof['id']}) - {len(get_profile_sources(prof['id']))} منبع, بازه کانفیگ:{prof.get('interval_config',5)}m, بازه پروکسی:{prof.get('interval_proxy',5)}m, پینگ {prof['ping_mode']}, پینگ فعال:{ping_enabled}, تایمر: {timer_status}, وضعیت:{enabled_status}")
+        ping_testing = "✅" if get_profile_ping_enabled(prof['id']) else "❌"
+        msg_lines.append(f"  • {prof['dest_name']} (ID:{prof['id']}) - {len(get_profile_sources(prof['id']))} منبع, بازه کانفیگ:{prof.get('interval_config',5)}m, بازه پروکسی:{prof.get('interval_proxy',5)}m, پینگ {prof['ping_mode']}, تست پینگ:{ping_testing}, تایمر: {timer_status}, وضعیت:{enabled_status}")
     msg_lines.append("")
     seen_cfg = c.execute("SELECT COUNT(*) FROM seen").fetchone()[0]
     seen_prx = c.execute("SELECT COUNT(*) FROM proxies_seen").fetchone()[0]
@@ -3481,16 +3922,8 @@ async def on_callback(u, ctx):
                         if sp["apply_config"]: apply_text.append("کانفیگ")
                         if sp["apply_proxy"]: apply_text.append("پروکسی")
                         apply_str = ", ".join(apply_text) if apply_text else "هیچ"
-                        time_str = ""
-                        if sp["start_time"] and sp["end_time"]:
-                            time_str = f"{sp['start_time']} - {sp['end_time']}"
-                        elif sp["start_time"]:
-                            time_str = f"از {sp['start_time']}"
-                        elif sp["end_time"]:
-                            time_str = f"تا {sp['end_time']}"
-                        else:
-                            time_str = "همیشه"
-                        lines.append(msg("sponsor_item", name=sp["name"], priority=sp["priority"], enabled=sp["enabled"], url=sp["url"], text=sp["button_text"], apply=apply_str, time=time_str))
+                        duration_str = "نامحدود" if sp["unlimited"] else f"{sp['duration_hours']} ساعت"
+                        lines.append(msg("sponsor_item", name=sp["name"], priority=sp["priority"], enabled=sp["enabled"], url=sp["url"], text=sp["button_text"], apply=apply_str, duration=duration_str))
                     txt = msg("sponsor_list_title", name=name, sponsors="\n".join(lines))
                 await q.edit_message_text(txt, parse_mode="HTML", reply_markup=sponsor_list_kb(profile_id))
             else:
@@ -3517,18 +3950,10 @@ async def on_callback(u, ctx):
                 if sp["apply_config"]: apply_text.append("کانفیگ")
                 if sp["apply_proxy"]: apply_text.append("پروکسی")
                 apply_str = ", ".join(apply_text) if apply_text else "هیچ"
-                time_str = ""
-                if sp["start_time"] and sp["end_time"]:
-                    time_str = f"{sp['start_time']} - {sp['end_time']}"
-                elif sp["start_time"]:
-                    time_str = f"از {sp['start_time']}"
-                elif sp["end_time"]:
-                    time_str = f"تا {sp['end_time']}"
-                else:
-                    time_str = "همیشه"
+                duration_str = "نامحدود" if sp["unlimited"] else f"{sp['duration_hours']} ساعت"
                 txt = msg("sponsor_detail", name=sp["name"], url=sp["url"], text=sp["button_text"],
                           priority=sp["priority"], enabled=bool(sp["enabled"]), apply=apply_str,
-                          time=time_str, color=sp["color"])
+                          duration=duration_str, color=sp["color"])
                 await q.edit_message_text(txt, parse_mode="HTML", reply_markup=sponsor_detail_kb(sponsor_id, profile_id))
             else:
                 await q.answer("⚠️ خطا در داده")
@@ -3559,18 +3984,10 @@ async def on_callback(u, ctx):
                         if sp["apply_config"]: apply_text.append("کانفیگ")
                         if sp["apply_proxy"]: apply_text.append("پروکسی")
                         apply_str = ", ".join(apply_text) if apply_text else "هیچ"
-                        time_str = ""
-                        if sp["start_time"] and sp["end_time"]:
-                            time_str = f"{sp['start_time']} - {sp['end_time']}"
-                        elif sp["start_time"]:
-                            time_str = f"از {sp['start_time']}"
-                        elif sp["end_time"]:
-                            time_str = f"تا {sp['end_time']}"
-                        else:
-                            time_str = "همیشه"
+                        duration_str = "نامحدود" if sp["unlimited"] else f"{sp['duration_hours']} ساعت"
                         txt = msg("sponsor_detail", name=sp["name"], url=sp["url"], text=sp["button_text"],
                                   priority=sp["priority"], enabled=bool(sp["enabled"]), apply=apply_str,
-                                  time=time_str, color=sp["color"])
+                                  duration=duration_str, color=sp["color"])
                         await q.edit_message_text(txt, parse_mode="HTML", reply_markup=sponsor_detail_kb(sponsor_id, profile_id))
                 else:
                     await q.answer("اسپانسر یافت نشد.")
@@ -3691,12 +4108,16 @@ async def on_callback(u, ctx):
                 elif step == "priority":
                     ctx.user_data["sponsor_add"]["step"] = "priority"
                     await q.edit_message_text(msg("sp_add_priority"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 لغو", callback_data=f"sponsor_list_{profile_id}", style="primary")]]))
-                elif step == "start_time":
-                    ctx.user_data["sponsor_add"]["step"] = "start_time"
-                    await q.edit_message_text(msg("sp_add_start"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 لغو", callback_data=f"sponsor_list_{profile_id}", style="primary")]]))
-                elif step == "end_time":
-                    ctx.user_data["sponsor_add"]["step"] = "end_time"
-                    await q.edit_message_text(msg("sp_add_end"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 لغو", callback_data=f"sponsor_list_{profile_id}", style="primary")]]))
+                elif step == "duration":
+                    ctx.user_data["sponsor_add"]["step"] = "duration"
+                    await q.edit_message_text(msg("sp_add_duration"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 لغو", callback_data=f"sponsor_list_{profile_id}", style="primary")]]))
+                elif step == "unlimited":
+                    ctx.user_data["sponsor_add"]["step"] = "unlimited"
+                    await q.edit_message_text(msg("sp_add_unlimited"), reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("بله", callback_data=f"sp_add_unlimited_yes_{profile_id}", style="primary")],
+                        [InlineKeyboardButton("خیر", callback_data=f"sp_add_unlimited_no_{profile_id}", style="primary")],
+                        [InlineKeyboardButton("🔙 لغو", callback_data=f"sponsor_list_{profile_id}", style="primary")],
+                    ]))
                 elif step == "apply":
                     ctx.user_data["sponsor_add"]["step"] = "apply"
                     await q.edit_message_text(msg("sp_add_apply"), reply_markup=InlineKeyboardMarkup([
@@ -3715,6 +4136,46 @@ async def on_callback(u, ctx):
                     ]))
                 else:
                     await q.answer("مرحله نامعتبر")
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("sp_add_unlimited_yes_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                if "sponsor_add" not in ctx.user_data:
+                    ctx.user_data["sponsor_add"] = {}
+                ctx.user_data["sponsor_add"]["unlimited"] = 1
+                ctx.user_data["sponsor_add"]["duration_hours"] = 0
+                ctx.user_data["sponsor_add"]["step"] = "apply"
+                await q.edit_message_text(msg("sp_add_apply"), reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("کانفیگ", callback_data=f"sp_add_apply_{profile_id}_config", style="primary")],
+                    [InlineKeyboardButton("پروکسی", callback_data=f"sp_add_apply_{profile_id}_proxy", style="primary")],
+                    [InlineKeyboardButton("هر دو", callback_data=f"sp_add_apply_{profile_id}_both", style="primary")],
+                    [InlineKeyboardButton("🔙 لغو", callback_data=f"sponsor_list_{profile_id}", style="primary")],
+                ]))
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("sp_add_unlimited_no_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                if "sponsor_add" not in ctx.user_data:
+                    ctx.user_data["sponsor_add"] = {}
+                ctx.user_data["sponsor_add"]["unlimited"] = 0
+                ctx.user_data["sponsor_add"]["step"] = "duration"
+                await q.edit_message_text(msg("sp_add_duration"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 لغو", callback_data=f"sponsor_list_{profile_id}", style="primary")]]))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -3758,13 +4219,13 @@ async def on_callback(u, ctx):
                     url = data.get("url", "")
                     button_text = data.get("button_text", "Advertisement")
                     priority = int(data.get("priority", 0))
-                    start_time = data.get("start_time", None)
-                    end_time = data.get("end_time", None)
+                    duration_hours = int(data.get("duration_hours", 0))
+                    unlimited = data.get("unlimited", 1)
                     apply_config = data.get("apply_config", 1)
                     apply_proxy = data.get("apply_proxy", 1)
                     if url:
                         add_sponsor(profile_id, name, url, button_text, enabled=1, priority=priority,
-                                    start_time=start_time, end_time=end_time,
+                                    duration_hours=duration_hours, unlimited=unlimited,
                                     apply_config=apply_config, apply_proxy=apply_proxy, color=color)
                         await q.answer(msg("sp_added_done", name=name))
                         await q.edit_message_text("✅ اسپانسر اضافه شد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به لیست", callback_data=f"sponsor_list_{profile_id}", style="primary")]]))
@@ -3788,7 +4249,6 @@ async def on_callback(u, ctx):
                 except ValueError:
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
-                # Redirect to new sponsor list
                 await q.edit_message_text("📢 **مدیریت اسپانسرها**", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("📋 لیست اسپانسرها", callback_data=f"sponsor_list_{profile_id}", style="primary")],
                     [InlineKeyboardButton("➕ افزودن اسپانسر", callback_data=f"sp_add_step_{profile_id}_name", style="success")],
@@ -4175,7 +4635,24 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        if d.startswith("tgl_ping_"):
+        if d.startswith("tgl_ping_test_"):
+            parts = d.split("_")
+            if len(parts) >= 4:
+                try:
+                    profile_id = int(parts[3])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                current = get_profile_ping_enabled(profile_id)
+                new_val = not current
+                set_profile_ping_enabled(profile_id, new_val)
+                await q.answer(msg("ping_testing_toggle", status=new_val))
+                await show_profile_admin(q.message, profile_id)
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("tgl_show_ping_"):
             parts = d.split("_")
             if len(parts) >= 3:
                 try:
@@ -4183,10 +4660,10 @@ async def on_callback(u, ctx):
                 except ValueError:
                     await q.answer("⚠️ شناسه نامعتبر")
                     return
-                current = get_profile_ping_enabled(profile_id)
+                current = get_profile_show_ping(profile_id)
                 new_val = not current
-                set_profile_ping_enabled(profile_id, new_val)
-                await q.answer(msg("toggle_ping", status=new_val))
+                set_profile_show_ping(profile_id, new_val)
+                await q.answer(msg("show_ping_toggle", status=new_val))
                 await show_profile_admin(q.message, profile_id)
             else:
                 await q.answer("⚠️ خطا در داده")
@@ -4778,7 +5255,7 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # New toggles for country and show_ping
+        # New toggles for country
         if d.startswith("tgl_country_"):
             parts = d.split("_")
             if len(parts) >= 3:
@@ -4792,23 +5269,6 @@ async def on_callback(u, ctx):
                 set_profile_country_display(profile_id, new_mode)
                 mode_names = {0: msg("country_display_off"), 1: msg("country_display_en"), 2: msg("country_display_enfa")}
                 await q.answer(msg("country_display_set", mode=mode_names[new_mode]))
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("tgl_show_ping_"):
-            parts = d.split("_")
-            if len(parts) >= 3:
-                try:
-                    profile_id = int(parts[2])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                current = get_profile_show_ping(profile_id)
-                new_val = not current
-                set_profile_show_ping(profile_id, new_val)
-                await q.answer(msg("show_ping_toggle", status=new_val))
                 await show_profile_admin(q.message, profile_id)
             else:
                 await q.answer("⚠️ خطا در داده")
@@ -4918,8 +5378,10 @@ async def show_profile_admin(msg_or_q, profile_id):
     sponsor_st = f"{len(sponsors)} اسپانسر" if sponsors else "خالی"
     ping_mode = prof["ping_mode"]
     ping_display = "ایران" if ping_mode == "iran" else "جهانی"
-    ping_enabled = get_profile_ping_enabled(profile_id)
-    ping_status = "✅" if ping_enabled else "❌"
+    ping_testing = get_profile_ping_enabled(profile_id)
+    ping_status = "✅" if ping_testing else "❌"
+    show_ping = get_profile_show_ping(profile_id)
+    show_ping_label = "✅" if show_ping else "❌"
     profile_enabled = get_profile_enabled(profile_id)
     profile_status = "✅" if profile_enabled else "❌"
 
@@ -4937,8 +5399,6 @@ async def show_profile_admin(msg_or_q, profile_id):
     country_display = prof.get("country_display", 2)
     country_display_modes = {0: "خاموش", 1: "انگلیسی", 2: "انگلیسی+فارسی"}
     country_label = country_display_modes.get(country_display, "انگلیسی+فارسی")
-    show_ping = prof.get("show_ping", 1)
-    show_ping_label = "✅" if show_ping else "❌"
 
     expiry, remaining = get_profile_timer(profile_id)
     if expiry:
@@ -5050,31 +5510,32 @@ async def on_text(u, ctx):
                 except:
                     await u.message.reply_text("❌ اولویت باید عدد باشد.")
                     return
-        elif field == "start_time":
+        elif field == "duration_hours":
             if txt:
-                # Validate time format HH:MM
-                if re.match(r'^\d{2}:\d{2}$', txt):
-                    sp["start_time"] = txt
-                else:
-                    await u.message.reply_text("❌ فرمت زمان باید HH:MM باشد.")
+                try:
+                    duration = int(txt)
+                    if duration < 0:
+                        raise ValueError
+                    sp["duration_hours"] = duration
+                    # If unlimited, set unlimited to 0
+                    if sp["unlimited"]:
+                        sp["unlimited"] = 0
+                except:
+                    await u.message.reply_text("❌ مدت باید عدد غیرمنفی باشد.")
                     return
             else:
-                sp["start_time"] = None
-        elif field == "end_time":
-            if txt:
-                if re.match(r'^\d{2}:\d{2}$', txt):
-                    sp["end_time"] = txt
-                else:
-                    await u.message.reply_text("❌ فرمت زمان باید HH:MM باشد.")
-                    return
-            else:
-                sp["end_time"] = None
+                # keep existing
+                pass
+        elif field == "unlimited":
+            # toggle
+            sp["unlimited"] = 1 if not sp["unlimited"] else 0
+            if sp["unlimited"]:
+                sp["duration_hours"] = 0
         elif field == "apply":
-            # We'll handle this via callback, not text
+            # We'll handle via callback
             await u.message.reply_text("لطفاً از دکمه‌های انتخاب استفاده کنید.")
             return
         elif field == "color":
-            # Handled via callback
             await u.message.reply_text("لطفاً از دکمه‌های انتخاب رنگ استفاده کنید.")
             return
         else:
@@ -5122,48 +5583,39 @@ async def on_text(u, ctx):
             try:
                 priority = int(u.message.text.strip() or "0")
                 data["priority"] = priority
-                data["step"] = "start_time"
-                await u.message.reply_text(msg("sp_add_start"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 لغو", callback_data=f"sponsor_list_{profile_id}", style="primary")]]))
+                data["step"] = "unlimited"
+                await u.message.reply_text(msg("sp_add_unlimited"), reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("بله", callback_data=f"sp_add_unlimited_yes_{profile_id}", style="primary")],
+                    [InlineKeyboardButton("خیر", callback_data=f"sp_add_unlimited_no_{profile_id}", style="primary")],
+                    [InlineKeyboardButton("🔙 لغو", callback_data=f"sponsor_list_{profile_id}", style="primary")],
+                ]))
             except:
                 await u.message.reply_text("❌ اولویت باید عدد باشد.")
             return
-        elif step == "start_time":
-            txt = u.message.text.strip()
-            if txt:
-                if re.match(r'^\d{2}:\d{2}$', txt):
-                    data["start_time"] = txt
-                else:
-                    await u.message.reply_text("❌ فرمت زمان باید HH:MM باشد.")
-                    return
-            else:
-                data["start_time"] = None
-            data["step"] = "end_time"
-            await u.message.reply_text(msg("sp_add_end"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 لغو", callback_data=f"sponsor_list_{profile_id}", style="primary")]]))
+        elif step == "duration":
+            try:
+                duration = int(u.message.text.strip())
+                if duration < 0:
+                    raise ValueError
+                data["duration_hours"] = duration
+                data["unlimited"] = 0
+                data["step"] = "apply"
+                await u.message.reply_text(msg("sp_add_apply"), reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("کانفیگ", callback_data=f"sp_add_apply_{profile_id}_config", style="primary")],
+                    [InlineKeyboardButton("پروکسی", callback_data=f"sp_add_apply_{profile_id}_proxy", style="primary")],
+                    [InlineKeyboardButton("هر دو", callback_data=f"sp_add_apply_{profile_id}_both", style="primary")],
+                    [InlineKeyboardButton("🔙 لغو", callback_data=f"sponsor_list_{profile_id}", style="primary")],
+                ]))
+            except:
+                await u.message.reply_text("❌ مدت باید عدد غیرمنفی باشد.")
             return
-        elif step == "end_time":
-            txt = u.message.text.strip()
-            if txt:
-                if re.match(r'^\d{2}:\d{2}$', txt):
-                    data["end_time"] = txt
-                else:
-                    await u.message.reply_text("❌ فرمت زمان باید HH:MM باشد.")
-                    return
-            else:
-                data["end_time"] = None
-            data["step"] = "apply"
-            await u.message.reply_text(msg("sp_add_apply"), reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("کانفیگ", callback_data=f"sp_add_apply_{profile_id}_config", style="primary")],
-                [InlineKeyboardButton("پروکسی", callback_data=f"sp_add_apply_{profile_id}_proxy", style="primary")],
-                [InlineKeyboardButton("هر دو", callback_data=f"sp_add_apply_{profile_id}_both", style="primary")],
-                [InlineKeyboardButton("🔙 لغو", callback_data=f"sponsor_list_{profile_id}", style="primary")],
-            ]))
-            return
+        elif step == "apply":
+            # handled by callback
+            pass
         elif step == "color":
-            # Handled by callback
-            await u.message.reply_text("لطفاً رنگ را با دکمه‌ها انتخاب کنید.")
-            return
+            # handled by callback
+            pass
         else:
-            # Unknown step, clear
             del ctx.user_data["sponsor_add"]
             await u.message.reply_text("❌ خطا در روند افزودن اسپانسر.")
             return

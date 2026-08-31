@@ -67,6 +67,126 @@ log = logging.getLogger("bot")
 # ======================================================================
 TEHRAN_TZ = pytz.timezone('Asia/Tehran')
 
+
+
+
+def header_modes_menu(profile_id):
+    cm, pm = get_header_modes(profile_id)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"⚙️ حالت نام کانفیگ: {header_mode_label(cm)}",
+                              callback_data=f"hm_config_{'protocol' if cm == 'channel' else 'channel'}_{profile_id}")],
+        [InlineKeyboardButton(f"⚙️ حالت نام پروکسی: {header_mode_label(pm)}",
+                              callback_data=f"hm_proxy_{'protocol' if pm == 'channel' else 'channel'}_{profile_id}")],
+        [InlineKeyboardButton("🔧 تنظیم دقیق کانفیگ", callback_data=f"hm_config_menu_{profile_id}")],
+        [InlineKeyboardButton("🔧 تنظیم دقیق پروکسی", callback_data=f"hm_proxy_menu_{profile_id}")],
+        [InlineKeyboardButton("↩️ بازگشت", callback_data=f"profile_{profile_id}")]
+    ])
+
+def header_mode_keyboard(profile_id, kind):
+    config_mode, proxy_mode = get_header_modes(profile_id)
+    mode = config_mode if kind == "config" else proxy_mode
+    other = "proxy" if kind == "config" else "config"
+    title = "کانفیگ" if kind == "config" else "پروکسی"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                f"✅ نام کانال" if mode == "channel" else "نام کانال",
+                callback_data=f"hm_{kind}_channel_{profile_id}"
+            ),
+            InlineKeyboardButton(
+                f"✅ پروتکل" if mode == "protocol" else "پروتکل",
+                callback_data=f"hm_{kind}_protocol_{profile_id}"
+            ),
+        ],
+        [InlineKeyboardButton("↩️ بازگشت", callback_data=f"profile_{profile_id}")]
+    ])
+
+def get_header_modes(profile_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT config_header_mode, proxy_header_mode FROM profiles WHERE id=?", (profile_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return "channel", "channel"
+    return (row[0] or "channel"), (row[1] or "channel")
+
+
+def set_header_mode(profile_id, kind, mode):
+    if kind not in ("config", "proxy") or mode not in ("channel", "protocol"):
+        return False
+    column = "config_header_mode" if kind == "config" else "proxy_header_mode"
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(f"UPDATE profiles SET {column}=? WHERE id=?", (mode, profile_id))
+    changed = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return changed
+
+
+def header_mode_label(mode):
+    return "نام کانال" if mode == "channel" else "پروتکل"
+
+
+def detect_proxy_protocol(proxy_url):
+    u = (proxy_url or "").strip().lower()
+    if u.startswith(("tg://proxy", "https://t.me/proxy")):
+        return "MTPROTO"
+    if u.startswith("socks5://"):
+        return "SOCKS5"
+    if u.startswith("socks4://"):
+        return "SOCKS4"
+    if u.startswith("socks://"):
+        return "SOCKS"
+    if u.startswith("https://"):
+        return "HTTPS"
+    if u.startswith("http://"):
+        return "HTTP"
+    return "PROXY"
+
+
+def detect_config_protocol(config_url):
+    u = (config_url or "").strip().lower()
+    if u.startswith("vless://"): return "VLESS"
+    if u.startswith("vmess://"): return "VMESS"
+    if u.startswith(("wireguard://", "wg://")): return "WIREGUARD"
+    if u.startswith(("hysteria2://", "hy2://")): return "HYSTERIA2"
+    if u.startswith("hysteria://"): return "HYSTERIA"
+    if u.startswith("trojan://"): return "TROJAN"
+    if u.startswith(("shadowsocks://", "ss://")): return "SHADOWSOCKS"
+    if u.startswith("socks5://"): return "SOCKS5"
+    if u.startswith("socks4://"): return "SOCKS4"
+    if u.startswith("socks://"): return "SOCKS"
+    if u.startswith("https://"): return "HTTPS"
+    if u.startswith("http://"): return "HTTP"
+    if u.startswith(("tuic://",)): return "TUIC"
+    return "CONFIG"
+
+
+def format_server_header(profile_id, country_text="", item_url="", kind="config"):
+    """
+    Header mode is selected independently for configs and proxies.
+    Channel mode: @ChannelName + country.
+    Protocol mode: detected protocol + country.
+    """
+    config_mode, proxy_mode = get_header_modes(profile_id)
+    mode = config_mode if kind == "config" else proxy_mode
+
+    channel = ""
+    try:
+        profile = get_profile(profile_id)
+        channel = (profile.get("channel_link") or "").strip().lstrip("@")
+    except Exception:
+        channel = ""
+
+    if mode == "protocol":
+        title = detect_config_protocol(item_url) if kind == "config" else detect_proxy_protocol(item_url)
+    else:
+        title = "@" + channel if channel else "@Channel"
+
+    return f"{title}{(' ' + country_text) if country_text else ''}"
+
 def get_tehran_time() -> str:
     return datetime.now(TEHRAN_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
@@ -80,6 +200,23 @@ conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 conn.execute("PRAGMA journal_mode=WAL")
 conn.execute("PRAGMA synchronous=NORMAL")
 c = conn.cursor()
+
+def migrate_header_modes():
+    """Ensure per-profile header mode settings exist without resetting the database."""
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(profiles)")
+        cols = {row[1] for row in cur.fetchall()}
+        if "config_header_mode" not in cols:
+            cur.execute("ALTER TABLE profiles ADD COLUMN config_header_mode TEXT DEFAULT 'channel'")
+        if "proxy_header_mode" not in cols:
+            cur.execute("ALTER TABLE profiles ADD COLUMN proxy_header_mode TEXT DEFAULT 'channel'")
+        conn.commit()
+        conn.close()
+    except Exception:
+        logger.exception("header mode migration failed")
+
 
 def ensure_column(table, column, col_type, default=None):
     try:
@@ -251,6 +388,8 @@ ensure_column("proxies_seen", "profile_id", "INTEGER DEFAULT 1", 1)
 
 c.execute("""CREATE TABLE IF NOT EXISTS profiles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    config_header_mode TEXT DEFAULT 'channel',
+    proxy_header_mode TEXT DEFAULT 'channel',
     dest_name TEXT UNIQUE NOT NULL,
     sources TEXT DEFAULT '',
     banner_config TEXT,

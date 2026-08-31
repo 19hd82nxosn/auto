@@ -25,6 +25,7 @@ from telegram.ext import (
     filters,
 )
 from telegram.error import BadRequest, TimedOut, RetryAfter
+from html.parser import HTMLParser
 
 # ======================================================================
 # متغیرهای محیطی
@@ -125,7 +126,7 @@ c.execute("""CREATE TABLE IF NOT EXISTS country_cache (
     country TEXT,
     flag TEXT)""")
 
-# Table for sponsors - with new schema (no start/end time, uses duration/unlimited)
+# Table for sponsors
 c.execute("""CREATE TABLE IF NOT EXISTS sponsors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     profile_id INTEGER,
@@ -144,19 +145,14 @@ c.execute("""CREATE TABLE IF NOT EXISTS sponsors (
     updated_at TEXT,
     UNIQUE(profile_id, name) ON CONFLICT REPLACE)""")
 
-# Migrate old sponsors if they exist
 def migrate_sponsors():
-    # Check if old table has columns that need migration
     c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='sponsors'")
     row = c.fetchone()
     if row:
         sql = row[0]
-        # If old table has start_time or end_time, we need to migrate
         if "start_time" in sql or "end_time" in sql:
             log.warning("Migrating sponsors table to new schema...")
-            # Rename old table
             c.execute("ALTER TABLE sponsors RENAME TO sponsors_old")
-            # Create new table
             c.execute("""CREATE TABLE sponsors (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 profile_id INTEGER,
@@ -174,8 +170,6 @@ def migrate_sponsors():
                 color TEXT DEFAULT 'primary',
                 updated_at TEXT,
                 UNIQUE(profile_id, name) ON CONFLICT REPLACE)""")
-            # Copy old data, convert start/end to duration/unlimited if possible
-            # For simplicity, set unlimited=1 for all old sponsors (they were always active)
             c.execute("SELECT profile_id, name, url, button_text, enabled, color, created_at FROM sponsors_old")
             for row in c.fetchall():
                 profile_id, name, url, button_text, enabled, color, created_at = row
@@ -188,13 +182,11 @@ def migrate_sponsors():
             c.execute("DROP TABLE sponsors_old")
             log.info("✅ Sponsors migrated to new schema.")
         else:
-            # Ensure new columns exist
             ensure_column("sponsors", "duration_hours", "INTEGER DEFAULT 0", 0)
             ensure_column("sponsors", "unlimited", "INTEGER DEFAULT 1", 1)
             ensure_column("sponsors", "expires_at", "TEXT", None)
             ensure_column("sponsors", "updated_at", "TEXT", get_tehran_time())
     else:
-        # Create if missing
         c.execute("""CREATE TABLE IF NOT EXISTS sponsors (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             profile_id INTEGER,
@@ -315,7 +307,7 @@ ensure_column("admins", "added_at", "TEXT", "")
 conn.commit()
 
 # ======================================================================
-# تعمیر نوع ستون custom_query و مهاجرت‌ها (بدون تغییر)
+# تعمیر نوع ستون custom_query و مهاجرت‌ها
 # ======================================================================
 def fix_column_types():
     c.execute("PRAGMA table_info(profiles)")
@@ -564,7 +556,7 @@ def normalize_channel_input(text: str) -> str:
     return clean_source_name(text)
 
 # ======================================================================
-# توابع پروفایل (با اضافه شدن تنظیمات جدید)
+# توابع پروفایل
 # ======================================================================
 def get_profiles():
     c.execute("SELECT * FROM profiles ORDER BY id")
@@ -714,20 +706,11 @@ def set_profile_ping_mode(profile_id, mode):
     update_profile(profile_id, ping_mode=mode)
 
 def get_profile_ping_enabled(profile_id):
-    # This now represents the master switch for ping testing
     prof = get_profile(profile_id)
     return prof.get("ping_testing", 1) if prof else 1
 
 def set_profile_ping_enabled(profile_id, enabled):
-    # This sets ping_testing
     update_profile(profile_id, ping_testing=1 if enabled else 0)
-
-def get_profile_show_ping(profile_id):
-    prof = get_profile(profile_id)
-    return prof.get("show_ping", 1) if prof else 1
-
-def set_profile_show_ping(profile_id, enabled):
-    update_profile(profile_id, show_ping=1 if enabled else 0)
 
 def get_profile_enabled(profile_id):
     prof = get_profile(profile_id)
@@ -813,7 +796,6 @@ def get_profile_channel_link(profile_id):
     return prof.get("channel_link", "") if prof else ""
 
 def set_profile_channel_link(profile_id, channel_link):
-    # Normalize: remove @ and https://t.me/
     if channel_link:
         channel_link = channel_link.strip()
         if channel_link.startswith("https://t.me/"):
@@ -871,7 +853,7 @@ def set_profile_proxy_banner_template(profile_id, template):
     update_profile(profile_id, proxy_banner_template=template)
 
 # ======================================================================
-# توابع لیست سیاه و اسپانسر (با تغییرات جدید)
+# توابع لیست سیاه و اسپانسر
 # ======================================================================
 def get_blacklist(profile_id):
     rows = c.execute("SELECT word FROM blacklist WHERE profile_id=? ORDER BY id", (profile_id,)).fetchall()
@@ -911,10 +893,7 @@ def is_word_blacklisted(profile_id, text):
             return True
     return False
 
-# New sponsor functions
 def get_sponsors(profile_id, apply_type="both"):
-    """Get active sponsors for a profile, optionally filter by config/proxy.
-       Also filters expired sponsors (if not unlimited)."""
     now = datetime.now(TEHRAN_TZ)
     query = "SELECT * FROM sponsors WHERE profile_id=? AND enabled=1"
     params = [profile_id]
@@ -929,12 +908,10 @@ def get_sponsors(profile_id, apply_type="both"):
     sponsors = []
     for row in rows:
         sponsor = dict(zip(cols, row))
-        # Check if expired
         if not sponsor["unlimited"] and sponsor["expires_at"]:
             try:
                 expires = datetime.fromisoformat(sponsor["expires_at"])
                 if expires < now:
-                    # Expired, skip
                     continue
             except:
                 pass
@@ -942,7 +919,6 @@ def get_sponsors(profile_id, apply_type="both"):
     return sponsors
 
 def get_sponsor(profile_id):
-    # Legacy compatibility: return first active sponsor
     sponsors = get_sponsors(profile_id)
     return sponsors[0] if sponsors else None
 
@@ -965,7 +941,6 @@ def add_sponsor(profile_id, name, url, button_text="Advertisement", enabled=1,
 def update_sponsor(sponsor_id, **kwargs):
     allowed = ["name", "url", "button_text", "enabled", "priority",
                "duration_hours", "unlimited", "apply_config", "apply_proxy", "color"]
-    # If unlimited or duration changes, update expires_at
     set_clauses = []
     params = []
     for key, value in kwargs.items():
@@ -974,9 +949,7 @@ def update_sponsor(sponsor_id, **kwargs):
             params.append(value)
     if not set_clauses:
         return
-    # If duration or unlimited changed, recalc expires_at
     if "duration_hours" in kwargs or "unlimited" in kwargs:
-        # Need to fetch current values to recompute
         c.execute("SELECT duration_hours, unlimited, created_at FROM sponsors WHERE id=?", (sponsor_id,))
         row = c.fetchone()
         if row:
@@ -1011,7 +984,6 @@ def toggle_sponsor(profile_id, sponsor_id=None):
             update_sponsor(sponsor_id, enabled=new_enabled)
             return new_enabled
     else:
-        # Legacy: toggle first sponsor
         sponsors = get_sponsors(profile_id)
         if sponsors:
             sponsor = sponsors[0]
@@ -1021,237 +993,71 @@ def toggle_sponsor(profile_id, sponsor_id=None):
     return None
 
 def update_sponsor_color(profile_id, color):
-    # Legacy: update first sponsor
     sponsors = get_sponsors(profile_id)
     if sponsors:
         update_sponsor(sponsors[0]["id"], color=color)
 
 # ======================================================================
-# توابع کمکی (پینگ، استخراج لینک و ...) - بهبود یافته
+# Country mappings
 # ======================================================================
-# Country name mappings - complete list
 COUNTRY_NAMES_FA = {
-    "US": "آمریکا",
-    "GB": "بریتانیا",
-    "DE": "آلمان",
-    "FR": "فرانسه",
-    "SE": "سوئد",
-    "CA": "کانادا",
-    "NL": "هلند",
-    "TR": "ترکیه",
-    "RU": "روسیه",
-    "JP": "ژاپن",
-    "KR": "کره جنوبی",
-    "AE": "امارات",
-    "SG": "سنگاپور",
-    "AU": "استرالیا",
-    "IT": "ایتالیا",
-    "ES": "اسپانیا",
-    "CH": "سوئیس",
-    "BE": "بلژیک",
-    "NO": "نروژ",
-    "DK": "دانمارک",
-    "FI": "فنلاند",
-    "PL": "لهستان",
-    "UA": "اوکراین",
-    "IN": "هند",
-    "CN": "چین",
-    "TW": "تایوان",
-    "HK": "هنگ‌کنگ",
-    "BR": "برزیل",
-    "ZA": "آفریقای جنوبی",
-    "EG": "مصر",
-    "SA": "عربستان سعودی",
-    "IL": "اسرائیل",
-    "IR": "ایران",
-    "IQ": "عراق",
-    "AF": "افغانستان",
-    "PK": "پاکستان",
-    "BD": "بنگلادش",
-    "VN": "ویتنام",
-    "TH": "تایلند",
-    "MY": "مالزی",
-    "ID": "اندونزی",
-    "PH": "فیلیپین",
-    "NZ": "نیوزیلند",
-    "AT": "اتریش",
-    "GR": "یونان",
-    "PT": "پرتغال",
-    "IE": "ایرلند",
-    "HU": "مجارستان",
-    "CZ": "جمهوری چک",
-    "RO": "رومانی",
-    "BG": "بلغارستان",
-    "SK": "اسلواکی",
-    "SI": "اسلوونی",
-    "HR": "کرواسی",
-    "LT": "لیتوانی",
-    "LV": "لتونی",
-    "EE": "استونی",
-    "CY": "قبرس",
-    "MT": "مالت",
-    "LU": "لوکزامبورگ",
-    "IS": "ایسلند",
-    "LI": "لیختن‌اشتاین",
-    "MC": "موناکو",
-    "SM": "سان مارینو",
-    "VA": "واتیکان",
-    "MX": "مکزیک",
-    "AR": "آرژانتین",
-    "CL": "شیلی",
-    "CO": "کلمبیا",
-    "PE": "پرو",
-    "VE": "ونزوئلا",
-    "UY": "اروگوئه",
-    "PY": "پاراگوئه",
-    "BO": "بولیوی",
-    "EC": "اکوادور",
-    "GT": "گواتمالا",
-    "PA": "پاناما",
-    "CR": "کاستاریکا",
-    "DO": "جمهوری دومینیکن",
-    "CU": "کوبا",
-    "NG": "نیجریه",
-    "KE": "کنیا",
-    "TZ": "تانزانیا",
-    "GH": "غنا",
-    "DZ": "الجزایر",
-    "MA": "مراکش",
-    "TN": "تونس",
-    "LY": "لیبی",
-    "JO": "اردن",
-    "LB": "لبنان",
-    "SY": "سوریه",
-    "YE": "یمن",
-    "OM": "عمان",
-    "KW": "کویت",
-    "BH": "بحرین",
-    "QA": "قطر",
-    "IR": "ایران",
-    "AF": "افغانستان",
-    "PK": "پاکستان",
-    "BD": "بنگلادش",
-    "IN": "هند",
-    "NP": "نپال",
-    "LK": "سری‌لانکا",
-    "MM": "میانمار",
-    "TH": "تایلند",
-    "LA": "لائوس",
-    "KH": "کامبوج",
-    "VN": "ویتنام",
-    "MY": "مالزی",
-    "ID": "اندونزی",
-    "PH": "فیلیپین",
-    "NZ": "نیوزیلند",
-    "PG": "پاپوآ گینه نو",
+    "US": "آمریکا", "GB": "بریتانیا", "DE": "آلمان", "FR": "فرانسه",
+    "SE": "سوئد", "CA": "کانادا", "NL": "هلند", "TR": "ترکیه",
+    "RU": "روسیه", "JP": "ژاپن", "KR": "کره جنوبی", "AE": "امارات",
+    "SG": "سنگاپور", "AU": "استرالیا", "IT": "ایتالیا", "ES": "اسپانیا",
+    "CH": "سوئیس", "BE": "بلژیک", "NO": "نروژ", "DK": "دانمارک",
+    "FI": "فنلاند", "PL": "لهستان", "UA": "اوکراین", "IN": "هند",
+    "CN": "چین", "TW": "تایوان", "HK": "هنگ‌کنگ", "BR": "برزیل",
+    "ZA": "آفریقای جنوبی", "EG": "مصر", "SA": "عربستان سعودی", "IL": "اسرائیل",
+    "IR": "ایران", "IQ": "عراق", "AF": "افغانستان", "PK": "پاکستان",
+    "BD": "بنگلادش", "VN": "ویتنام", "TH": "تایلند", "MY": "مالزی",
+    "ID": "اندونزی", "PH": "فیلیپین", "NZ": "نیوزیلند", "AT": "اتریش",
+    "GR": "یونان", "PT": "پرتغال", "IE": "ایرلند", "HU": "مجارستان",
+    "CZ": "جمهوری چک", "RO": "رومانی", "BG": "بلغارستان", "SK": "اسلواکی",
+    "SI": "اسلوونی", "HR": "کرواسی", "LT": "لیتوانی", "LV": "لتونی",
+    "EE": "استونی", "CY": "قبرس", "MT": "مالت", "LU": "لوکزامبورگ",
+    "IS": "ایسلند", "LI": "لیختن‌اشتاین", "MC": "موناکو", "SM": "سان مارینو",
+    "VA": "واتیکان", "MX": "مکزیک", "AR": "آرژانتین", "CL": "شیلی",
+    "CO": "کلمبیا", "PE": "پرو", "VE": "ونزوئلا", "UY": "اروگوئه",
+    "PY": "پاراگوئه", "BO": "بولیوی", "EC": "اکوادور", "GT": "گواتمالا",
+    "PA": "پاناما", "CR": "کاستاریکا", "DO": "جمهوری دومینیکن", "CU": "کوبا",
+    "NG": "نیجریه", "KE": "کنیا", "TZ": "تانزانیا", "GH": "غنا",
+    "DZ": "الجزایر", "MA": "مراکش", "TN": "تونس", "LY": "لیبی",
+    "JO": "اردن", "LB": "لبنان", "SY": "سوریه", "YE": "یمن",
+    "OM": "عمان", "KW": "کویت", "BH": "بحرین", "QA": "قطر",
+    "NP": "نپال", "LK": "سری‌لانکا", "MM": "میانمار", "LA": "لائوس",
+    "KH": "کامبوج", "PG": "پاپوآ گینه نو"
 }
 COUNTRY_NAMES_EN = {
-    "US": "United States",
-    "GB": "United Kingdom",
-    "DE": "Germany",
-    "FR": "France",
-    "SE": "Sweden",
-    "CA": "Canada",
-    "NL": "Netherlands",
-    "TR": "Turkey",
-    "RU": "Russia",
-    "JP": "Japan",
-    "KR": "South Korea",
-    "AE": "United Arab Emirates",
-    "SG": "Singapore",
-    "AU": "Australia",
-    "IT": "Italy",
-    "ES": "Spain",
-    "CH": "Switzerland",
-    "BE": "Belgium",
-    "NO": "Norway",
-    "DK": "Denmark",
-    "FI": "Finland",
-    "PL": "Poland",
-    "UA": "Ukraine",
-    "IN": "India",
-    "CN": "China",
-    "TW": "Taiwan",
-    "HK": "Hong Kong",
-    "BR": "Brazil",
-    "ZA": "South Africa",
-    "EG": "Egypt",
-    "SA": "Saudi Arabia",
-    "IL": "Israel",
-    "IR": "Iran",
-    "IQ": "Iraq",
-    "AF": "Afghanistan",
-    "PK": "Pakistan",
-    "BD": "Bangladesh",
-    "VN": "Vietnam",
-    "TH": "Thailand",
-    "MY": "Malaysia",
-    "ID": "Indonesia",
-    "PH": "Philippines",
-    "NZ": "New Zealand",
-    "AT": "Austria",
-    "GR": "Greece",
-    "PT": "Portugal",
-    "IE": "Ireland",
-    "HU": "Hungary",
-    "CZ": "Czech Republic",
-    "RO": "Romania",
-    "BG": "Bulgaria",
-    "SK": "Slovakia",
-    "SI": "Slovenia",
-    "HR": "Croatia",
-    "LT": "Lithuania",
-    "LV": "Latvia",
-    "EE": "Estonia",
-    "CY": "Cyprus",
-    "MT": "Malta",
-    "LU": "Luxembourg",
-    "IS": "Iceland",
-    "LI": "Liechtenstein",
-    "MC": "Monaco",
-    "SM": "San Marino",
-    "VA": "Vatican City",
-    "MX": "Mexico",
-    "AR": "Argentina",
-    "CL": "Chile",
-    "CO": "Colombia",
-    "PE": "Peru",
-    "VE": "Venezuela",
-    "UY": "Uruguay",
-    "PY": "Paraguay",
-    "BO": "Bolivia",
-    "EC": "Ecuador",
-    "GT": "Guatemala",
-    "PA": "Panama",
-    "CR": "Costa Rica",
-    "DO": "Dominican Republic",
-    "CU": "Cuba",
-    "NG": "Nigeria",
-    "KE": "Kenya",
-    "TZ": "Tanzania",
-    "GH": "Ghana",
-    "DZ": "Algeria",
-    "MA": "Morocco",
-    "TN": "Tunisia",
-    "LY": "Libya",
-    "JO": "Jordan",
-    "LB": "Lebanon",
-    "SY": "Syria",
-    "YE": "Yemen",
-    "OM": "Oman",
-    "KW": "Kuwait",
-    "BH": "Bahrain",
-    "QA": "Qatar",
-    "NP": "Nepal",
-    "LK": "Sri Lanka",
-    "MM": "Myanmar",
-    "LA": "Laos",
-    "KH": "Cambodia",
-    "PG": "Papua New Guinea",
+    "US": "United States", "GB": "United Kingdom", "DE": "Germany", "FR": "France",
+    "SE": "Sweden", "CA": "Canada", "NL": "Netherlands", "TR": "Turkey",
+    "RU": "Russia", "JP": "Japan", "KR": "South Korea", "AE": "United Arab Emirates",
+    "SG": "Singapore", "AU": "Australia", "IT": "Italy", "ES": "Spain",
+    "CH": "Switzerland", "BE": "Belgium", "NO": "Norway", "DK": "Denmark",
+    "FI": "Finland", "PL": "Poland", "UA": "Ukraine", "IN": "India",
+    "CN": "China", "TW": "Taiwan", "HK": "Hong Kong", "BR": "Brazil",
+    "ZA": "South Africa", "EG": "Egypt", "SA": "Saudi Arabia", "IL": "Israel",
+    "IR": "Iran", "IQ": "Iraq", "AF": "Afghanistan", "PK": "Pakistan",
+    "BD": "Bangladesh", "VN": "Vietnam", "TH": "Thailand", "MY": "Malaysia",
+    "ID": "Indonesia", "PH": "Philippines", "NZ": "New Zealand", "AT": "Austria",
+    "GR": "Greece", "PT": "Portugal", "IE": "Ireland", "HU": "Hungary",
+    "CZ": "Czech Republic", "RO": "Romania", "BG": "Bulgaria", "SK": "Slovakia",
+    "SI": "Slovenia", "HR": "Croatia", "LT": "Lithuania", "LV": "Latvia",
+    "EE": "Estonia", "CY": "Cyprus", "MT": "Malta", "LU": "Luxembourg",
+    "IS": "Iceland", "LI": "Liechtenstein", "MC": "Monaco", "SM": "San Marino",
+    "VA": "Vatican City", "MX": "Mexico", "AR": "Argentina", "CL": "Chile",
+    "CO": "Colombia", "PE": "Peru", "VE": "Venezuela", "UY": "Uruguay",
+    "PY": "Paraguay", "BO": "Bolivia", "EC": "Ecuador", "GT": "Guatemala",
+    "PA": "Panama", "CR": "Costa Rica", "DO": "Dominican Republic", "CU": "Cuba",
+    "NG": "Nigeria", "KE": "Kenya", "TZ": "Tanzania", "GH": "Ghana",
+    "DZ": "Algeria", "MA": "Morocco", "TN": "Tunisia", "LY": "Libya",
+    "JO": "Jordan", "LB": "Lebanon", "SY": "Syria", "YE": "Yemen",
+    "OM": "Oman", "KW": "Kuwait", "BH": "Bahrain", "QA": "Qatar",
+    "NP": "Nepal", "LK": "Sri Lanka", "MM": "Myanmar", "LA": "Laos",
+    "KH": "Cambodia", "PG": "Papua New Guinea"
 }
 
 def get_country_info(code):
-    """Return (flag, english_name, persian_name) for a country code."""
     if not code or len(code) != 2:
         return "🌐", "Unknown", "ناشناخته"
     flag = country_to_flag(code)
@@ -1269,8 +1075,7 @@ async def get_flag_for_ip(ip):
         "SELECT country, flag FROM country_cache WHERE ip=?", (ip,)
     ).fetchone()
     if cached and len(cached[1]) > 1:
-        return cached[1], cached[0]  # flag, country_code
-
+        return cached[1], cached[0]
     try:
         async with httpx.AsyncClient(timeout=3) as cl:
             r = await cl.get(
@@ -1289,7 +1094,6 @@ async def get_flag_for_ip(ip):
                     return flag, country
     except Exception as e:
         log.warning(f"flag API fail for {ip}: {e}")
-
     return "🌐", ""
 
 def clean_proxy_link(url):
@@ -1319,21 +1123,17 @@ def clean_config_url(url: str) -> str:
     return url
 
 # ======================================================================
-# VALIDATION FUNCTIONS - FIX PARSING
+# VALIDATION FUNCTIONS
 # ======================================================================
 def validate_vless(url):
-    """Validate VLESS URL structure."""
     try:
         parsed = urlparse(url)
         if parsed.scheme != "vless":
             return False, "not vless"
-        # Check for userinfo (UUID)
         if not parsed.username or len(parsed.username) < 8:
             return False, "missing or invalid UUID"
-        # Check host
         if not parsed.hostname:
             return False, "missing host"
-        # Check port
         if not parsed.port or parsed.port < 1 or parsed.port > 65535:
             return False, "invalid port"
         return True, "valid"
@@ -1341,15 +1141,12 @@ def validate_vless(url):
         return False, "parse error"
 
 def validate_vmess(url):
-    """Validate VMESS URL structure (base64 encoded JSON)."""
     try:
         if not url.startswith("vmess://"):
             return False, "not vmess"
         b64 = url[8:]
-        # Add padding if needed
         b64 += "=" * (-len(b64) % 4)
         data = base64.b64decode(b64, validate=True).decode('utf-8', errors='ignore')
-        # Parse JSON
         obj = json.loads(data)
         required = ['add', 'port', 'id', 'aid', 'net', 'type', 'host', 'path', 'tls']
         for key in ['add', 'port', 'id']:
@@ -1362,7 +1159,6 @@ def validate_vmess(url):
         return False, f"decode error: {str(e)}"
 
 def validate_trojan(url):
-    """Validate Trojan URL structure."""
     try:
         parsed = urlparse(url)
         if parsed.scheme != "trojan":
@@ -1378,16 +1174,13 @@ def validate_trojan(url):
         return False, "parse error"
 
 def validate_ss(url):
-    """Validate Shadowsocks URL structure."""
     try:
         parsed = urlparse(url)
         if parsed.scheme != "ss":
             return False, "not ss"
-        # Check for valid base64 userinfo
         if parsed.username and parsed.password:
             return True, "valid"
         else:
-            # May be in format ss://base64
             b64 = url[5:]
             b64 += "=" * (-len(b64) % 4)
             decoded = base64.b64decode(b64, validate=True).decode('utf-8', errors='ignore')
@@ -1399,7 +1192,6 @@ def validate_ss(url):
         return False, "parse error"
 
 def validate_socks(url):
-    """Validate SOCKS URL structure (simple)."""
     try:
         parsed = urlparse(url)
         if parsed.scheme not in ['socks', 'socks5', 'socks4']:
@@ -1413,7 +1205,6 @@ def validate_socks(url):
         return False, "parse error"
 
 def validate_hy2(url):
-    """Validate Hysteria2 URL structure."""
     try:
         parsed = urlparse(url)
         if parsed.scheme != "hy2":
@@ -1427,7 +1218,6 @@ def validate_hy2(url):
         return False, "parse error"
 
 def validate_tuic(url):
-    """Validate TUIC URL structure."""
     try:
         parsed = urlparse(url)
         if parsed.scheme != "tuic":
@@ -1441,7 +1231,6 @@ def validate_tuic(url):
         return False, "parse error"
 
 def validate_wireguard(url):
-    """Validate WireGuard URL structure."""
     try:
         parsed = urlparse(url)
         if parsed.scheme != "wireguard":
@@ -1455,7 +1244,6 @@ def validate_wireguard(url):
         return False, "parse error"
 
 def validate_config_link(url):
-    """Validate a config link and return (is_valid, reason)."""
     if not url:
         return False, "empty"
     if url.startswith("vless://"):
@@ -1481,10 +1269,6 @@ def validate_config_link(url):
 # استخراج لینک‌ها با اعتبارسنجی
 # ======================================================================
 def extract_links_from_text(text):
-    """
-    استخراج لینک‌های کانفیگ (vless, vmess, trojan, hy2, tuic, ss, socks, hysteria2, wireguard)
-    و اعتبارسنجی آنها.
-    """
     results = []
     pattern = re.compile(
         r'(vless|vmess|trojan|hy2|tuic|ss|socks|hysteria2|wireguard)://[^\s<>"\'{}()\[\]]+',
@@ -1494,14 +1278,12 @@ def extract_links_from_text(text):
         link = m.group(0).strip()
         link = re.sub(r'[.,;:!؟\'"`]+$', '', link)
         if len(link) > 10:
-            # Validate
             is_valid, reason = validate_config_link(link)
             if is_valid:
                 results.append(link)
             else:
                 log.debug(f"Invalid config link: {link} - {reason}")
 
-    # Attempt base64 decoding
     if not results:
         text_clean = text.replace('\n', '').replace('\r', '').strip()
         if re.match(r'^[A-Za-z0-9+/=]+$', text_clean):
@@ -1557,7 +1339,6 @@ def normalize_proxy_url(url):
 
 def extract_proxy_links_from_text(text):
     results = []
-    # Pattern for https://t.me/proxy
     telegram_proxy_pattern = r'https?://t\.me/proxy\?[^\s<>"\']+'
     for m in re.finditer(telegram_proxy_pattern, text, re.IGNORECASE):
         link = m.group().strip()
@@ -1565,15 +1346,12 @@ def extract_proxy_links_from_text(text):
         link = normalize_telegram_proxy(link)
         if link and link not in results:
             results.append(link)
-
-    # Pattern for tg://proxy
     tg_proxy_pattern = r'tg://proxy\?[^\s<>"\']+'
     for m in re.finditer(tg_proxy_pattern, text, re.IGNORECASE):
         link = m.group().strip()
         link = clean_proxy_link(link)
         if link and link not in results:
             results.append(link)
-
     return results
 
 def extract_uuid_and_address(url):
@@ -1740,7 +1518,7 @@ def add_custom_query_to_url(url, custom_query, protocol):
     return new_base
 
 # ======================================================================
-# پینگ (بهینه‌شده) - با لایه‌های تست
+# پینگ (به‌کارگیری برای سلامت، اما نمایش داده نمی‌شود)
 # ======================================================================
 async def host_to_ip(host):
     try:
@@ -1837,19 +1615,66 @@ async def ping_from_iran_only(host, port=None, allow_tcp_fallback=True):
     return 0, False, 0
 
 async def check_full_link_ping(url, ping_mode="iran", perform_ping=True):
-    """Perform ping test if perform_ping is True, else return a dummy."""
     if not perform_ping:
-        return 0, True, 0  # treat as reachable if ping testing disabled? Actually we should not claim it's working.
-        # Instead, we need to return a neutral status. We'll handle this in the caller.
+        return 0, True, 0  # Treat as reachable if ping testing disabled? Actually we still need host resolution.
+        # We'll just do DNS check.
     host, port = extract_host(url)
     if not host:
         return 0, False, 0
+    # Always do DNS check to see if host resolves
+    ip = await host_to_ip(host)
+    if not ip:
+        return 0, False, 0
+    if not perform_ping:
+        return 0, True, 0
     allow_tcp = (ping_mode != "iran")
     ping, ok, cnt = await ping_from_iran_only(host, port, allow_tcp_fallback=allow_tcp)
     return ping, ok, cnt
 
 # ======================================================================
-# اسکرپ (بهینه‌شده: استفاده از last_message_id برای توقف)
+# اسکرپ با HTML Parser دقیق
+# ======================================================================
+class TelegramMessageParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.messages = []       # list of dict with 'id' and 'content'
+        self.current_id = None
+        self.in_message = False
+        self.depth = 0
+        self.content_parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'div':
+            attrs_dict = dict(attrs)
+            if 'data-post' in attrs_dict:
+                self.in_message = True
+                self.depth = 1
+                self.current_id = attrs_dict['data-post']
+                self.content_parts = []
+            elif self.in_message:
+                self.depth += 1
+
+    def handle_endtag(self, tag):
+        if self.in_message and tag == 'div':
+            self.depth -= 1
+            if self.depth == 0:
+                self.in_message = False
+                content = ''.join(self.content_parts)
+                self.messages.append({'id': self.current_id, 'content': content})
+                self.current_id = None
+                self.content_parts = []
+
+    def handle_data(self, data):
+        if self.in_message:
+            self.content_parts.append(data)
+
+def parse_telegram_page(html):
+    parser = TelegramMessageParser()
+    parser.feed(html)
+    return parser.messages
+
+# ======================================================================
+# اسکرپ (به‌روز شده)
 # ======================================================================
 _USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -1859,10 +1684,6 @@ _USER_AGENTS = [
 ]
 
 async def scrape_channel_paginated(profile_id, channel, max_pages=5):
-    """
-    اسکرپ با حداکثر max_pages صفحه و توقف هنگام رسیدن به last_message_id.
-    استخراج پیام‌ها و لینک‌های مرتبط.
-    """
     clean_channel = normalize_channel_input(channel)
     if not clean_channel:
         log.warning(f"Invalid channel name: {channel}")
@@ -1875,57 +1696,73 @@ async def scrape_channel_paginated(profile_id, channel, max_pages=5):
     current_url = base_url
     page_count = 0
     stopped = False
+    all_new_msg_ids = []  # collect new message IDs across pages
+
     log.info(f"🔍 Starting scrape for {clean_channel} (max {max_pages} pages, last_msg_id={last_msg_id})")
+
+    # If no baseline, set it and do not process any messages
+    if not last_msg_id:
+        log.info(f"📌 First run for {clean_channel}: setting baseline to newest message ID (no content processed).")
+        # Fetch first page only
+        messages = await _fetch_messages_from_page(base_url, clean_channel)
+        if messages:
+            # messages are in order of appearance (newest first)
+            newest_id = messages[0]['id']
+            update_last_message_id(profile_id, clean_channel, newest_id)
+            log.info(f"✅ Baseline set to {newest_id}")
+        return [], []
 
     while page_count < max_pages and not stopped:
         page_count += 1
         log.info(f"🔍 Scraping page {page_count} for {clean_channel} (url: {current_url})")
-        config_links, proxy_links, msg_ids, msg_content_map = await _scrape_single_page_with_messages(current_url, clean_channel)
-        if not msg_ids:
+        messages = await _fetch_messages_from_page(current_url, clean_channel)
+        if not messages:
             log.info(f"⚠️ No messages found on page {page_count} for {clean_channel}")
             break
 
-        # Determine which messages are new
-        new_msg_ids = []
-        for mid in msg_ids:
-            if last_msg_id and mid == last_msg_id:
+        # Determine new messages: those with ID > last_msg_id (numerically greater)
+        # Also use processed_messages as a safety net
+        new_msgs = []
+        for msg in messages:
+            msg_id = msg['id']
+            # Compare numeric portion
+            parts = msg_id.split('/')
+            if len(parts) == 2 and parts[1].isdigit():
+                num_id = int(parts[1])
+            else:
+                # fallback: string compare
+                num_id = msg_id
+            # If msg_id <= last_msg_id, stop (since messages are ordered newest to oldest)
+            if isinstance(num_id, int) and isinstance(last_msg_id, int) and num_id <= last_msg_id:
                 stopped = True
                 break
-            # Check if already processed (could also check processed_messages)
-            if is_message_processed(profile_id, clean_channel, mid):
+            # Check if already processed (extra safety)
+            if is_message_processed(profile_id, clean_channel, msg_id):
                 continue
-            new_msg_ids.append(mid)
+            new_msgs.append(msg)
 
-        if not new_msg_ids:
+        if not new_msgs:
             log.info(f"✅ No new messages found on page {page_count}, stopping pagination.")
             stopped = True
             break
 
-        # For each new message, extract configs and proxies from its content
-        # We have msg_content_map: mid -> content text
-        for mid in new_msg_ids:
-            content = msg_content_map.get(mid, "")
+        # Process new messages: extract configs/proxies from content
+        for msg in new_msgs:
+            content = msg['content']
             if not content:
                 continue
-            # Extract from this message's content
             configs = extract_links_from_text(content)
             proxies = extract_proxy_links_from_text(content)
             all_configs.extend(configs)
             all_proxies.extend(proxies)
-            # Mark message as processed immediately after extracting
-            mark_message_processed(profile_id, clean_channel, mid)
+            # Mark message processed (extracted)
+            mark_message_processed(profile_id, clean_channel, msg['id'])
+            all_new_msg_ids.append(msg['id'])
 
-        # Update last message id to the newest processed (the first new)
-        if new_msg_ids:
-            # Update last_message_id to the newest message id (which is the first in the page)
-            # But we want to update to the last processed, which is the newest overall.
-            # Since we process in order, the first new is the newest.
-            update_last_message_id(profile_id, clean_channel, new_msg_ids[0])
-
-        # For next page, use the oldest message id on this page (or the last id in the list)
+        # Prepare next page URL using the oldest message ID on this page
         numeric_ids = []
-        for mid in msg_ids:
-            parts = mid.split('/')
+        for msg in messages:
+            parts = msg['id'].split('/')
             if len(parts) == 2 and parts[1].isdigit():
                 numeric_ids.append(int(parts[1]))
         if numeric_ids:
@@ -1935,13 +1772,29 @@ async def scrape_channel_paginated(profile_id, channel, max_pages=5):
             break
         await asyncio.sleep(0.3)
 
+    # After pagination, update last_message_id to the maximum ID among all new messages
+    if all_new_msg_ids:
+        # Extract numeric IDs and take max
+        max_id = None
+        for mid in all_new_msg_ids:
+            parts = mid.split('/')
+            if len(parts) == 2 and parts[1].isdigit():
+                num = int(parts[1])
+                if max_id is None or num > max_id:
+                    max_id = num
+        if max_id is not None:
+            # Convert back to string with channel prefix
+            max_msg_id = f"{clean_channel.lstrip('@')}/{max_id}"
+            update_last_message_id(profile_id, clean_channel, max_msg_id)
+            log.info(f"✅ Updated last_message_id to {max_msg_id} (from {len(all_new_msg_ids)} new messages)")
+
     all_configs = list(set(all_configs))
     all_proxies = list(set(all_proxies))
 
     log.info(f"📊 {clean_channel}: total found {len(all_configs)} configs, {len(all_proxies)} proxies (paginated)")
     return all_configs, all_proxies
 
-async def _scrape_single_page_with_messages(url, channel):
+async def _fetch_messages_from_page(url, channel):
     headers = {
         "User-Agent": _USER_AGENTS[hash(datetime.now().timestamp()) % len(_USER_AGENTS)],
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -1951,62 +1804,26 @@ async def _scrape_single_page_with_messages(url, channel):
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
     }
-    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as cl:
-        r = await cl.get(url, headers=headers)
-        if r.status_code == 429:
-            log.warning(f"Rate limit for {channel}, waiting 10s")
-            await asyncio.sleep(10)
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as cl:
             r = await cl.get(url, headers=headers)
-        if r.status_code != 200:
-            log.warning(f"⚠️ {channel} returned status {r.status_code} for url {url}")
-            return [], [], [], {}
-
-        html_text = r.text
-
-        # Extract message IDs and their content blocks
-        # Telegram web page uses data-post attribute on div elements
-        msg_pattern = r'<div[^>]*data-post="([^"]+)"[^>]*>(.*?)</div>'
-        msg_ids = []
-        msg_content_map = {}
-        # Find all message containers
-        # We'll use a simple approach: extract message ID and content.
-        # We'll parse the HTML by splitting on data-post
-        matches = re.finditer(r'<div[^>]*data-post="([^"]+)"[^>]*>(.*?)</div>', html_text, re.DOTALL)
-        for match in matches:
-            mid = match.group(1)
-            content_block = match.group(2)
-            # Clean content block: remove tags, but keep text
-            # Use a simple text extraction (strip tags)
-            content_text = re.sub(r'<[^>]+>', ' ', content_block)
-            content_text = re.sub(r'\s+', ' ', content_text).strip()
-            msg_ids.append(mid)
-            msg_content_map[mid] = content_text
-
-        # If no messages found via data-post, try another pattern
-        if not msg_ids:
-            # Fallback: look for href="/channel/123" links
-            alt_pattern = r'href="/([^/]+/\d+)"'
-            msg_ids = list(set(re.findall(alt_pattern, html_text)))
-            # Content extraction is harder; we'll skip per-message content and just use whole page
-            # For simplicity, we'll treat the whole page content as combined.
-            # But we'll store empty content for these IDs.
-            for mid in msg_ids:
-                msg_content_map[mid] = html_text  # not ideal but fallback
-
-        # Also extract config/proxy links from the whole page for backward compatibility
-        # but we will use per-message extraction above.
-        # However, we still need to return config and proxy links from the page (global)
-        config_links = extract_links_from_text(html_text)
-        proxy_links = extract_proxy_links_from_text(html_text)
-
-        config_links = list(set(config_links))
-        proxy_links = list(set(proxy_links))
-
-        log.info(f"📄 Page {url}: found {len(config_links)} configs, {len(proxy_links)} proxies, {len(msg_ids)} messages")
-        return config_links, proxy_links, msg_ids, msg_content_map
+            if r.status_code == 429:
+                log.warning(f"Rate limit for {channel}, waiting 10s")
+                await asyncio.sleep(10)
+                r = await cl.get(url, headers=headers)
+            if r.status_code != 200:
+                log.warning(f"⚠️ {channel} returned status {r.status_code} for url {url}")
+                return []
+            html = r.text
+            messages = parse_telegram_page(html)
+            log.info(f"📄 Page {url}: found {len(messages)} messages")
+            return messages
+    except Exception as e:
+        log.warning(f"Error fetching {url}: {e}")
+        return []
 
 # ======================================================================
-# ارسال (بدون تغییر)
+# ارسال
 # ======================================================================
 async def send_with_retry(bot, chat_id, text, parse_mode="HTML", reply_markup=None, disable_web_page_preview=True, max_retries=3):
     retry_count = 0
@@ -2108,7 +1925,7 @@ def split_text(text, max_len=4096):
     return chunks
 
 # ======================================================================
-# ارسال کانفیگ‌ها و پروکسی‌ها (با بهبودهای جدید)
+# ارسال کانفیگ‌ها و پروکسی‌ها (بدون نمایش پینگ)
 # ======================================================================
 async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=False, max_post_override=None):
     if not working:
@@ -2141,9 +1958,8 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
         channel_link = dest if dest else ""
 
     country_display = get_profile_country_display(profile_id)
-    show_ping = get_profile_show_ping(profile_id)
 
-    # Get appropriate sponsor
+    # Sponsor
     sponsor = get_best_sponsor(profile_id, "config")
     sponsor_button = None
     if sponsor and sponsor.get("enabled"):
@@ -2161,7 +1977,7 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
             if ip:
                 flag, country_code = await get_flag_for_ip(ip)
 
-        # Build server header based on display settings
+        # Build server header - NO PING DISPLAY
         header_parts = []
         if channel_link:
             header_parts.append(channel_link)
@@ -2170,10 +1986,8 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
 
         # Country display
         if country_display == 0:
-            # off: no country
             pass
         elif country_display == 1:
-            # English only
             flag_emoji = flag if flag != "🌐" else ""
             en_name = COUNTRY_NAMES_EN.get(country_code, "")
             if flag_emoji and en_name:
@@ -2181,7 +1995,6 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
             elif flag_emoji:
                 header_parts.append(flag_emoji)
         elif country_display == 2:
-            # English + Persian
             flag_emoji = flag if flag != "🌐" else ""
             en_name = COUNTRY_NAMES_EN.get(country_code, "")
             fa_name = COUNTRY_NAMES_FA.get(country_code, "")
@@ -2191,13 +2004,6 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
                 header_parts.append(f"{flag_emoji} {en_name}")
             elif flag_emoji:
                 header_parts.append(flag_emoji)
-
-        # Ping display
-        if show_ping and ping > 0:
-            header_parts.append(f"{ping}ms")
-        elif show_ping and ping == 0:
-            # Don't display 0ms, just skip
-            pass
 
         # Numbering
         if show_numbers:
@@ -2210,7 +2016,7 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
         fragment_text = fragment_text.replace("{FLAG}", flag)
         fragment_text = fragment_text.replace("{COUNTRY_EN}", COUNTRY_NAMES_EN.get(country_code, ""))
         fragment_text = fragment_text.replace("{COUNTRY_FA}", COUNTRY_NAMES_FA.get(country_code, ""))
-        fragment_text = fragment_text.replace("{PING}", str(ping) if ping > 0 else "")
+        fragment_text = fragment_text.replace("{PING}", "")  # removed
         fragment_text = fragment_text.replace("{COUNT}", str(n))
         encoded_fragment = quote(fragment_text, safe='')
         base_url = strip_url_fragment(url)
@@ -2273,7 +2079,7 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
         fragment_text = fragment_text.replace("{FLAG}", flag)
         fragment_text = fragment_text.replace("{COUNTRY_EN}", COUNTRY_NAMES_EN.get(country_code, ""))
         fragment_text = fragment_text.replace("{COUNTRY_FA}", COUNTRY_NAMES_FA.get(country_code, ""))
-        fragment_text = fragment_text.replace("{PING}", str(ping) if ping > 0 else "")
+        fragment_text = fragment_text.replace("{PING}", "")
         fragment_text = fragment_text.replace("{COUNT}", str(n))
         encoded_fragment = quote(fragment_text, safe='')
         base_url = strip_url_fragment(url)
@@ -2301,17 +2107,14 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
 
     show_date = get_profile_show_date_proxy(profile_id)
     country_display = get_profile_country_display(profile_id)
-    show_ping = get_profile_show_ping(profile_id)
     dest = get_profile_dest(profile_id)
     channel_link = get_profile_channel_link(profile_id) or dest or ""
 
     proxy_text = ""
     count = 0
     for proxy_url, ping, flag, country_code in proxies_with_ping[:max_proxies]:
-        # Validate proxy link structure (should be t.me/proxy or tg://proxy)
         if "t.me/proxy" not in proxy_url.lower() and not proxy_url.startswith("tg://proxy"):
             continue
-        # Check if already posted
         if is_proxy_posted(profile_id, proxy_url):
             log.debug(f"[PROXY] already posted: {proxy_url}")
             continue
@@ -2320,14 +2123,13 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
         clean_url = clean_proxy_link(normalized_url)
         safe_url = html.escape(clean_url, quote=False)
 
-        # Build header
+        # Build header - NO PING DISPLAY
         header_parts = []
         if channel_link:
             header_parts.append(channel_link)
         else:
             header_parts.append(dest if dest else "@VaslZone")
 
-        # Country display
         if country_display == 0:
             pass
         elif country_display == 1:
@@ -2348,18 +2150,11 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
             elif flag_emoji:
                 header_parts.append(flag_emoji)
 
-        if show_ping and ping > 0:
-            header_parts.append(f"{ping}ms")
-        elif show_ping and ping == 0:
-            pass
-
         header = " ".join(header_parts)
         if header:
             proxy_text += f"{header}\n"
 
         proxy_text += f"<a href=\"{safe_url}\">Telegram Proxy</a>\n\n"
-        # Mark as posted after successful send later
-        # We'll mark after delivery
         count += 1
 
     if count == 0:
@@ -2377,7 +2172,6 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
         log.error("❌ Banner proxy missing placeholders")
         text = f"🌐 Proxies\n{proxy_text}"
 
-    # Get sponsor for proxy
     sponsor = get_best_sponsor(profile_id, "proxy")
     sponsor_button = None
     if sponsor and sponsor.get("enabled"):
@@ -2395,14 +2189,13 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
     return count, (text, reply_markup)
 
 def get_best_sponsor(profile_id, apply_type="both"):
-    """Select the best sponsor based on priority and schedule."""
     sponsors = get_sponsors(profile_id, apply_type)
     if not sponsors:
         return None
     return sponsors[0]
 
 # ======================================================================
-# چرخه اصلی (با بهبود پروکسی و تست)
+# چرخه اصلی
 # ======================================================================
 async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_proxies=True, is_instant=False):
     log.info("=" * 50)
@@ -2443,8 +2236,8 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
         return 0, "no destination"
 
     ping_mode = get_profile_ping_mode(profile_id)
-    ping_testing = get_profile_ping_enabled(profile_id)  # this is the master switch
-    log.info(f"📡 Sources: {len(sources)} | 🎯 {dest} | 🌍 Ping: {ping_mode} | Ping testing: {ping_testing}")
+    ping_testing = get_profile_ping_enabled(profile_id)
+    log.info(f"📡 Sources: {len(sources)} | 🎯 {dest} | 🌍 Ping mode: {ping_mode} | Ping testing: {ping_testing}")
 
     all_configs = []
     all_proxies = []
@@ -2458,11 +2251,13 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     scrape_tasks = [scrape_one(src) for src in sources]
     results = await asyncio.gather(*scrape_tasks, return_exceptions=True)
 
+    source_stats = {}
     for res in results:
         if isinstance(res, Exception):
             log.warning(f"Scrape error: {res}")
             continue
         src, config_links, proxy_links = res
+        source_stats[src] = {'configs': len(config_links), 'proxies': len(proxy_links)}
         log.info(f"  {src}: {len(config_links)} configs, {len(proxy_links)} proxies from web")
         for link in config_links:
             if link not in seen_urls:
@@ -2490,11 +2285,10 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
 
     working = []
     if enable_configs and new_configs:
-        # Test configs in batches
-        test_limit = min(len(new_configs), 30)  # we can increase batch size later
+        test_limit = min(len(new_configs), 30)
         to_test = new_configs[:test_limit]
         log.info(f"📊 Testing {len(to_test)} configs...")
-        sem = asyncio.Semaphore(50)  # controlled concurrency
+        sem = asyncio.Semaphore(50)
 
         async def _check(item):
             u, src = item
@@ -2503,10 +2297,6 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                     if ping_testing:
                         ping, ok, cnt = await check_full_link_ping(u, ping_mode, perform_ping=True)
                     else:
-                        # Ping testing disabled: we still check host resolution and TCP? But we don't filter.
-                        # We'll just consider it reachable if we can resolve host.
-                        # However, we still want to avoid posting dead links.
-                        # We'll do a DNS check only.
                         host, _ = extract_host(u)
                         if host:
                             ip = await host_to_ip(host)
@@ -2549,7 +2339,6 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
 
             async def check_proxy(proxy_url):
                 async with sem:
-                    # Extract server from proxy URL to get country
                     host, _ = extract_host(proxy_url)
                     flag = "🌐"
                     country_code = ""
@@ -2560,7 +2349,6 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
                     if ping_testing:
                         ping, ok, _ = await check_full_link_ping(proxy_url, ping_mode, perform_ping=True)
                     else:
-                        # Just DNS check
                         if host:
                             ip = await host_to_ip(host)
                             if ip:
@@ -2596,24 +2384,39 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
             sent = await send_to_destination(bot, profile_id, text, buttons)
             if sent:
                 total_proxies = cnt
-                # Mark proxies as posted after successful send
                 for proxy_url, ping, flag, country_code in proxy_with_ping[:max_proxies]:
                     if "t.me/proxy" in proxy_url.lower() or proxy_url.startswith("tg://proxy"):
                         if not is_proxy_posted(profile_id, proxy_url):
                             mark_proxy_posted(profile_id, proxy_url)
 
+    # Build detailed diagnostic report
+    sources_ok = len(source_stats)
+    sources_fail = 0
+    total_msgs_scanned = 0  # not tracked exactly, but we can estimate from sources
+    total_new_msgs = 0  # not tracked here, we can compute from new_configs/proxies? approximate
+    configs_found = len(all_configs)
+    configs_valid = len(working)
+    proxies_found = len(all_proxies)
+    proxies_valid = len(proxy_with_ping)
+    errors = 0
+
     result_msg = f"posted {total_configs} configs and {total_proxies} proxies"
     if total_configs == 0 and total_proxies == 0:
         result_msg = "no new content to send"
 
+    # Detailed log
     log.info(f"✅ Cycle result for profile {profile_id}: {result_msg}")
+    log.info(f"   Sources checked: {sources_ok}")
+    log.info(f"   Configs discovered: {configs_found}, valid: {configs_valid}, posted: {total_configs}")
+    log.info(f"   Proxies discovered: {proxies_found}, valid: {proxies_valid}, posted: {total_proxies}")
     log.info("=" * 50)
-    return total_configs + total_proxies, result_msg
+
+    # Return a more informative message for manual run
+    return total_configs + total_proxies, f"{result_msg} (sources: {sources_ok}, cfg: {configs_valid}, prx: {proxies_valid})"
 
 # ======================================================================
-# حلقه‌های خودکار (با مدیریت بهتر)
+# حلقه‌های خودکار
 # ======================================================================
-# Task registry to prevent duplicate loops
 _active_tasks = {}  # profile_id -> dict of tasks
 
 async def profile_loop_config(bot, profile_id):
@@ -2761,7 +2564,7 @@ async def profile_loop_proxy(bot, profile_id):
             await asyncio.sleep(60)
 
 # ======================================================================
-# بک‌آپ خودکار، گزارش روزانه، Railway و پاکسازی (بدون تغییر)
+# بک‌آپ خودکار، گزارش روزانه، Railway و پاکسازی
 # ======================================================================
 backup_locks = {}
 
@@ -3063,7 +2866,7 @@ async def periodic_cleanup():
         await asyncio.sleep(300)
 
 # ======================================================================
-# مدیریت ادمین و زبان (بدون تغییر)
+# مدیریت ادمین و زبان
 # ======================================================================
 def is_admin(user_id: int) -> bool:
     if user_id == MAIN_ADMIN_ID:
@@ -3103,7 +2906,7 @@ def set_lang(lang: str):
     conn.commit()
 
 # ======================================================================
-# کیبوردها و پیام‌ها (با اضافه شدن دکمه‌های جدید)
+# کیبوردها و پیام‌ها
 # ======================================================================
 BOT_REF = None
 
@@ -3130,10 +2933,9 @@ T = {
                        "📦 بک‌آپ هر {backup_interval} عدد\n"
                        "🏷️ قالب نام: {naming}\n"
                        "🔗 لینک کانال: {channel_link}\n"
-                       "🌍 پینگ: {ping_status}\n"
+                       "🌍 تست پینگ: {ping_status}\n"
                        "🔘 وضعیت: {profile_status}\n"
-                       "🌐 کشور: {country_display}\n"
-                       "📡 نمایش پینگ: {show_ping}",
+                       "🌐 کشور: {country_display}",
         "general_settings": "⚙️ **تنظیمات عمومی**\n\n"
                             "زبان فعلی: {lang}\n"
                             "تعداد ادمین‌ها: {admins_count}",
@@ -3299,14 +3101,11 @@ T = {
         "toggle_ping": "✅ پینگ {'فعال' if status else 'غیرفعال'} شد.",
         "btn_toggle_profile": "🔘 پروفایل: {status}",
         "toggle_profile": "✅ پروفایل {'فعال' if status else 'غیرفعال'} شد.",
-        # New keys
         "btn_country_display": "🌐 کشور: {mode}",
         "country_display_off": "خاموش",
         "country_display_en": "انگلیسی",
         "country_display_enfa": "انگلیسی+فارسی",
         "country_display_set": "✅ نمایش کشور به {mode} تغییر کرد.",
-        "btn_show_ping": "📡 نمایش پینگ: {status}",
-        "show_ping_toggle": "✅ نمایش پینگ {'فعال' if status else 'غیرفعال'} شد.",
         "btn_sponsor_list": "📋 لیست اسپانسرها",
         "btn_add_sponsor": "➕ افزودن اسپانسر",
         "sponsor_list_title": "📋 **لیست اسپانسرهای پروفایل {name}**\n\n{sponsors}",
@@ -3338,7 +3137,6 @@ T = {
         "btn_banner_proxy_edit": "🌐 ویرایش بنر پروکسی",
     },
     "en": {
-        # ... (simplified for brevity, but should be complete)
         "welcome": "🤖 **Config & Proxy Bot**\n\n"
                   "📡 Profiles: {profiles}\n"
                   "🔢 Next: #{next_n}\n"
@@ -3360,11 +3158,205 @@ T = {
                        "📦 Backup every {backup_interval}\n"
                        "🏷️ Naming: {naming}\n"
                        "🔗 Channel link: {channel_link}\n"
-                       "🌍 Ping: {ping_status}\n"
+                       "🌍 Ping test: {ping_status}\n"
                        "🔘 Status: {profile_status}\n"
-                       "🌐 Country: {country_display}\n"
-                       "📡 Show ping: {show_ping}",
-        # ... (other keys)
+                       "🌐 Country: {country_display}",
+        "btn_back": "🔙 Back",
+        "btn_add_source": "➕ Add Source",
+        "btn_add_dest": "➕ Add Destination",
+        "btn_dest_list": "📋 Destinations",
+        "btn_sponsors": "📢 Sponsor",
+        "btn_set_dest": "🎯 Set Destination",
+        "btn_set_name": "🎨 Name",
+        "btn_set_banner": "📝 Banner",
+        "btn_set_banner_config": "📝 Config Banner",
+        "btn_set_banner_proxy": "📝 Proxy Banner",
+        "btn_set_time": "⏰ Schedule",
+        "btn_set_max": "🎯 Max Posts",
+        "btn_stats": "📊 Stats",
+        "btn_test": "🧪 Test",
+        "btn_clear": "🗑 Clear DB",
+        "btn_reset": "🔢 Reset Number",
+        "btn_ping_mode": "🌍 Iran Only",
+        "btn_runnow": "▶️ Run Now",
+        "btn_instant": "⚡ Instant Update",
+        "btn_manual_send": "📤 Manual Send",
+        "btn_manage_sources": "📡 Manage Sources",
+        "btn_toggle_numbers": "🔢 Numbering: {status}",
+        "btn_set_custom_query": "🔗 Custom Query",
+        "btn_empty": "🧹 Empty",
+        "send_prompt": "📝 Enter channel name (with or without @):",
+        "added": "✅ Added {item}",
+        "removed": "✅ Removed",
+        "test_ok": "✅ Sent to {dest}",
+        "test_err": "❌ Error:\n<code>{err}</code>",
+        "no_pings": "❌ No ping",
+        "clear_q1": "⚠️ Clear? (1/2)\n⛔ Irreversible",
+        "dest_set": "✅ Destination: {dest}",
+        "name_set": "✅ Name: {name}",
+        "banner_ok": "✅ Banner saved",
+        "banner_err": "❌ Must contain {{configs}} or {{proxies}}",
+        "interval_ok": "✅ Every {n} minutes",
+        "interval_err": "❌ 1-1440 minutes (0 for instant)",
+        "interval_wrong": "❌ Only numbers",
+        "max_ok": "✅ Max {n}",
+        "max_err": "❌ 1-50",
+        "src_title": "📡 Sources ({n}):",
+        "src_none": "Empty",
+        "reset_ok": "✅ Reset (#1)",
+        "sp_prompt": "📢 Sponsor:\nFormat: name|url|button_text|color\nColors: primary, success, danger",
+        "sp_added": "✅ '{name}' added",
+        "sp_removed": "✅ Removed",
+        "sp_title": "📢 Sponsor:",
+        "sp_none": "Empty",
+        "sp_err": "❌ Format: name|url|text|color",
+        "doc_select": "Which source?",
+        "doc_no_src": "❌ No source, add one first",
+        "doc_decoding": "🔐 Decoding...",
+        "doc_no_pw": "❌ No password worked",
+        "doc_no_links": "❌ No links found",
+        "doc_done": "🎉 {n} configs and {p} proxies posted",
+        "doc_dup": "All were duplicates",
+        "no_sources": "❌ No sources set",
+        "test_link_prompt": "🔗 Send a config link (vless://, vmess://, etc.)",
+        "btn_toggle_configs": "📡 Configs: {status}",
+        "btn_toggle_proxies": "🌐 Proxies: {status}",
+        "toggle_configs": "✅ Config posting {'enabled' if status else 'disabled'}",
+        "toggle_proxies": "✅ Proxy posting {'enabled' if status else 'disabled'}",
+        "profile_list": "📋 **Profile List**\n\n{list}\n\nClick to manage.",
+        "profile_add_prompt": "📝 Enter new destination name (with or without @):",
+        "profile_added": "✅ Profile '{name}' created.",
+        "profile_deleted": "❌ Profile deleted.",
+        "profile_not_found": "❌ Profile not found.",
+        "manual_send_prompt": "📤 Send a message or file with config/proxy links.\n\n⏳ Bot will parse and send with appropriate banners.\n\n⚠️ **Note:** Manual mode skips ping testing and will resend already posted links.",
+        "manual_send_cancel": "❌ Manual send cancelled.",
+        "manual_send_processing": "⏳ Processing...",
+        "manual_send_done": "✅ Manual send complete.",
+        "custom_query_set": "✅ Custom query set: {query}",
+        "custom_query_prompt": "🔗 Enter custom query (e.g., Telegram=@MyChannel) or press empty:",
+        "source_list": "📡 **Sources for {name}**\n\n{sources}\n\nClick to delete.",
+        "source_deleted": "✅ Source deleted.",
+        "toggle_numbers_ok": "✅ Numbering {'enabled' if status else 'disabled'}.",
+        "date_cfg_toggle": "✅ Config date display {'enabled' if status else 'disabled'}.",
+        "date_prx_toggle": "✅ Proxy date display {'enabled' if status else 'disabled'}.",
+        "sp_edit_prompt": "📢 **Edit Sponsor**\n\nName: {name}\nURL: {url}\nText: {text}\nColor: {color}\nStatus: {'enabled' if enabled else 'disabled'}\n\nSelect field to edit.",
+        "sp_edit_name": "New name (empty to keep):",
+        "sp_edit_url": "New URL (empty to keep):",
+        "sp_edit_text": "New button text (empty to keep):",
+        "sp_edit_color": "New color (primary/success/danger) or empty to keep:",
+        "sp_updated": "✅ Sponsor updated.",
+        "btn_edit_sponsor": "✏️ Edit",
+        "delete_confirm1": "⚠️ **Are you sure you want to delete this profile?**\n\nName: {name}\nID: {id}\n\nThis action is irreversible and will delete all data for this profile (sources, sponsors, history).\n\nTo confirm, press **«Yes, delete»**.",
+        "delete_confirm2": "⚠️ **Final confirmation**\n\nName: {name}\nID: {id}\n\n**Are you absolutely sure?**\n\nPress **«Delete permanently»**.",
+        "delete_cancelled": "❌ Deletion cancelled.",
+        "btn_blacklist": "🚫 Blacklist",
+        "blacklist_title": "🚫 **Blacklist for {name}**\n\nBlocked words:\n{words}\n\nConfigs containing these words will be skipped.",
+        "blacklist_empty": "No words in blacklist.",
+        "blacklist_add_prompt": "📝 Enter blocked word/phrase (multiple with commas or newline):",
+        "blacklist_added": "✅ Added words: {words}",
+        "blacklist_removed": "✅ Word removed.",
+        "blacklist_clear": "✅ Blacklist cleared.",
+        "btn_blacklist_add": "➕ Add",
+        "btn_blacklist_clear": "🗑 Clear All",
+        "btn_backup": "💾 Backup DB",
+        "backup_sent": "✅ Database file sent.",
+        "backup_failed": "❌ Backup failed.",
+        "btn_set_schedule_cron": "⏰ Cron Schedule",
+        "schedule_cron_prompt": "⏰ Enter cron expression (e.g., `*/5 * * * *` for every 5 minutes).\nLeave empty to use minute interval.",
+        "schedule_cron_set": "✅ Cron set: {cron}",
+        "btn_backup_export": "📤 Export Configs/Proxies",
+        "backup_export_type": "📤 **Export**\n\nChoose type:",
+        "backup_export_scope": "📤 **Scope**\n\nAll, last 100, or custom?",
+        "backup_export_count_prompt": "🔢 Enter count:",
+        "backup_export_scope_all": "All",
+        "backup_export_scope_100": "Last 100",
+        "backup_export_scope_custom": "Custom",
+        "btn_timer": "⏱️ Timer",
+        "timer_menu": "⏱️ **Timer for {name}**\n\nStatus: {status}\n\nChoose pause duration before auto-resume.",
+        "timer_set": "✅ Timer set for {minutes} minutes. Auto-posting paused.",
+        "timer_cleared": "✅ Timer cleared.",
+        "timer_expired_notify": "⏰ Timer for {name} (ID: {id}) expired. Auto-posting resumed.",
+        "timer_option_30m": "⏱️ 30 min",
+        "timer_option_1h": "⏱️ 1 hour",
+        "timer_option_2h": "⏱️ 2 hours",
+        "timer_option_4h": "⏱️ 4 hours",
+        "timer_option_8h": "⏱️ 8 hours",
+        "timer_option_custom": "⏱️ Custom",
+        "timer_disable": "⛔ Disable",
+        "timer_custom_prompt": "⏱️ Enter minutes:",
+        "timer_status_active": "⏳ {remaining} minutes remaining",
+        "timer_status_inactive": "Inactive",
+        "btn_log_menu": "📋 Logs",
+        "log_menu_title": "📋 **Get Logs**\n\nChoose log type:",
+        "log_range_title": "📋 **Log {log_type}**\n\nChoose time range:",
+        "log_range_30m": "📅 30 min",
+        "log_range_1h": "📅 1 hour",
+        "log_range_6h": "📅 6 hours",
+        "log_range_24h": "📅 24 hours",
+        "btn_set_backup_interval": "📦 Backup interval",
+        "backup_interval_prompt": "📦 Number of configs per backup file (default 1000):",
+        "backup_interval_set": "✅ Backup interval set to {n}.",
+        "btn_balance": "💰 Balance",
+        "balance_info": "💰 **Balance:** {balance}",
+        "credit_low": "⚠️ Credit below {threshold} USD. Full DB backup sent.",
+        "btn_general": "⚙️ General",
+        "btn_manage_profiles": "📋 Manage Profiles",
+        "btn_language": "🌐 Language",
+        "lang_changed": "✅ Language set to {lang}.",
+        "btn_admins": "👥 Admins",
+        "admin_list": "👥 **Admins**\n\nMain: {main}\n\nOther admins:\n{admins}",
+        "admin_add_prompt": "➕ Enter new admin user ID:",
+        "admin_added": "✅ Admin {id} added.",
+        "admin_removed": "✅ Admin {id} removed.",
+        "admin_cannot_remove_main": "❌ Cannot remove main admin.",
+        "btn_add_admin": "➕ Add Admin",
+        "btn_remove_admin": "❌ Remove Admin",
+        "btn_list_admins": "📋 List Admins",
+        "only_admin": "❌ Only admins can use this bot.",
+        "btn_set_naming_template": "🏷️ Naming Template",
+        "naming_template_prompt": "🏷️ Enter naming template.\n\nVariables:\n- `{Flag}` : country flag\n- `{CHANNEL_ID}` : channel link (from profile)\n- `{COUNT}` : config number\n\nExample:\n`{Flag} | ⚡️Telegram = {CHANNEL_ID}`",
+        "naming_template_set": "✅ Naming template set: {template}",
+        "btn_set_channel_link": "🔗 Channel Link",
+        "channel_link_prompt": "🔗 Enter channel link (e.g., `MyChannel`):\n\nReplaces `{CHANNEL_ID}` in naming template.\nLeave empty to use profile name.",
+        "channel_link_set": "✅ Channel link set: {link}",
+        "btn_toggle_ping": "🌍 Ping: {status}",
+        "toggle_ping": "✅ Ping {'enabled' if status else 'disabled'}.",
+        "btn_toggle_profile": "🔘 Profile: {status}",
+        "toggle_profile": "✅ Profile {'enabled' if status else 'disabled'}.",
+        "btn_country_display": "🌐 Country: {mode}",
+        "country_display_off": "Off",
+        "country_display_en": "English",
+        "country_display_enfa": "English+Persian",
+        "country_display_set": "✅ Country display set to {mode}.",
+        "btn_sponsor_list": "📋 Sponsor List",
+        "btn_add_sponsor": "➕ Add Sponsor",
+        "sponsor_list_title": "📋 **Sponsors for {name}**\n\n{sponsors}",
+        "sponsor_list_empty": "No sponsors set.",
+        "sponsor_item": "• {name} (priority: {priority}) - {'enabled' if enabled else 'disabled'}\n  URL: {url}\n  Button: {text}\n  Apply: {apply}\n  Duration: {duration}",
+        "sponsor_detail": "📢 **Sponsor Details**\n\nName: {name}\nURL: {url}\nButton: {text}\nPriority: {priority}\nStatus: {'enabled' if enabled else 'disabled'}\nApply: {apply}\nDuration: {duration}\nColor: {color}",
+        "sp_add_name": "Enter sponsor name:",
+        "sp_add_url": "Enter sponsor URL (e.g., https://example.com):",
+        "sp_add_text": "Enter button text (default 'Advertisement'):",
+        "sp_add_priority": "Enter priority (higher = more important, default 0):",
+        "sp_add_duration": "Duration in hours (0 for unlimited):",
+        "sp_add_unlimited": "Unlimited? (Yes/No):",
+        "sp_add_apply": "Apply to (config/proxy/both):",
+        "sp_add_color": "Choose button color:",
+        "sp_added_done": "✅ Sponsor '{name}' added successfully.",
+        "sp_edit_list": "Click a sponsor to edit:",
+        "sp_edit_select": "Please select a sponsor.",
+        "sp_edit_field_prompt": "Enter new value for {field} (empty to keep):",
+        "sp_edit_done": "✅ Sponsor updated.",
+        "sp_delete_confirm": "⚠️ Are you sure you want to delete sponsor '{name}'?",
+        "sp_deleted": "✅ Sponsor deleted.",
+        "btn_sponsor_edit": "✏️ Edit",
+        "btn_sponsor_delete": "🗑 Delete",
+        "btn_sponsor_toggle": "🔘 {status}",
+        "btn_ping_testing": "📡 Ping Test: {status}",
+        "ping_testing_toggle": "✅ Ping testing {'enabled' if status else 'disabled'}.",
+        "btn_channel_link_edit": "🔗 Edit Channel Link",
+        "btn_banner_config_edit": "📝 Edit Config Banner",
+        "btn_banner_proxy_edit": "🌐 Edit Proxy Banner",
     }
 }
 
@@ -3379,7 +3371,7 @@ def msg(key, **kwargs):
     return text
 
 # ======================================================================
-# کیبوردها (با اضافه شدن دکمه‌های جدید)
+# کیبوردها
 # ======================================================================
 def main_menu_kb():
     return InlineKeyboardMarkup([
@@ -3406,8 +3398,6 @@ def profile_admin_kb(profile_id):
     ping_label = "🌍 ایران‌فقط" if ping_mode == "iran" else "🌍 جهانی"
     ping_testing = get_profile_ping_enabled(profile_id)
     ping_testing_label = "✅" if ping_testing else "❌"
-    show_ping = get_profile_show_ping(profile_id)
-    show_ping_label = "✅" if show_ping else "❌"
     profile_enabled = get_profile_enabled(profile_id)
     profile_status = "✅" if profile_enabled else "❌"
 
@@ -3451,10 +3441,9 @@ def profile_admin_kb(profile_id):
          InlineKeyboardButton("⏰ بازه پروکسی", callback_data=f"set_prx_interval_{profile_id}", style="primary")],
         [InlineKeyboardButton("📊 تعداد کانفیگ", callback_data=f"set_cfg_max_{profile_id}", style="primary"),
          InlineKeyboardButton("📊 تعداد پروکسی", callback_data=f"set_prx_max_{profile_id}", style="primary")],
-        [InlineKeyboardButton(f"{ping_label} {ping_testing_label}", callback_data=f"tglping_{profile_id}", style="primary"),
+        [InlineKeyboardButton(f"{ping_label}", callback_data=f"tglping_{profile_id}", style="primary"),
          InlineKeyboardButton(msg("btn_ping_testing", status=ping_testing_label), callback_data=f"tgl_ping_test_{profile_id}", style="primary")],
-        [InlineKeyboardButton(msg("btn_show_ping", status=show_ping_label), callback_data=f"tgl_show_ping_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_toggle_profile", status=profile_status), callback_data=f"tgl_profile_{profile_id}", style="danger")],
+        [InlineKeyboardButton(msg("btn_toggle_profile", status=profile_status), callback_data=f"tgl_profile_{profile_id}", style="danger")],
         [InlineKeyboardButton(cfg_btn, callback_data=f"tglcfg_{profile_id}", style="primary"),
          InlineKeyboardButton(prx_btn, callback_data=f"tglproxy_{profile_id}", style="primary")],
         [InlineKeyboardButton(num_btn, callback_data=f"togglenum_{profile_id}", style="primary")],
@@ -3616,7 +3605,7 @@ def manage_admins_kb():
     ])
 
 # ======================================================================
-# دستورات (بدون تغییر)
+# دستورات
 # ======================================================================
 async def cmd_start(u, ctx):
     if not is_admin(u.effective_user.id):
@@ -3772,7 +3761,7 @@ async def cmd_status(update: Update, context):
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 # ======================================================================
-# کالبک (با اضافه شدن هندلرهای جدید)
+# کالبک
 # ======================================================================
 async def on_callback(u, ctx):
     q = u.callback_query
@@ -3973,7 +3962,6 @@ async def on_callback(u, ctx):
                     new_enabled = 0 if row[0] else 1
                     update_sponsor(sponsor_id, enabled=new_enabled)
                     await q.answer(f"اسپانسر {'فعال' if new_enabled else 'غیرفعال'} شد.")
-                    # Refresh detail
                     c.execute("SELECT * FROM sponsors WHERE id=?", (sponsor_id,))
                     row2 = c.fetchone()
                     if row2:
@@ -4086,7 +4074,7 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # Sponsor add steps (multi-step)
+        # Sponsor add steps
         if d.startswith("sp_add_step_"):
             parts = d.split("_")
             if len(parts) >= 4:
@@ -4240,26 +4228,7 @@ async def on_callback(u, ctx):
 
         # End sponsor new
 
-        # Legacy sponsor handling (keep for compatibility)
-        if d.startswith("sp_menu_"):
-            parts = d.split("_")
-            if len(parts) >= 3:
-                try:
-                    profile_id = int(parts[2])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                await q.edit_message_text("📢 **مدیریت اسپانسرها**", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📋 لیست اسپانسرها", callback_data=f"sponsor_list_{profile_id}", style="primary")],
-                    [InlineKeyboardButton("➕ افزودن اسپانسر", callback_data=f"sp_add_step_{profile_id}_name", style="success")],
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f"prof_{profile_id}", style="primary")],
-                ]))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        # ---------- Existing callbacks (unchanged) ----------
-        # Sources
+        # ---------- Existing callbacks ----------
         if d.startswith("src_list_"):
             parts = d.split("_")
             if len(parts) >= 3:
@@ -4647,23 +4616,6 @@ async def on_callback(u, ctx):
                 new_val = not current
                 set_profile_ping_enabled(profile_id, new_val)
                 await q.answer(msg("ping_testing_toggle", status=new_val))
-                await show_profile_admin(q.message, profile_id)
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("tgl_show_ping_"):
-            parts = d.split("_")
-            if len(parts) >= 3:
-                try:
-                    profile_id = int(parts[2])
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                current = get_profile_show_ping(profile_id)
-                new_val = not current
-                set_profile_show_ping(profile_id, new_val)
-                await q.answer(msg("show_ping_toggle", status=new_val))
                 await show_profile_admin(q.message, profile_id)
             else:
                 await q.answer("⚠️ خطا در داده")
@@ -5255,7 +5207,7 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        # New toggles for country
+        # Country toggle
         if d.startswith("tgl_country_"):
             parts = d.split("_")
             if len(parts) >= 3:
@@ -5380,8 +5332,6 @@ async def show_profile_admin(msg_or_q, profile_id):
     ping_display = "ایران" if ping_mode == "iran" else "جهانی"
     ping_testing = get_profile_ping_enabled(profile_id)
     ping_status = "✅" if ping_testing else "❌"
-    show_ping = get_profile_show_ping(profile_id)
-    show_ping_label = "✅" if show_ping else "❌"
     profile_enabled = get_profile_enabled(profile_id)
     profile_status = "✅" if profile_enabled else "❌"
 
@@ -5428,7 +5378,6 @@ async def show_profile_admin(msg_or_q, profile_id):
         ping_status=ping_status,
         profile_status=profile_status,
         country_display=country_label,
-        show_ping=show_ping_label,
     )
     kb = profile_admin_kb(profile_id)
     try:
@@ -5443,7 +5392,7 @@ async def show_profile_admin(msg_or_q, profile_id):
             raise
 
 # ======================================================================
-# هندلرهای متنی و سند (بدون تغییر، حذف بخش فایل)
+# هندلرهای متنی و سند
 # ======================================================================
 async def on_text(u, ctx):
     if not is_admin(u.effective_user.id):
@@ -5517,22 +5466,16 @@ async def on_text(u, ctx):
                     if duration < 0:
                         raise ValueError
                     sp["duration_hours"] = duration
-                    # If unlimited, set unlimited to 0
                     if sp["unlimited"]:
                         sp["unlimited"] = 0
                 except:
                     await u.message.reply_text("❌ مدت باید عدد غیرمنفی باشد.")
                     return
-            else:
-                # keep existing
-                pass
         elif field == "unlimited":
-            # toggle
             sp["unlimited"] = 1 if not sp["unlimited"] else 0
             if sp["unlimited"]:
                 sp["duration_hours"] = 0
         elif field == "apply":
-            # We'll handle via callback
             await u.message.reply_text("لطفاً از دکمه‌های انتخاب استفاده کنید.")
             return
         elif field == "color":
@@ -5542,11 +5485,9 @@ async def on_text(u, ctx):
             await u.message.reply_text("فیلد نامعتبر.")
             del ctx.user_data["sponsor_edit"]
             return
-        # Update sponsor
         update_sponsor(sponsor_id, **sp)
         await u.message.reply_text(msg("sp_updated"))
         del ctx.user_data["sponsor_edit"]
-        # Show detail again
         profile_id = sp["profile_id"]
         await q_edit_or_reply(u.message, f"sp_detail_{sponsor_id}", u)
         return
@@ -5961,7 +5902,7 @@ async def on_document(u, ctx):
         return
 
 # ======================================================================
-# ارسال دستی (بدون دانلود فایل)
+# ارسال دستی
 # ======================================================================
 async def process_manual_text(u, message, profile_id, is_document=False):
     p = await message.reply_text(msg("manual_send_processing"))

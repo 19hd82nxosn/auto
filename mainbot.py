@@ -1920,19 +1920,50 @@ def extract_uuid_and_address(url):
     except Exception:
         return "", ""
 
+def canonical_config_identity(url):
+    """Identity includes UUID/credentials, host, port, path and transport settings; display fragment is ignored."""
+    try:
+        url = clean_config_url(url or "").strip()
+        p = urlparse(url)
+        scheme = p.scheme.lower()
+        if scheme == "vmess":
+            raw = unquote(p.netloc + p.path)
+            raw += "=" * (-len(raw) % 4)
+            try:
+                obj = json.loads(base64.b64decode(raw).decode("utf-8", errors="ignore"))
+                keys = ["v","add","port","id","aid","scy","net","type","host","path","tls","sni","alpn","fp","allowInsecure"]
+                obj = {k: str(obj.get(k, "")) for k in keys if k in obj}
+                return "vmess|" + json.dumps(obj, sort_keys=True, separators=(",", ":"))
+            except Exception:
+                pass
+        pairs = parse_qs(p.query, keep_blank_values=True)
+        query = urlencode(sorted((k, v) for k, vals in pairs.items() for v in vals), doseq=True)
+        return urlunparse((scheme, p.netloc.lower(), p.path or "", p.params, query, ""))
+    except Exception:
+        return clean_config_url(url or "").split("#", 1)[0].strip()
+
 def is_already_posted(profile_id, url):
-    url = clean_config_url(url)
-    uid, host = extract_uuid_and_address(url)
-    if not uid or not host:
-        uid = url[:200]
-        host = ""
-    return c.execute(
-        "SELECT 1 FROM seen WHERE uuid=? AND address=? AND profile_id=?",
-        (uid, host, profile_id)).fetchone() is not None
+    identity = canonical_config_identity(url)
+    rows = c.execute("SELECT full_url FROM seen WHERE profile_id=?", (profile_id,)).fetchall()
+    if any(canonical_config_identity(row[0] or "") == identity for row in rows):
+        return True
+    uid, host = extract_uuid_and_address(clean_config_url(url))
+    return bool(uid and host and c.execute("SELECT 1 FROM seen WHERE uuid=? AND address=? AND profile_id=?", (uid, host, profile_id)).fetchone())
+
+def canonical_proxy_identity(url):
+    try:
+        norm = canonical_telegram_proxy_url(url or "") or (url or "").strip()
+        p = urlparse(norm)
+        pairs = parse_qs(p.query, keep_blank_values=True)
+        query = urlencode(sorted((k, v) for k, vals in pairs.items() for v in vals), doseq=True)
+        return urlunparse((p.scheme.lower(), p.netloc.lower(), p.path, p.params, query, ""))
+    except Exception:
+        return (url or "").strip().split("#", 1)[0]
 
 def is_proxy_posted(profile_id, proxy_url):
-    r = c.execute("SELECT 1 FROM proxies_seen WHERE proxy_url=? AND profile_id=?", (proxy_url, profile_id)).fetchone()
-    return r is not None
+    identity = canonical_proxy_identity(proxy_url)
+    rows = c.execute("SELECT proxy_url FROM proxies_seen WHERE profile_id=?", (profile_id,)).fetchall()
+    return any(canonical_proxy_identity(row[0] or "") == identity for row in rows)
 
 def mark_proxy_posted(profile_id, proxy_url):
     now = get_tehran_time()
@@ -2818,6 +2849,8 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
     all_configs = []
     all_proxies = []
     seen_urls = set()
+    seen_config_identities = set()
+    seen_proxy_identities = set()
     source_newest_ids = {}
 
     # Scrape all sources in parallel
@@ -2838,14 +2871,16 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
         source_newest_ids[src] = newest_id
         log.info(f"  [profile={profile_id}][{stream}] {src}: {len(config_links)} configs, {len(proxy_links)} proxies from web, newest={newest_id or 'NONE'}")
         for link in config_links:
-            if link not in seen_urls:
-                seen_urls.add(link)
+            identity = canonical_config_identity(link)
+            if identity not in seen_config_identities:
+                seen_config_identities.add(identity)
                 all_configs.append((link, src))
         for link in proxy_links:
-            if link not in seen_urls:
-                seen_urls.add(link)
-                norm = normalize_proxy_url(link)
-                if norm:
+            norm = normalize_proxy_url(link)
+            if norm:
+                identity = canonical_proxy_identity(norm)
+                if identity not in seen_proxy_identities:
+                    seen_proxy_identities.add(identity)
                     all_proxies.append(norm)
 
     # Filter duplicates based on database

@@ -308,6 +308,7 @@ ensure_column("profiles", "profile_enabled", "INTEGER DEFAULT 1", 1)
 ensure_column("profiles", "country_display", "INTEGER DEFAULT 2", 2)
 ensure_column("profiles", "show_ping", "INTEGER DEFAULT 1", 1)
 ensure_column("profiles", "proxy_banner_template", "TEXT DEFAULT ''", "")
+ensure_column("profiles", "proxy_post_mode", "INTEGER DEFAULT 0", 0)
 ensure_column("profiles", "ping_testing", "INTEGER DEFAULT 1", 1)
 
 c.execute("""CREATE TABLE IF NOT EXISTS blacklist (
@@ -380,14 +381,14 @@ def fix_column_types():
                      schedule_cron, last_backup_count, timer_expiry, timer_duration, backup_interval,
                      interval_config, interval_proxy, max_post_config, max_post_proxy,
                      naming_template, channel_link, ping_enabled, profile_enabled,
-                     country_display, show_ping, proxy_banner_template, ping_testing)
+                     country_display, show_ping, proxy_banner_template, proxy_post_mode, ping_testing)
                 SELECT id, dest_name, sources, banner_config, banner_proxy, interval_min,
                        max_post, max_proxies, post_configs, post_proxies, ping_mode, last_num,
                        created_at, show_numbers, custom_query, show_date_config, show_date_proxy,
                        schedule_cron, last_backup_count, timer_expiry, timer_duration, backup_interval,
                        interval_config, interval_proxy, max_post_config, max_post_proxy,
                        naming_template, channel_link, ping_enabled, profile_enabled,
-                       country_display, show_ping, proxy_banner_template, ping_testing
+                       country_display, show_ping, proxy_banner_template, proxy_post_mode, ping_testing
                 FROM profiles
             """)
             c.execute("DROP TABLE profiles")
@@ -538,7 +539,7 @@ def migrate_old_config():
              timer_expiry, timer_duration, backup_interval,
              interval_config, interval_proxy, max_post_config, max_post_proxy,
              naming_template, channel_link, ping_enabled, profile_enabled,
-             country_display, show_ping, proxy_banner_template, ping_testing)
+             country_display, show_ping, proxy_banner_template, proxy_post_mode, ping_testing)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (dest, old_sources, old_banner_config, old_banner_proxy,
              old_interval, old_max_post, old_max_proxies,
@@ -615,7 +616,7 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
          timer_expiry, timer_duration, backup_interval,
          interval_config, interval_proxy, max_post_config, max_post_proxy,
          naming_template, channel_link, ping_enabled, profile_enabled,
-         country_display, show_ping, proxy_banner_template, ping_testing)
+         country_display, show_ping, proxy_banner_template, proxy_post_mode, ping_testing)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (dest_name, sources, banner_config, banner_proxy,
          interval_min, max_post, max_proxies,
@@ -624,7 +625,7 @@ def create_profile(dest_name, sources="", banner_config=None, banner_proxy=None,
          show_date_config, show_date_proxy, schedule_cron, 0, None, 0, backup_interval,
          interval_config, interval_proxy, max_post_config, max_post_proxy,
          naming_template, channel_link, ping_enabled, profile_enabled,
-         country_display, show_ping, proxy_banner_template, ping_testing))
+         country_display, show_ping, proxy_banner_template, proxy_post_mode, ping_testing))
     conn.commit()
     return c.lastrowid
 
@@ -636,7 +637,7 @@ def update_profile(profile_id, **kwargs):
                "schedule_cron", "last_backup_count", "timer_expiry", "timer_duration",
                "backup_interval", "interval_config", "interval_proxy", "max_post_config", "max_post_proxy",
                "naming_template", "channel_link", "ping_enabled", "profile_enabled",
-               "country_display", "show_ping", "proxy_banner_template", "ping_testing"]
+               "country_display", "show_ping", "proxy_banner_template", "proxy_post_mode", "ping_testing"]
     for key, value in kwargs.items():
         if key in allowed:
             c.execute(f"UPDATE profiles SET {key}=? WHERE id=?", (value, profile_id))
@@ -923,32 +924,39 @@ def is_word_blacklisted(profile_id, text):
             return True
     return False
 
+# Proxy post mode: 0 = normal text, 1 = inline glass buttons
+def get_profile_proxy_post_mode(profile_id):
+    prof = get_profile(profile_id)
+    return int(prof.get("proxy_post_mode", 0)) if prof else 0
+
+def set_profile_proxy_post_mode(profile_id, mode):
+    mode = 1 if int(mode) else 0
+    update_profile(profile_id, proxy_post_mode=mode)
+    return mode
+
 # New sponsor functions
-def get_sponsors(profile_id, apply_type="both"):
-    """Get active sponsors for a profile, optionally filter by config/proxy.
-       Also filters expired sponsors (if not unlimited)."""
+def get_sponsors(profile_id, apply_type="both", include_disabled=False):
+    """Return sponsors for admin or active selection. Disabled sponsors remain editable."""
     now = datetime.now(TEHRAN_TZ)
-    query = "SELECT * FROM sponsors WHERE profile_id=? AND enabled=1"
+    query = "SELECT * FROM sponsors WHERE profile_id=?"
     params = [profile_id]
-    if apply_type == "config":
-        query += " AND apply_config=1"
-    elif apply_type == "proxy":
-        query += " AND apply_proxy=1"
+    if not include_disabled:
+        query += " AND enabled=1"
+    # Legacy DB columns are retained for compatibility, but sponsor application
+    # is no longer exposed as an admin setting: every active sponsor is global.
     query += " ORDER BY priority DESC, id ASC"
     c.execute(query, params)
     rows = c.fetchall()
     cols = [d[0] for d in c.description]
-    sponsors = []
+    sponsors=[]
     for row in rows:
-        sponsor = dict(zip(cols, row))
-        # Check if expired
-        if not sponsor["unlimited"] and sponsor["expires_at"]:
+        sponsor=dict(zip(cols,row))
+        if not sponsor.get("unlimited",1) and sponsor.get("expires_at"):
             try:
-                expires = datetime.fromisoformat(sponsor["expires_at"])
-                if expires < now:
-                    # Expired, skip
+                expires=datetime.fromisoformat(sponsor["expires_at"])
+                if expires <= now:
                     continue
-            except:
+            except Exception:
                 pass
         sponsors.append(sponsor)
     return sponsors
@@ -976,7 +984,7 @@ def add_sponsor(profile_id, name, url, button_text="Advertisement", enabled=1,
 
 def update_sponsor(sponsor_id, **kwargs):
     allowed = ["name", "url", "button_text", "enabled", "priority",
-               "duration_hours", "unlimited", "apply_config", "apply_proxy", "color"]
+               "duration_hours", "unlimited", "apply_config", "apply_proxy", "color", "expires_at"]
     # If unlimited or duration changes, update expires_at
     set_clauses = []
     params = []
@@ -998,7 +1006,8 @@ def update_sponsor(sponsor_id, **kwargs):
             if new_unlimited:
                 expires_at = None
             else:
-                expires_at = (datetime.fromisoformat(created_at) + timedelta(hours=new_duration)).isoformat()
+                # Duration is relative to the moment it is changed, not the original creation time.
+                expires_at = (datetime.now(TEHRAN_TZ) + timedelta(hours=int(new_duration or 1))).isoformat()
             set_clauses.append("expires_at=?")
             params.append(expires_at)
     params.append(get_tehran_time())
@@ -1559,33 +1568,42 @@ def extract_links_from_text(text):
 
     return list(set(results))
 
+def canonical_telegram_proxy_url(url):
+    """Return a Telegram proxy URL that is safe for Telegram messages/buttons."""
+    norm = normalize_telegram_proxy(url or "")
+    if not norm:
+        return None
+    norm = norm.replace("&amp;", "&")
+    if norm.lower().startswith("tg://proxy?"):
+        return "https://t.me/proxy?" + norm.split("?", 1)[1]
+    if re.match(r"^https?://t\.me/proxy\?", norm, re.I):
+        return norm
+    return None
+
 def normalize_proxy_url(url):
     if not url:
         return None
     url = clean_proxy_link(url.strip())
-    if url.startswith("tg://proxy") or "t.me/proxy" in url.lower():
-        return normalize_telegram_proxy(url)
-    return None
+    return canonical_telegram_proxy_url(url)
 
 def extract_proxy_links_from_text(text):
+    """Extract Telegram MTProto proxy links from visible text AND raw HTML hrefs."""
+    if not text:
+        return []
+    source = html.unescape(text)
     results = []
-    # Pattern for https://t.me/proxy
-    telegram_proxy_pattern = r'https?://t\.me/proxy\?[^\s<>"\']+'
-    for m in re.finditer(telegram_proxy_pattern, text, re.IGNORECASE):
-        link = m.group().strip()
-        link = clean_proxy_link(link)
-        link = normalize_telegram_proxy(link)
-        if link and link not in results:
-            results.append(link)
-
-    # Pattern for tg://proxy
-    tg_proxy_pattern = r'tg://proxy\?[^\s<>"\']+'
-    for m in re.finditer(tg_proxy_pattern, text, re.IGNORECASE):
-        link = m.group().strip()
-        link = clean_proxy_link(link)
-        if link and link not in results:
-            results.append(link)
-
+    patterns = [
+        r'https?://t\.me/proxy\?[^\s<>"]+',
+        r'tg://proxy\?[^\s<>"]+',
+    ]
+    for pattern in patterns:
+        for m in re.finditer(pattern, source, re.IGNORECASE):
+            link = clean_proxy_link(m.group(0))
+            # Strip HTML/Markdown punctuation that cannot belong to the URL.
+            link = link.rstrip('.,;:!?)]}\'')
+            norm = canonical_telegram_proxy_url(link)
+            if norm and norm not in results:
+                results.append(norm)
     return results
 
 def extract_uuid_and_address(url):
@@ -1920,11 +1938,10 @@ async def scrape_channel_paginated(profile_id, channel, max_pages=5, stream="com
 
     effective_max_pages = max_pages
     if stream == "proxy" and not last_msg_id:
-        # Recovery path for existing installations: the old shared cursor may
-        # already be at the newest message because the config worker consumed
-        # it. Start proxy recovery from the newest public page only instead of
-        # flooding the destination with a large historical backlog.
-        effective_max_pages = 1
+        # Existing installations may have no proxy cursor. Scan a small recent
+        # window so proxies on the newest few pages are not missed. Dedup/state
+        # protection prevents reposting already published proxies.
+        effective_max_pages = min(max_pages, 3)
 
     log.info(
         f"🔍 [profile={profile_id}][stream={stream}] Starting scrape for "
@@ -2040,11 +2057,21 @@ async def _scrape_single_page_with_messages(url, channel):
             body_start = match.start()
             body_end = markers[idx + 1].start() if idx + 1 < len(markers) else len(html_text)
             block = html_text[body_start:body_end]
+            # Extract URLs from the raw HTML BEFORE stripping tags. Telegram
+            # often stores proxy/config URLs inside <a href="..."> while the
+            # visible anchor text contains no URL at all.
+            block_proxy_links = extract_proxy_links_from_text(block)
+            block_config_links = extract_links_from_text(block)
             content_text = re.sub(r'<script\b[^>]*>.*?</script>', ' ', block, flags=re.IGNORECASE | re.DOTALL)
             content_text = re.sub(r'<style\b[^>]*>.*?</style>', ' ', content_text, flags=re.IGNORECASE | re.DOTALL)
             content_text = re.sub(r'<[^>]+>', ' ', content_text)
             content_text = html.unescape(content_text)
             content_text = re.sub(r'\s+', ' ', content_text).strip()
+            # Preserve extracted href URLs for the downstream per-message parser.
+            if block_config_links:
+                content_text += "\n" + "\n".join(block_config_links)
+            if block_proxy_links:
+                content_text += "\n" + "\n".join(block_proxy_links)
             msg_ids.append(mid)
             msg_content_map[mid] = content_text
 
@@ -2178,7 +2205,7 @@ def split_text(text, max_len=4096):
 # ======================================================================
 # ارسال کانفیگ‌ها و پروکسی‌ها (با بهبودهای جدید)
 # ======================================================================
-async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=False, max_post_override=None):
+async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=False, max_post_override=None, extra_button_rows=None):
     if not working:
         return 0
 
@@ -2290,15 +2317,18 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
     except KeyError:
         full_text = f"✦ V2Ray Config List\n\n{configs_text}\n\n◈ 📢 Channel\n↳ @Auto_Server\n◈ #کانفیگ #ویتوری"
 
+    # Optional proxy glass-button rows are inserted ABOVE the sponsor.
+    # Each row is already a list of InlineKeyboardButton objects.
     buttons = []
-    if sponsor_button:
-        buttons.append(sponsor_button)
+    if extra_button_rows:
+        buttons.extend(extra_button_rows)
     channel_link_display = get_profile_channel_link(profile_id)
     if channel_link_display:
         channel_url = f"https://t.me/{channel_link_display}"
-        channel_button = InlineKeyboardButton("📢 کانال", url=channel_url)
-        buttons.append(channel_button)
-    reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
+        buttons.append([InlineKeyboardButton("📢 کانال", url=channel_url, style="primary")])
+    if sponsor_button:
+        buttons.append([sponsor_button])
+    reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
 
     ok = await send_with_retry(
         bot, dest, full_text,
@@ -2353,109 +2383,91 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
     return sent_count
 
 async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max_proxies_override=None):
+    """Build a proxy post. Does NOT mark anything posted; caller does that only after Telegram success."""
     if not proxies_with_ping:
         return 0, None, []
-
     max_proxies = max_proxies_override if max_proxies_override is not None else get_profile_max_post_proxy(profile_id)
+    try:
+        max_proxies = max(1, int(max_proxies))
+    except Exception:
+        max_proxies = 10
     if is_instant:
         max_proxies = min(max_proxies, 3)
-
+    mode = get_profile_proxy_post_mode(profile_id)
     show_date = get_profile_show_date_proxy(profile_id)
     country_display = get_profile_country_display(profile_id)
-    # Visible ping has been removed from proxy posts.
-    dest = get_profile_dest(profile_id)
-    channel_link = get_profile_channel_link(profile_id) or dest or ""
-
-    proxy_text = ""
-    count = 0
-    selected_proxy_urls = []
-    # Do not slice before filtering: an already-posted/invalid entry must not
-    # consume one of the configured posting slots.
-    for proxy_url, ping, flag, country_code in proxies_with_ping:
-        if count >= max_proxies:
+    selected = []
+    entries = []
+    for item in proxies_with_ping:
+        try:
+            raw = item[0]
+            flag = item[2] if len(item) > 2 else "🌐"
+            country_code = item[3] if len(item) > 3 else ""
+        except Exception:
+            continue
+        norm = canonical_telegram_proxy_url(raw)
+        if not norm or is_proxy_posted(profile_id, norm):
+            continue
+        if len(entries) >= max_proxies:
             break
-        # Validate proxy link structure (should be t.me/proxy or tg://proxy)
-        if "t.me/proxy" not in proxy_url.lower() and not proxy_url.startswith("tg://proxy"):
-            continue
-        # Check if already posted
-        if is_proxy_posted(profile_id, proxy_url):
-            log.debug(f"[PROXY] already posted: {proxy_url}")
-            continue
-
-        normalized_url = normalize_telegram_proxy(proxy_url)
-        clean_url = clean_proxy_link(normalized_url)
-        safe_url = html.escape(clean_url, quote=False)
-
-        # Build header
-        header_parts = []
-        if channel_link:
-            header_parts.append(channel_link)
-        else:
-            header_parts.append(dest if dest else "@VaslZone")
-
-        # Country display
-        if country_display == 0:
-            pass
-        elif country_display == 1:
-            flag_emoji = flag if flag != "🌐" else ""
-            en_name = COUNTRY_NAMES_EN.get(country_code, "")
-            if flag_emoji and en_name:
-                header_parts.append(f"{flag_emoji} {en_name}")
-            elif flag_emoji:
-                header_parts.append(flag_emoji)
+        channel = get_profile_channel_link(profile_id) or "VaslZone"
+        header_parts = [f"@{channel.lstrip('@')}" if channel else "@VaslZone"]
+        if country_display == 1:
+            en = COUNTRY_NAMES_EN.get(country_code, "")
+            if flag and flag != "🌐":
+                header_parts.append(f"{flag} {en}" if en else flag)
         elif country_display == 2:
-            flag_emoji = flag if flag != "🌐" else ""
-            en_name = COUNTRY_NAMES_EN.get(country_code, "")
-            fa_name = COUNTRY_NAMES_FA.get(country_code, "")
-            if flag_emoji and en_name and fa_name:
-                header_parts.append(f"{flag_emoji} {en_name} • <b>{fa_name}</b>")
-            elif flag_emoji and en_name:
-                header_parts.append(f"{flag_emoji} {en_name}")
-            elif flag_emoji:
-                header_parts.append(flag_emoji)
-
-        header = " ".join(header_parts)
-        if header:
-            proxy_text += f"{header}\n"
-
-        proxy_text += f"<a href=\"{safe_url}\">Telegram Proxy</a>\n\n"
-        # Mark only after Telegram delivery succeeds.
-        selected_proxy_urls.append(proxy_url)
-        count += 1
-
-    if count == 0:
+            en = COUNTRY_NAMES_EN.get(country_code, "")
+            fa = COUNTRY_NAMES_FA.get(country_code, "")
+            if flag and flag != "🌐":
+                if en and fa:
+                    header_parts.append(f"{flag} {en} • <b>{fa}</b>")
+                elif en:
+                    header_parts.append(f"{flag} {en}")
+                elif fa:
+                    header_parts.append(f"{flag} <b>{fa}</b>")
+                else:
+                    header_parts.append(flag)
+        entries.append((norm, " ".join(header_parts)))
+        selected.append(norm)
+    if not entries:
         return 0, None, []
 
-    banner_proxy = get_profile_banner_proxy(profile_id)
-    date_str = get_tehran_date() if show_date else ""
-    try:
-        text = banner_proxy.format(
-            date=date_str,
-            count=count,
-            proxies=proxy_text,
-        )
-    except KeyError:
-        log.error("❌ Banner proxy missing placeholders")
-        text = f"🌐 Proxies\n{proxy_text}"
+    banner = get_profile_banner_proxy(profile_id) or "🌐 <b>Proxies</b>\n\n{proxies}"
+    if mode == 0:
+        # Plain URL lines are intentionally used. Telegram clients recognize
+        # t.me/proxy links reliably, while HTML href can be rejected for some
+        # proxy URL variants.
+        proxy_blocks = [f"{header}\n{norm}" for norm, header in entries]
+        proxy_text = "\n\n".join(proxy_blocks)
+        try:
+            text = banner.format(date=get_tehran_date() if show_date else "", count=len(entries), proxies=proxy_text)
+        except Exception:
+            text = f"🌐 <b>Proxies</b>\n\n{proxy_text}"
+        rows = []
+        sponsor = get_best_sponsor(profile_id)
+        if sponsor and sponsor.get("enabled"):
+            style = sponsor.get("color") if sponsor.get("color") in ("primary", "success", "danger") else "primary"
+            rows.append([InlineKeyboardButton(str(sponsor.get("button_text") or "Advertisement"), url=str(sponsor.get("url") or "https://t.me/"), style=style)])
+        return len(entries), (text, rows), selected
 
-    # Get sponsor for proxy
-    sponsor = get_best_sponsor(profile_id, "proxy")
-    sponsor_button = None
+    # Glass mode: maximum 3 proxy buttons per row. Sponsor is always isolated
+    # in the final row and never shares a row with proxy buttons.
+    proxy_buttons = []
+    for i, (norm, _header) in enumerate(entries):
+        style = ("primary", "success", "danger")[(i) % 3]
+        proxy_buttons.append(InlineKeyboardButton(f"پروکسی {i+1}", url=norm, style=style))
+    rows = [proxy_buttons[i:i+3] for i in range(0, len(proxy_buttons), 3)]
+    visible = "\n".join(header for _norm, header in entries)
+    try:
+        text = banner.format(date=get_tehran_date() if show_date else "", count=len(entries), proxies=visible)
+    except Exception:
+        text = f"🌐 <b>Proxies</b>\n\n{visible}"
+    sponsor = get_best_sponsor(profile_id)
     if sponsor and sponsor.get("enabled"):
-        btn_style = sponsor.get("color", "primary") if sponsor.get("color") in ["primary", "success", "danger"] else "primary"
-        sponsor_button = InlineKeyboardButton(sponsor["button_text"], url=sponsor["url"], style=btn_style)
-    buttons = []
-    if sponsor_button:
-        buttons.append(sponsor_button)
-    channel_link_display = get_profile_channel_link(profile_id)
-    if channel_link_display:
-        channel_url = f"https://t.me/{channel_link_display}"
-        channel_button = InlineKeyboardButton("📢 کانال", url=channel_url)
-        buttons.append(channel_button)
-    # IMPORTANT: return raw button rows, not an InlineKeyboardMarkup.
-    # send_to_destination() builds the markup itself. Returning an already-built
-    # markup object caused proxy sends to be wrapped twice and fail.
-    return count, (text, buttons), selected_proxy_urls
+        style = sponsor.get("color") if sponsor.get("color") in ("primary", "success", "danger") else "primary"
+        rows.append([InlineKeyboardButton(str(sponsor.get("button_text") or "Advertisement"), url=str(sponsor.get("url") or "https://t.me/"), style=style)])
+    return len(entries), (text, rows), selected
 
 def get_best_sponsor(profile_id, apply_type="both"):
     """Select the best sponsor based on priority and schedule."""
@@ -2647,16 +2659,59 @@ async def run_cycle_for_profile(bot, profile_id, enable_configs=True, enable_pro
 
     total_configs = 0
     total_proxies = 0
-    if working and enable_configs:
-        total_configs = await post_configs(bot, profile_id, working, source_for_seen="auto", is_instant=is_instant)
+    selected_proxy_urls = []
+    glass_proxy_rows = None
 
-    if proxy_with_ping and enable_proxies:
-        cnt, payload, selected_proxy_urls = await post_proxies(bot, profile_id, proxy_with_ping, is_instant=is_instant)
+    # In combined mode, glass proxies are attached directly BELOW the config
+    # message. Build the proxy payload first, but do not send it separately.
+    combined_glass = (enable_configs and enable_proxies and get_profile_proxy_post_mode(profile_id) == 1)
+    if combined_glass and proxy_with_ping:
+        pcnt, ppayload, selected_proxy_urls = await post_proxies(
+            bot, profile_id, proxy_with_ping, is_instant=is_instant
+        )
+        if pcnt > 0 and ppayload:
+            _proxy_preview_text, all_proxy_rows = ppayload
+            # post_proxies may append Channel/Sponsor rows. Only the first N rows
+            # belong to proxy buttons; Channel and Sponsor are rebuilt by the
+            # config sender so Sponsor remains the absolute bottom row.
+            proxy_row_count=(pcnt + 2)//3
+            glass_proxy_rows = all_proxy_rows[:proxy_row_count]
+            log.info(f"[PROXY][profile={profile_id}] glass mode: attaching {pcnt} proxy buttons to config message")
+        else:
+            glass_proxy_rows = None
+            selected_proxy_urls = []
+
+    if working and enable_configs:
+        total_configs = await post_configs(
+            bot, profile_id, working, source_for_seen="auto", is_instant=is_instant,
+            extra_button_rows=glass_proxy_rows
+        )
+        # If the config message containing the glass proxy buttons was delivered,
+        # those proxies were actually published. Mark them only after success.
+        if combined_glass and glass_proxy_rows and total_configs > 0:
+            total_proxies = len(selected_proxy_urls)
+            for proxy_url in selected_proxy_urls:
+                if not is_proxy_posted(profile_id, proxy_url):
+                    mark_proxy_posted(profile_id, proxy_url)
+        elif combined_glass:
+            # Config message failed/no configs: do not lose proxy candidates.
+            selected_proxy_urls = []
+
+    # Normal mode, or proxy-only mode, sends the proxy banner as its own message.
+    # If glass mode was selected but there is no config message to attach to (or
+    # the config send failed), fall back to a standalone proxy post so proxies
+    # are never silently lost.
+    if proxy_with_ping and enable_proxies and (not combined_glass or total_configs == 0):
+        cnt, payload, selected_proxy_urls = await post_proxies(
+            bot, profile_id, proxy_with_ping, is_instant=is_instant
+        )
         if cnt > 0 and payload:
             text, buttons = payload
+            log.info(f"[PROXY][profile={profile_id}] attempting Telegram send: count={cnt}, mode={get_profile_proxy_post_mode(profile_id)}, button_rows={len(buttons or [])}")
             sent = await send_to_destination(bot, profile_id, text, buttons)
             if sent:
                 total_proxies = cnt
+                log.info(f"[PROXY][profile={profile_id}] Telegram send succeeded for {cnt} proxies")
                 for proxy_url in selected_proxy_urls:
                     if not is_proxy_posted(profile_id, proxy_url):
                         mark_proxy_posted(profile_id, proxy_url)
@@ -3386,15 +3441,15 @@ T = {
         "btn_add_sponsor": "➕ افزودن اسپانسر",
         "sponsor_list_title": "📋 **لیست اسپانسرهای پروفایل {name}**\n\n{sponsors}",
         "sponsor_list_empty": "هیچ اسپانسری تنظیم نشده است.",
-        "sponsor_item": "• {name} (اولویت: {priority}) - {'فعال' if enabled else 'غیرفعال'}\n  لینک: {url}\n  دکمه: {text}\n  اعمال: {apply}\n  مدت: {duration}",
-        "sponsor_detail": "📢 **جزئیات اسپانسر**\n\nنام: {name}\nلینک: {url}\nمتن دکمه: {text}\nاولویت: {priority}\nوضعیت: {'فعال' if enabled else 'غیرفعال'}\nاعمال برای: {apply}\nمدت: {duration}\nرنگ: {color}",
+        "sponsor_item": "• {name} (اولویت: {priority}) - {'فعال' if enabled else 'غیرفعال'}\n  لینک: {url}\n  دکمه: {text}\n  مدت: {duration}",
+        "sponsor_detail": "📢 **جزئیات اسپانسر**\n\nنام: {name}\nلینک: {url}\nمتن دکمه: {text}\nاولویت: {priority}\nوضعیت: {'فعال' if enabled else 'غیرفعال'}\nمدت: {duration}\nرنگ: {color}",
         "sp_add_name": "نام اسپانسر را وارد کنید:",
         "sp_add_url": "لینک اسپانسر را وارد کنید (مثلاً https://example.com):",
         "sp_add_text": "متن دکمه را وارد کنید (پیش‌فرض 'Advertisement'):",
         "sp_add_priority": "اولویت را وارد کنید (عدد، بالاتر = اولویت بیشتر، پیش‌فرض 0):",
         "sp_add_duration": "مدت زمان بر حسب ساعت (۰ برای نامحدود):",
         "sp_add_unlimited": "آیا نامحدود باشد؟ (بله/خیر)",
-        "sp_add_apply": "اعمال برای (config/proxy/both):",
+        "sp_add_apply": "",
         "sp_add_color": "رنگ دکمه را انتخاب کنید:",
         "sp_added_done": "✅ اسپانسر '{name}' با موفقیت اضافه شد.",
         "sp_edit_list": "برای ویرایش، روی اسپانسر کلیک کنید:",
@@ -3498,7 +3553,7 @@ def profile_admin_kb(profile_id):
     country_display_modes = {0: "خاموش", 1: "انگلیسی", 2: "انگلیسی+فارسی"}
     country_label = country_display_modes.get(country_display, "انگلیسی+فارسی")
 
-    sponsors = get_sponsors(profile_id)
+    sponsors = get_sponsors(profile_id, include_disabled=True)
     sponsor_count = len(sponsors)
     sponsor_status = f"{sponsor_count} اسپانسر" if sponsor_count > 0 else "خالی"
 
@@ -3523,8 +3578,8 @@ def profile_admin_kb(profile_id):
          InlineKeyboardButton("⏰ بازه پروکسی", callback_data=f"set_prx_interval_{profile_id}", style="primary")],
         [InlineKeyboardButton("📊 تعداد کانفیگ", callback_data=f"set_cfg_max_{profile_id}", style="primary"),
          InlineKeyboardButton("📊 تعداد پروکسی", callback_data=f"set_prx_max_{profile_id}", style="primary")],
-        [InlineKeyboardButton(f"{ping_label} {ping_testing_label}", callback_data=f"tglping_{profile_id}", style="primary"),
-         InlineKeyboardButton(msg("btn_ping_testing", status=ping_testing_label), callback_data=f"tgl_ping_test_{profile_id}", style="primary")],
+        [InlineKeyboardButton(f"🌐 حالت پروکسی: {'شیشه‌ای' if get_profile_proxy_post_mode(profile_id) == 1 else 'عادی'}", callback_data=f"tgl_prx_mode_{profile_id}", style="primary"),
+         InlineKeyboardButton("📡 تست داخلی", callback_data=f"tgl_ping_test_{profile_id}", style="primary")],
         [InlineKeyboardButton(msg("btn_toggle_profile", status=profile_status), callback_data=f"tgl_profile_{profile_id}", style="danger")],
         [InlineKeyboardButton(cfg_btn, callback_data=f"tglcfg_{profile_id}", style="primary"),
          InlineKeyboardButton(prx_btn, callback_data=f"tglproxy_{profile_id}", style="primary")],
@@ -3566,7 +3621,7 @@ def destinations_kb(profile_id):
     return InlineKeyboardMarkup(btns)
 
 def sponsor_list_kb(profile_id):
-    sponsors = get_sponsors(profile_id)
+    sponsors = get_sponsors(profile_id, include_disabled=True)
     btns = []
     if sponsors:
         for sp in sponsors:
@@ -3580,20 +3635,24 @@ def sponsor_detail_kb(sponsor_id, profile_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ ویرایش", callback_data=f"sp_edit_{sponsor_id}", style="success"),
          InlineKeyboardButton("🗑 حذف", callback_data=f"sp_delete_{sponsor_id}", style="danger")],
-        [InlineKeyboardButton("🔘 تغییر وضعیت", callback_data=f"sp_toggle_{sponsor_id}", style="primary")],
+        [InlineKeyboardButton("🔘 فعال / غیرفعال", callback_data=f"sp_toggle_{sponsor_id}", style="primary")],
         [InlineKeyboardButton("🔙 برگشت", callback_data=f"sponsor_list_{profile_id}", style="primary")],
     ])
 
 def sponsor_edit_kb(sponsor_id, profile_id):
+    c.execute("SELECT enabled, unlimited FROM sponsors WHERE id=?", (sponsor_id,))
+    row = c.fetchone()
+    enabled = bool(row[0]) if row else False
+    unlimited = bool(row[1]) if row else True
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("نام", callback_data=f"sp_edit_field_{sponsor_id}_name", style="primary"),
-         InlineKeyboardButton("لینک", callback_data=f"sp_edit_field_{sponsor_id}_url", style="primary")],
-        [InlineKeyboardButton("متن دکمه", callback_data=f"sp_edit_field_{sponsor_id}_button_text", style="primary"),
-         InlineKeyboardButton("اولویت", callback_data=f"sp_edit_field_{sponsor_id}_priority", style="primary")],
-        [InlineKeyboardButton("مدت (ساعت)", callback_data=f"sp_edit_field_{sponsor_id}_duration_hours", style="primary"),
-         InlineKeyboardButton("نامحدود", callback_data=f"sp_edit_field_{sponsor_id}_unlimited", style="primary")],
-        [InlineKeyboardButton("اعمال برای", callback_data=f"sp_edit_field_{sponsor_id}_apply", style="primary"),
-         InlineKeyboardButton("رنگ", callback_data=f"sp_edit_field_{sponsor_id}_color", style="primary")],
+        [InlineKeyboardButton("✏️ نام", callback_data=f"sp_edit_field_{sponsor_id}_name", style="primary"),
+         InlineKeyboardButton("🔗 لینک", callback_data=f"sp_edit_field_{sponsor_id}_url", style="primary")],
+        [InlineKeyboardButton("📝 متن دکمه", callback_data=f"sp_edit_field_{sponsor_id}_button_text", style="primary"),
+         InlineKeyboardButton("🔢 اولویت", callback_data=f"sp_edit_field_{sponsor_id}_priority", style="primary")],
+        [InlineKeyboardButton("⏱ مدت (ساعت)", callback_data=f"sp_edit_field_{sponsor_id}_duration_hours", style="primary")],
+        [InlineKeyboardButton("♾ نامحدود" if not unlimited else "⏱ محدود کردن", callback_data=f"sp_toggle_unlimited_{sponsor_id}", style="success" if unlimited else "primary")],
+        [InlineKeyboardButton("🎨 رنگ", callback_data=f"sp_edit_color_{sponsor_id}", style="primary")],
+        [InlineKeyboardButton("🔘 فعال" if enabled else "🔘 غیرفعال", callback_data=f"sp_toggle_{sponsor_id}", style="success" if enabled else "danger")],
         [InlineKeyboardButton("🔙 برگشت", callback_data=f"sp_detail_{sponsor_id}", style="primary")],
     ])
 
@@ -3983,18 +4042,14 @@ async def on_callback(u, ctx):
                     return
                 prof = get_profile(profile_id)
                 name = prof["dest_name"] if prof else ""
-                sponsors = get_sponsors(profile_id)
+                sponsors = get_sponsors(profile_id, include_disabled=True)
                 if not sponsors:
                     txt = msg("sponsor_list_title", name=name, sponsors=msg("sponsor_list_empty"))
                 else:
                     lines = []
                     for sp in sponsors:
-                        apply_text = []
-                        if sp["apply_config"]: apply_text.append("کانفیگ")
-                        if sp["apply_proxy"]: apply_text.append("پروکسی")
-                        apply_str = ", ".join(apply_text) if apply_text else "هیچ"
                         duration_str = "نامحدود" if sp["unlimited"] else f"{sp['duration_hours']} ساعت"
-                        lines.append(msg("sponsor_item", name=sp["name"], priority=sp["priority"], enabled=sp["enabled"], url=sp["url"], text=sp["button_text"], apply=apply_str, duration=duration_str))
+                        lines.append(msg("sponsor_item", name=sp["name"], priority=sp["priority"], enabled=sp["enabled"], url=sp["url"], text=sp["button_text"], duration=duration_str))
                     txt = msg("sponsor_list_title", name=name, sponsors="\n".join(lines))
                 await q.edit_message_text(txt, parse_mode="HTML", reply_markup=sponsor_list_kb(profile_id))
             else:
@@ -4017,13 +4072,9 @@ async def on_callback(u, ctx):
                 cols = [d[0] for d in c.description]
                 sp = dict(zip(cols, row))
                 profile_id = sp["profile_id"]
-                apply_text = []
-                if sp["apply_config"]: apply_text.append("کانفیگ")
-                if sp["apply_proxy"]: apply_text.append("پروکسی")
-                apply_str = ", ".join(apply_text) if apply_text else "هیچ"
                 duration_str = "نامحدود" if sp["unlimited"] else f"{sp['duration_hours']} ساعت"
                 txt = msg("sponsor_detail", name=sp["name"], url=sp["url"], text=sp["button_text"],
-                          priority=sp["priority"], enabled=bool(sp["enabled"]), apply=apply_str,
+                          priority=sp["priority"], enabled=bool(sp["enabled"]),
                           duration=duration_str, color=sp["color"])
                 await q.edit_message_text(txt, parse_mode="HTML", reply_markup=sponsor_detail_kb(sponsor_id, profile_id))
             else:
@@ -4051,13 +4102,9 @@ async def on_callback(u, ctx):
                         cols = [d[0] for d in c.description]
                         sp = dict(zip(cols, row2))
                         profile_id = sp["profile_id"]
-                        apply_text = []
-                        if sp["apply_config"]: apply_text.append("کانفیگ")
-                        if sp["apply_proxy"]: apply_text.append("پروکسی")
-                        apply_str = ", ".join(apply_text) if apply_text else "هیچ"
                         duration_str = "نامحدود" if sp["unlimited"] else f"{sp['duration_hours']} ساعت"
                         txt = msg("sponsor_detail", name=sp["name"], url=sp["url"], text=sp["button_text"],
-                                  priority=sp["priority"], enabled=bool(sp["enabled"]), apply=apply_str,
+                                  priority=sp["priority"], enabled=bool(sp["enabled"]),
                                   duration=duration_str, color=sp["color"])
                         await q.edit_message_text(txt, parse_mode="HTML", reply_markup=sponsor_detail_kb(sponsor_id, profile_id))
                 else:
@@ -4113,7 +4160,96 @@ async def on_callback(u, ctx):
                 await q.answer("⚠️ خطا در داده")
             return
 
-        if d.startswith("sp_edit_"):
+        if d.startswith("sp_edit_color_"):
+            try:
+                sponsor_id=int(d.rsplit("_",1)[1])
+            except Exception:
+                await q.answer("⚠️ شناسه نامعتبر")
+                return
+            c.execute("SELECT profile_id FROM sponsors WHERE id=?", (sponsor_id,))
+            row=c.fetchone()
+            if not row:
+                await q.answer("اسپانسر یافت نشد.")
+                return
+            profile_id=row[0]
+            await q.edit_message_text("🎨 رنگ دکمه اسپانسر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔵 Primary", callback_data=f"sp_color_{sponsor_id}_primary", style="primary")],
+                [InlineKeyboardButton("🟢 Success", callback_data=f"sp_color_{sponsor_id}_success", style="success")],
+                [InlineKeyboardButton("🔴 Danger", callback_data=f"sp_color_{sponsor_id}_danger", style="danger")],
+                [InlineKeyboardButton("🔙 برگشت", callback_data=f"sp_edit_{sponsor_id}", style="primary")]
+            ]))
+            return
+
+        if d.startswith("sp_color_"):
+            parts=d.split("_")
+            try:
+                sponsor_id=int(parts[2]); color=parts[3]
+            except Exception:
+                await q.answer("⚠️ داده نامعتبر")
+                return
+            c.execute("SELECT profile_id FROM sponsors WHERE id=?", (sponsor_id,))
+            row=c.fetchone()
+            if not row:
+                await q.answer("اسپانسر یافت نشد.")
+                return
+            update_sponsor(sponsor_id, color=color)
+            profile_id=row[0]
+            await q.answer("✅ رنگ ذخیره شد.")
+            await q.edit_message_text("✏️ ویرایش اسپانسر", reply_markup=sponsor_edit_kb(sponsor_id, profile_id))
+            return
+
+        if d.startswith("sp_toggle_unlimited_"):
+            try:
+                sponsor_id = int(d.rsplit("_", 1)[1])
+            except Exception:
+                await q.answer("⚠️ شناسه نامعتبر")
+                return
+            c.execute("SELECT profile_id, unlimited, duration_hours FROM sponsors WHERE id=?", (sponsor_id,))
+            row = c.fetchone()
+            if not row:
+                await q.answer("اسپانسر یافت نشد.")
+                return
+            profile_id, current_unlimited, current_duration = row
+            new_unlimited = 0 if current_unlimited else 1
+            if new_unlimited:
+                update_sponsor(sponsor_id, unlimited=1, expires_at=None)
+            else:
+                duration = int(current_duration or 1)
+                update_sponsor(sponsor_id, unlimited=0, duration_hours=duration)
+            await q.answer("♾ نامحدود فعال شد." if new_unlimited else "⏱ محدود شد.")
+            c.execute("SELECT * FROM sponsors WHERE id=?", (sponsor_id,))
+            row2 = c.fetchone()
+            cols = [d[0] for d in c.description]
+            sp = dict(zip(cols, row2))
+            duration_str = "نامحدود" if sp["unlimited"] else f"{sp['duration_hours']} ساعت"
+            txt = msg("sponsor_detail", name=sp["name"], url=sp["url"], text=sp["button_text"],
+                      priority=sp["priority"], enabled=bool(sp["enabled"]),
+                      duration=duration_str, color=sp["color"])
+            await q.edit_message_text(txt, parse_mode="HTML", reply_markup=sponsor_edit_kb(sponsor_id, profile_id))
+            return
+
+        if d.startswith("sp_edit_field_"):
+            parts = d.split("_")
+            if len(parts) >= 5:
+                try:
+                    sponsor_id = int(parts[3])
+                    field = "_".join(parts[4:])
+                except ValueError:
+                    await q.answer("⚠️ شناسه نامعتبر")
+                    return
+                ctx.user_data["sponsor_edit"] = {"sponsor_id": sponsor_id, "field": field}
+                await q.edit_message_text(
+                    msg("sp_edit_field_prompt", field=field),
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 لغو", callback_data=f"sp_edit_{sponsor_id}", style="primary")]
+                    ])
+                )
+            else:
+                await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("sp_edit_") and not d.startswith("sp_edit_field_") and not d.startswith("sp_edit_color_"):
             parts = d.split("_")
             if len(parts) >= 3:
                 try:
@@ -4132,27 +4268,6 @@ async def on_callback(u, ctx):
                     )
                 else:
                     await q.answer("اسپانسر یافت نشد.")
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("sp_edit_field_"):
-            parts = d.split("_")
-            if len(parts) >= 5:
-                try:
-                    sponsor_id = int(parts[3])
-                    field = parts[4]
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                ctx.user_data["sponsor_edit"] = {"sponsor_id": sponsor_id, "field": field}
-                await q.edit_message_text(
-                    msg("sp_edit_field_prompt", field=field),
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔙 لغو", callback_data=f"sp_edit_{sponsor_id}", style="primary")]
-                    ])
-                )
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -4189,14 +4304,6 @@ async def on_callback(u, ctx):
                         [InlineKeyboardButton("خیر", callback_data=f"sp_add_unlimited_no_{profile_id}", style="primary")],
                         [InlineKeyboardButton("🔙 لغو", callback_data=f"sponsor_list_{profile_id}", style="primary")],
                     ]))
-                elif step == "apply":
-                    ctx.user_data["sponsor_add"]["step"] = "apply"
-                    await q.edit_message_text(msg("sp_add_apply"), reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("کانفیگ", callback_data=f"sp_add_apply_{profile_id}_config", style="primary")],
-                        [InlineKeyboardButton("پروکسی", callback_data=f"sp_add_apply_{profile_id}_proxy", style="primary")],
-                        [InlineKeyboardButton("هر دو", callback_data=f"sp_add_apply_{profile_id}_both", style="primary")],
-                        [InlineKeyboardButton("🔙 لغو", callback_data=f"sponsor_list_{profile_id}", style="primary")],
-                    ]))
                 elif step == "color":
                     ctx.user_data["sponsor_add"]["step"] = "color"
                     await q.edit_message_text(msg("sp_add_color"), reply_markup=InlineKeyboardMarkup([
@@ -4223,11 +4330,11 @@ async def on_callback(u, ctx):
                     ctx.user_data["sponsor_add"] = {}
                 ctx.user_data["sponsor_add"]["unlimited"] = 1
                 ctx.user_data["sponsor_add"]["duration_hours"] = 0
-                ctx.user_data["sponsor_add"]["step"] = "apply"
-                await q.edit_message_text(msg("sp_add_apply"), reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("کانفیگ", callback_data=f"sp_add_apply_{profile_id}_config", style="primary")],
-                    [InlineKeyboardButton("پروکسی", callback_data=f"sp_add_apply_{profile_id}_proxy", style="primary")],
-                    [InlineKeyboardButton("هر دو", callback_data=f"sp_add_apply_{profile_id}_both", style="primary")],
+                ctx.user_data["sponsor_add"]["step"] = "color"
+                await q.edit_message_text(msg("sp_add_color"), reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔵 Primary", callback_data=f"sp_add_color_{profile_id}_primary", style="primary")],
+                    [InlineKeyboardButton("🟢 Success", callback_data=f"sp_add_color_{profile_id}_success", style="success")],
+                    [InlineKeyboardButton("🔴 Danger", callback_data=f"sp_add_color_{profile_id}_danger", style="danger")],
                     [InlineKeyboardButton("🔙 لغو", callback_data=f"sponsor_list_{profile_id}", style="primary")],
                 ]))
             else:
@@ -4247,30 +4354,6 @@ async def on_callback(u, ctx):
                 ctx.user_data["sponsor_add"]["unlimited"] = 0
                 ctx.user_data["sponsor_add"]["step"] = "duration"
                 await q.edit_message_text(msg("sp_add_duration"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 لغو", callback_data=f"sponsor_list_{profile_id}", style="primary")]]))
-            else:
-                await q.answer("⚠️ خطا در داده")
-            return
-
-        if d.startswith("sp_add_apply_"):
-            parts = d.split("_")
-            if len(parts) >= 4:
-                try:
-                    profile_id = int(parts[3])
-                    apply_type = parts[4]
-                except ValueError:
-                    await q.answer("⚠️ شناسه نامعتبر")
-                    return
-                if "sponsor_add" not in ctx.user_data:
-                    ctx.user_data["sponsor_add"] = {}
-                ctx.user_data["sponsor_add"]["apply_config"] = 1 if apply_type in ("config", "both") else 0
-                ctx.user_data["sponsor_add"]["apply_proxy"] = 1 if apply_type in ("proxy", "both") else 0
-                ctx.user_data["sponsor_add"]["step"] = "color"
-                await q.edit_message_text(msg("sp_add_color"), reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔵 Primary", callback_data=f"sp_add_color_{profile_id}_primary", style="primary")],
-                    [InlineKeyboardButton("🟢 Success", callback_data=f"sp_add_color_{profile_id}_success", style="success")],
-                    [InlineKeyboardButton("🔴 Danger", callback_data=f"sp_add_color_{profile_id}_danger", style="danger")],
-                    [InlineKeyboardButton("🔙 لغو", callback_data=f"sponsor_list_{profile_id}", style="primary")],
-                ]))
             else:
                 await q.answer("⚠️ خطا در داده")
             return
@@ -4755,6 +4838,18 @@ async def on_callback(u, ctx):
                 await show_profile_admin(q.message, profile_id)
             else:
                 await q.answer("⚠️ خطا در داده")
+            return
+
+        if d.startswith("tgl_prx_mode_"):
+            try:
+                profile_id=int(d.rsplit("_",1)[1])
+            except Exception:
+                await q.answer("⚠️ شناسه نامعتبر")
+                return
+            mode=0 if get_profile_proxy_post_mode(profile_id)==1 else 1
+            set_profile_proxy_post_mode(profile_id, mode)
+            await q.answer("🌐 حالت پروکسی شیشه‌ای فعال شد." if mode else "🌐 حالت پروکسی عادی فعال شد.")
+            await show_profile_admin(q.message, profile_id)
             return
 
         if d.startswith("tglproxy_"):
@@ -5532,73 +5627,59 @@ async def on_text(u, ctx):
 
     # Sponsor edit field
     if ctx.user_data.get("sponsor_edit"):
-        data = ctx.user_data["sponsor_edit"]
-        sponsor_id = data["sponsor_id"]
-        field = data["field"]
-        txt = u.message.text.strip()
-        c.execute("SELECT * FROM sponsors WHERE id=?", (sponsor_id,))
-        row = c.fetchone()
+        data=ctx.user_data["sponsor_edit"]
+        sponsor_id=int(data["sponsor_id"])
+        field=data["field"]
+        txt=u.message.text.strip()
+        c.execute("SELECT profile_id FROM sponsors WHERE id=?", (sponsor_id,))
+        row=c.fetchone()
         if not row:
             await u.message.reply_text("اسپانسر یافت نشد.")
-            del ctx.user_data["sponsor_edit"]
+            ctx.user_data.pop("sponsor_edit", None)
             return
-        cols = [d[0] for d in c.description]
-        sp = dict(zip(cols, row))
-        if field == "name":
-            if txt:
-                sp["name"] = txt
-        elif field == "url":
-            if txt:
-                sp["url"] = txt
-        elif field == "button_text":
-            if txt:
-                sp["button_text"] = txt
-        elif field == "priority":
-            if txt:
-                try:
-                    sp["priority"] = int(txt)
-                except:
-                    await u.message.reply_text("❌ اولویت باید عدد باشد.")
-                    return
-        elif field == "duration_hours":
-            if txt:
-                try:
-                    duration = int(txt)
-                    if duration < 0:
-                        raise ValueError
-                    sp["duration_hours"] = duration
-                    # If unlimited, set unlimited to 0
-                    if sp["unlimited"]:
-                        sp["unlimited"] = 0
-                except:
-                    await u.message.reply_text("❌ مدت باید عدد غیرمنفی باشد.")
-                    return
-            else:
-                # keep existing
-                pass
-        elif field == "unlimited":
-            # toggle
-            sp["unlimited"] = 1 if not sp["unlimited"] else 0
-            if sp["unlimited"]:
-                sp["duration_hours"] = 0
-        elif field == "apply":
-            # We'll handle via callback
-            await u.message.reply_text("لطفاً از دکمه‌های انتخاب استفاده کنید.")
-            return
-        elif field == "color":
-            await u.message.reply_text("لطفاً از دکمه‌های انتخاب رنگ استفاده کنید.")
-            return
+        profile_id=row[0]
+        if field in ("name","button_text"):
+            if not txt:
+                await u.message.reply_text("❌ مقدار نمی‌تواند خالی باشد.")
+                return
+            update_sponsor(sponsor_id, **{field:txt})
+        elif field=="url":
+            if not re.match(r"^(https?://|tg://)", txt, re.I):
+                await u.message.reply_text("❌ لینک معتبر نیست. لینک باید با https:// یا tg:// شروع شود.")
+                return
+            update_sponsor(sponsor_id, url=txt)
+        elif field=="priority":
+            try: value=int(txt)
+            except Exception:
+                await u.message.reply_text("❌ اولویت باید عدد باشد.")
+                return
+            update_sponsor(sponsor_id, priority=value)
+        elif field=="duration_hours":
+            try: value=int(txt)
+            except Exception:
+                await u.message.reply_text("❌ مدت باید عدد غیرمنفی باشد.")
+                return
+            if value<0:
+                await u.message.reply_text("❌ مدت نمی‌تواند منفی باشد.")
+                return
+            update_sponsor(sponsor_id, duration_hours=value, unlimited=0)
+        elif field=="unlimited":
+            c.execute("SELECT unlimited FROM sponsors WHERE id=?", (sponsor_id,))
+            cur=c.fetchone()
+            unlimited=0 if cur and cur[0] else 1
+            update_sponsor(sponsor_id, unlimited=unlimited, duration_hours=0 if unlimited else None)
+            # None duration means preserve current when turning unlimited off.
+            if not unlimited:
+                c.execute("SELECT duration_hours FROM sponsors WHERE id=?", (sponsor_id,))
+                current=c.fetchone()
+                if current and current[0] is None:
+                    update_sponsor(sponsor_id, duration_hours=1)
         else:
-            await u.message.reply_text("فیلد نامعتبر.")
-            del ctx.user_data["sponsor_edit"]
+            await u.message.reply_text("این فیلد با دکمه مخصوص ویرایش می‌شود.")
             return
-        # Update sponsor
-        update_sponsor(sponsor_id, **sp)
-        await u.message.reply_text(msg("sp_updated"))
-        del ctx.user_data["sponsor_edit"]
-        # Show detail again
-        profile_id = sp["profile_id"]
-        await q_edit_or_reply(u.message, f"sp_detail_{sponsor_id}", u)
+        ctx.user_data.pop("sponsor_edit", None)
+        await u.message.reply_text(msg("sp_edit_done"))
+        await show_profile_admin(u.message, profile_id)
         return
 
     # Sponsor add: if we have step and not handled by callback, process text
@@ -5649,11 +5730,11 @@ async def on_text(u, ctx):
                     raise ValueError
                 data["duration_hours"] = duration
                 data["unlimited"] = 0
-                data["step"] = "apply"
-                await u.message.reply_text(msg("sp_add_apply"), reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("کانفیگ", callback_data=f"sp_add_apply_{profile_id}_config", style="primary")],
-                    [InlineKeyboardButton("پروکسی", callback_data=f"sp_add_apply_{profile_id}_proxy", style="primary")],
-                    [InlineKeyboardButton("هر دو", callback_data=f"sp_add_apply_{profile_id}_both", style="primary")],
+                data["step"] = "color"
+                await u.message.reply_text(msg("sp_add_color"), reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔵 Primary", callback_data=f"sp_add_color_{profile_id}_primary", style="primary")],
+                    [InlineKeyboardButton("🟢 Success", callback_data=f"sp_add_color_{profile_id}_success", style="success")],
+                    [InlineKeyboardButton("🔴 Danger", callback_data=f"sp_add_color_{profile_id}_danger", style="danger")],
                     [InlineKeyboardButton("🔙 لغو", callback_data=f"sponsor_list_{profile_id}", style="primary")],
                 ]))
             except:
@@ -6133,9 +6214,11 @@ async def post_working_configs(bot, profile_id, working, proxies_with_ping, forc
         cnt, payload, selected_proxy_urls = await post_proxies(bot, profile_id, proxies_with_ping)
         if cnt > 0 and payload:
             text, buttons = payload
+            log.info(f"[PROXY][profile={profile_id}] attempting Telegram send: count={cnt}, mode={get_profile_proxy_post_mode(profile_id)}, button_rows={len(buttons or [])}")
             sent = await send_to_destination(bot, profile_id, text, buttons)
             if sent:
                 total_proxies = cnt
+                log.info(f"[PROXY][profile={profile_id}] Telegram send succeeded for {cnt} proxies")
                 for proxy_url in selected_proxy_urls:
                     if not is_proxy_posted(profile_id, proxy_url):
                         mark_proxy_posted(profile_id, proxy_url)

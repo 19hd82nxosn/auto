@@ -190,6 +190,13 @@ conn.execute("PRAGMA journal_mode=WAL")
 conn.execute("PRAGMA synchronous=NORMAL")
 c = conn.cursor()
 
+# مستقل از ترتیب تعریف توابع، تمام عملیات DB از این helper استفاده می‌کنند.
+def get_conn():
+    db = sqlite3.connect(DB_PATH, check_same_thread=False)
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=NORMAL")
+    return db
+
 def migrate_header_modes():
     """Ensure per-profile header mode settings exist without resetting the database."""
     try:
@@ -204,7 +211,7 @@ def migrate_header_modes():
         conn.commit()
         conn.close()
     except Exception:
-        logger.exception("header mode migration failed")
+        log.exception("header mode migration failed")
 
 
 def ensure_column(table, column, col_type, default=None):

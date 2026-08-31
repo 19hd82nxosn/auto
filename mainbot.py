@@ -2784,12 +2784,25 @@ async def post_configs(bot, profile_id, working, source_for_seen="", is_instant=
             if ip:
                 flag, country_code = await get_flag_for_ip(ip)
 
-        # Build server header based on display settings
-        header_parts = []
-        if channel_link:
-            header_parts.append(channel_link)
+        # Build config header from the INDEPENDENT config header mode.
+        # IMPORTANT: proxy_post_mode has absolutely no effect on this.
+        # Channel mode -> @ChannelName + country.
+        # Protocol mode -> exact detected config protocol + country.
+        config_header_mode, _proxy_header_mode = get_header_modes(profile_id)
+        if config_header_mode == "protocol":
+            config_title = detect_config_protocol(url)
+            if not config_title:
+                # This should never happen because extraction validates the
+                # protocol, but never silently publish an empty/unknown title.
+                log.warning(f"[CONFIG][profile={profile_id}] Unknown config protocol while formatting: {url[:80]}")
+                continue
+            header_parts = [config_title]
         else:
-            header_parts.append(dest if dest else "@VaslZone")
+            config_channel = channel_link or dest or "@Channel"
+            config_channel = str(config_channel).strip()
+            if not config_channel.startswith("@") and config_channel:
+                config_channel = "@" + config_channel.lstrip("@")
+            header_parts = [config_channel or "@Channel"]
 
         # Country display
         if country_display == 0:

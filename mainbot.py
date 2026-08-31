@@ -2947,8 +2947,15 @@ async def post_proxies(bot, profile_id, proxies_with_ping, is_instant=False, max
             prof = get_profile(profile_id) or {}
             fallback = str(prof.get("dest_name") or "").strip()
             channel_label = fallback if fallback.startswith("@") else (f"@{fallback}" if fallback else "@Channel")
-        # Proxy post mode: 0 = normal text + channel name, 1 = glass buttons + protocol header.
-        header_parts = [detect_protocol_name(norm) if mode == 1 else channel_label]
+        # IMPORTANT: proxy_post_mode controls ONLY the publication layout (normal vs glass).
+        # The proxy header naming is controlled independently by proxy_header_mode.
+        # Therefore switching to Glass MUST NOT change @ChannelName into a protocol.
+        _config_header_mode, proxy_header_mode = get_header_modes(profile_id)
+        if proxy_header_mode == "protocol":
+            proxy_title = detect_proxy_protocol(norm) or "MTPROTO"
+        else:
+            proxy_title = channel_label
+        header_parts = [proxy_title]
         if country_display == 1:
             en = COUNTRY_NAMES_EN.get(country_code, "")
             if flag and flag != "🌐":
@@ -4138,7 +4145,7 @@ def profile_admin_kb(profile_id):
             f"⚙️ حالت نمایش پروکسی: {'نام کانال' if get_header_modes(profile_id)[1] == 'channel' else 'پروتکل'}",
             callback_data=f"hm_proxy_menu_{profile_id}", style="primary"
         )],
-        [InlineKeyboardButton(f"🌐 حالت پروکسی: {'شیشه‌ای • پروتکل' if get_profile_proxy_post_mode(profile_id) == 1 else 'عادی'}", callback_data=f"tgl_prx_mode_{profile_id}", style="primary"),
+        [InlineKeyboardButton(f"🌐 حالت انتشار پروکسی: {'شیشه‌ای' if get_profile_proxy_post_mode(profile_id) == 1 else 'عادی'}", callback_data=f"tgl_prx_mode_{profile_id}", style="primary"),
          InlineKeyboardButton(f"📡 تست Ping: {'✅' if ping_testing else '❌'}", callback_data=f"tgl_ping_test_{profile_id}", style="primary")],
         [InlineKeyboardButton(f"👁 نمایش Ping: {'✅' if prof.get('show_ping', 1) else '❌'}", callback_data=f"tgl_show_ping_{profile_id}", style="primary"),
          InlineKeyboardButton(f"📍 منطقه Ping: {'🇮🇷 ایران' if ping_mode == 'iran' else '🌍 جهانی'}", callback_data=f"tglping_{profile_id}", style="primary")],

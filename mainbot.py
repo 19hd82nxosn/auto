@@ -36,6 +36,14 @@ MAIN_ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 if not MAIN_ADMIN_ID:
     raise ValueError("ADMIN_ID environment variable not set")
 
+RAILWAY_TOKEN = (os.getenv("RAILWAY_TOKEN") or os.getenv("RAILWAY_API_TOKEN") or os.getenv("RAILWAY_API_KEY") or "").strip().strip('\"\'')
+# Project ID is intentionally NOT required. Account/workspace tokens can be used directly.
+RAILWAY_PROJECT_ID = (os.getenv("RAILWAY_PROJECT_ID") or "").strip()
+CREDIT_THRESHOLD = float(os.getenv("CREDIT_THRESHOLD", "0.05"))
+# Railway's included monthly usage credit. Used only as a documented fallback when
+# the public API does not expose a direct remaining-credit field. Hobby/Trial commonly use $5;
+# override this variable for a different plan/credit amount.
+RAILWAY_CREDIT_LIMIT = float(os.getenv("RAILWAY_CREDIT_LIMIT", "5.0"))
 
 # ======================================================================
 # مسیر پایدار
@@ -671,13 +679,13 @@ def migrate_old_config():
              interval_config, interval_proxy, max_post_config, max_post_proxy,
              naming_template, channel_link, ping_enabled, profile_enabled,
              country_display, show_ping, proxy_banner_template, proxy_post_mode, ping_testing)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (dest, old_sources, old_banner_config, old_banner_proxy,
              old_interval, old_max_post, old_max_proxies,
              old_post_configs, old_post_proxies, old_ping_mode, old_last_num,
              datetime.now().isoformat(), 1, "", 1, 1, "", 0, None, 0, 1000,
              old_interval, old_interval, old_max_post, old_max_proxies,
-             "{Flag} | ⚡️Telegram = {CHANNEL_ID}", "", 1, 1, 2, 1, "", 0, 1))
+             "{Flag} | ⚡️Telegram = {CHANNEL_ID}", "", 1, 1, 2, 1, "", 1))
     conn.commit()
     log.info(f"✅ Migrated {len(dest_list)} profiles.")
 
@@ -3628,6 +3636,274 @@ async def send_daily_report(app):
     except Exception as e:
         log.error(f"❌ Failed to send daily report: {e}")
 
+RAILWAY_GRAPHQL_URL = "https://backboard.railway.com/graphql/v2"
+
+async def _railway_request(client, query, variables=None):
+    """Authenticated Railway GraphQL request using an account/workspace token."""
+    if not RAILWAY_TOKEN:
+        return None, "RAILWAY_TOKEN/RAILWAY_API_TOKEN is empty"
+    headers = {
+        "Authorization": f"Bearer {RAILWAY_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    try:
+        resp = await client.post(
+            RAILWAY_GRAPHQL_URL,
+            json={"query": query, "variables": variables or {}},
+            headers=headers,
+        )
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw": resp.text[:500]}
+        if resp.status_code != 200:
+            return None, f"HTTP {resp.status_code}: {data}"
+        if data.get("errors"):
+            return None, str(data["errors"])
+        return data.get("data"), None
+    except Exception as e:
+        return None, str(e)
+
+async def railway_token_check():
+    """Validate the Railway token itself; no project ID is needed."""
+    if not RAILWAY_TOKEN:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            data, err = await _railway_request(client, "query { me { id name email } }")
+            if err:
+                log.error(f"❌ Railway token check failed: {err}")
+                return False
+            me = (data or {}).get("me") or {}
+            if me.get("id"):
+                log.info(f"✅ Railway token authenticated: {me.get('name') or me.get('email') or me.get('id')}")
+                return True
+            log.error("❌ Railway token was accepted but 'me' returned no account.")
+    except Exception as e:
+        log.error(f"❌ Railway token check exception: {e}")
+    return False
+
+async def _get_railway_workspaces(client):
+    data, err = await _railway_request(client, "query { workspaces { id name } }")
+    if err:
+        log.warning(f"⚠️ Railway workspaces query failed: {err}")
+        return []
+    rows = (data or {}).get("workspaces") or []
+    return [r for r in rows if r.get("id")]
+
+async def _get_estimated_workspace_cost(client, workspace_id):
+    """Return estimated current-cycle usage cost when the API exposes it."""
+    query = "query($workspaceId: String!) { estimatedUsage(workspaceId: $workspaceId) { measurement estimatedValue } }"
+    data, err = await _railway_request(client, query, {"workspaceId": workspace_id})
+    if err:
+        return None
+    rows = (data or {}).get("estimatedUsage") or []
+    total = 0.0
+    found = False
+    for row in rows:
+        measurement = str(row.get("measurement") or "").upper()
+        value = row.get("estimatedValue")
+        if value is None:
+            continue
+        try:
+            value = float(value)
+        except Exception:
+            continue
+        # Only dollar/cost-like measurements are safe to sum as currency.
+        if any(k in measurement for k in ("COST", "PRICE", "DOLLAR", "USD")):
+            total += value
+            found = True
+    return total if found else None
+
+async def _try_direct_railway_credit(client):
+    """Try known/current account-level billing fields without requiring a project ID.
+
+    Railway's documented public API currently exposes usage/estimatedUsage, while a direct
+    remaining-credit field is not documented. This function therefore probes only safe
+    optional query shapes and returns None when the live schema does not support them.
+    """
+    candidate_queries = [
+        "query { currentUsage { currentUsage hardLimit usageLimit remaining credit balance } }",
+        "query { billing { credit balance remainingCredit remaining } }",
+        "query { account { credit balance remainingCredit remaining } }",
+    ]
+    for query in candidate_queries:
+        data, err = await _railway_request(client, query)
+        if err or not data:
+            continue
+        def walk(obj):
+            if isinstance(obj, dict):
+                lower = {str(k).lower(): v for k, v in obj.items()}
+                for key in ("remainingcredit", "remaining", "credit", "balance"):
+                    value = lower.get(key)
+                    if isinstance(value, (int, float)):
+                        return float(value), key
+                    if isinstance(value, str):
+                        try:
+                            return float(value), key
+                        except Exception:
+                            pass
+                for v in obj.values():
+                    hit = walk(v)
+                    if hit:
+                        return hit
+            elif isinstance(obj, list):
+                for v in obj:
+                    hit = walk(v)
+                    if hit:
+                        return hit
+            return None
+        hit = walk(data)
+        if hit:
+            return hit
+    return None
+
+async def get_railway_credit():
+    """Get remaining Railway credit without requiring PROJECT_ID.
+
+    Priority:
+      1) direct remaining/credit field if the live API exposes one;
+      2) documented workspace estimated usage subtracted from RAILWAY_CREDIT_LIMIT.
+
+    The second path is explicit and logged because Railway's current public docs do not
+    document a direct 'remaining credit' field. It never pretends an unavailable value is exact.
+    """
+    if not RAILWAY_TOKEN:
+        log.warning("⚠️ Railway credit check skipped: RAILWAY_TOKEN/RAILWAY_API_TOKEN is not set.")
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            direct = await _try_direct_railway_credit(client)
+            if direct:
+                balance, source = direct
+                log.info(f"💰 Railway credit read directly from API: ${balance:.4f} (field={source})")
+                return balance
+
+            workspaces = await _get_railway_workspaces(client)
+            if not workspaces:
+                log.warning("⚠️ Railway token works but no workspaces were returned; cannot calculate credit.")
+                return None
+
+            total_usage = 0.0
+            found_usage = False
+            for ws in workspaces:
+                cost = await _get_estimated_workspace_cost(client, ws["id"])
+                if cost is not None:
+                    total_usage += cost
+                    found_usage = True
+                    log.info(f"[RAILWAY] Workspace {ws.get('name') or ws['id']}: estimated usage ${cost:.4f}")
+
+            if found_usage:
+                balance = max(0.0, RAILWAY_CREDIT_LIMIT - total_usage)
+                log.info(
+                    f"💰 Railway credit fallback: limit=${RAILWAY_CREDIT_LIMIT:.2f}, "
+                    f"estimated usage=${total_usage:.4f}, remaining=${balance:.4f}"
+                )
+                return balance
+
+            log.warning("⚠️ Railway API returned no direct credit and no cost-valued estimatedUsage measurements.")
+    except Exception as e:
+        log.warning(f"❌ Failed to fetch Railway credit: {e}")
+    return None
+
+async def _create_consistent_db_backup():
+    """Create a transaction-consistent SQLite backup of the live main database."""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    filename = f"full_db_backup_{get_tehran_date().replace(':', '-')}.db"
+    filepath = os.path.join(BACKUP_DIR, filename)
+    src = None
+    dst = None
+    try:
+        src = sqlite3.connect(DB_PATH, timeout=30)
+        dst = sqlite3.connect(filepath, timeout=30)
+        with dst:
+            src.backup(dst)
+        dst.close()
+        src.close()
+        return filepath
+    except Exception:
+        try:
+            if dst:
+                dst.close()
+        except Exception:
+            pass
+        try:
+            if src:
+                src.close()
+        except Exception:
+            pass
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+        except Exception:
+            pass
+        raise
+
+async def check_credit_and_backup():
+    balance = await get_railway_credit()
+    if balance is None:
+        return
+
+    # Send once per low-credit crossing, not once every hour forever.
+    already_sent = False
+    try:
+        conn = get_conn()
+        row = conn.execute("SELECT v FROM cfg WHERE k='railway_low_credit_backup_sent'").fetchone()
+        conn.close()
+        already_sent = bool(row and str(row[0]) == "1")
+    except Exception:
+        pass
+
+    if balance > CREDIT_THRESHOLD:
+        if already_sent:
+            try:
+                conn = get_conn()
+                conn.execute("INSERT OR REPLACE INTO cfg(k,v) VALUES('railway_low_credit_backup_sent','0')")
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
+        return
+
+    if already_sent:
+        log.info(f"💰 Railway credit remains low (${balance:.4f}); low-credit backup already sent.")
+        return
+
+    log.warning(f"🚨 Railway credit low: ${balance:.4f} <= ${CREDIT_THRESHOLD:.2f}; creating full DB backup.")
+    bot = BOT_REF
+    if not bot:
+        log.error("❌ Cannot send low-credit backup: Telegram bot reference is not ready.")
+        return
+
+    filepath = None
+    try:
+        filepath = await _create_consistent_db_backup()
+        with open(filepath, "rb") as f:
+            await bot.send_document(
+                MAIN_ADMIN_ID,
+                document=f,
+                filename=os.path.basename(filepath),
+                caption=f"🚨 بک‌آپ کامل دیتابیس اصلی پروژه\n💰 اعتبار Railway: ${balance:.4f}\n⚠️ آستانه: ${CREDIT_THRESHOLD:.2f}"
+            )
+        conn = get_conn()
+        conn.execute("INSERT OR REPLACE INTO cfg(k,v) VALUES('railway_low_credit_backup_sent','1')")
+        conn.commit()
+        conn.close()
+        log.info("✅ Full main database backup sent to admin because Railway credit reached the threshold.")
+    except Exception as e:
+        log.error(f"❌ Failed to create/send low-credit full DB backup: {e}")
+    finally:
+        if filepath:
+            try:
+                os.remove(filepath)
+            except Exception:
+                pass
+
+async def periodic_credit_check():
+    while True:
+        await check_credit_and_backup()
+        await asyncio.sleep(3600)
+
 async def periodic_cleanup():
     while True:
         try:
@@ -4266,7 +4542,7 @@ async def cmd_start(u, ctx):
     if profiles:
         last_num = max(p["last_num"] for p in profiles)
         next_n = last_num + 1
-    balance = None
+    balance = await get_railway_credit()
     credit_str = f"${balance:.2f}" if balance is not None else "نامشخص"
     txt = msg("welcome", profiles=total, next_n=next_n, credit=credit_str)
     await u.message.reply_text(txt, parse_mode="HTML", reply_markup=main_menu_kb())
@@ -4279,11 +4555,11 @@ async def cmd_admin(u, ctx):
 async def cmd_balance(u, ctx):
     if not is_admin(u.effective_user.id):
         return
-    balance = None
+    balance = await get_railway_credit()
     if balance is not None:
         txt = msg("balance_info", balance=f"${balance:.2f}")
     else:
-        txt = "💰 اعتبار سرویس در دسترس نیست."
+        txt = "💰 اعتبار: نامشخص (توکن Railway تنظیم نشده یا API اعتبار را در دسترس بات قرار نداده است)"
     await u.message.reply_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="back_home", style="primary")]]))
 
 async def show_profiles_list(msg_or_q):
@@ -4458,7 +4734,7 @@ async def on_callback(u, ctx):
             if profiles:
                 last_num = max(p["last_num"] for p in profiles)
                 next_n = last_num + 1
-            balance = None
+            balance = await get_railway_credit()
             credit_str = f"${balance:.2f}" if balance is not None else "نامشخص"
             txt = msg("welcome", profiles=total, next_n=next_n, credit=credit_str)
             await q.edit_message_text(txt, parse_mode="HTML", reply_markup=main_menu_kb())
@@ -4477,11 +4753,11 @@ async def on_callback(u, ctx):
             return
 
         if d == "show_balance":
-            balance = None
+            balance = await get_railway_credit()
             if balance is not None:
                 txt = msg("balance_info", balance=f"${balance:.2f}")
             else:
-                txt = "💰 اعتبار سرویس در دسترس نیست."
+                txt = "💰 اعتبار: نامشخص (توکن Railway تنظیم نشده یا API اعتبار را در دسترس بات قرار نداده است)"
             await q.edit_message_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="back_home", style="primary")]]))
             return
 
@@ -6910,6 +7186,14 @@ async def post_init(app):
     app.create_task(periodic_cleanup())
     log.info("🧹 Periodic cleanup task started")
 
+    if RAILWAY_TOKEN:
+        if await railway_token_check():
+            app.create_task(periodic_credit_check())
+            log.info("💰 Credit check task started (Railway token; PROJECT_ID is not required)")
+        else:
+            log.error("❌ Railway credit check disabled because the token could not be authenticated.")
+    else:
+        log.info("💰 Credit check disabled: set RAILWAY_TOKEN or RAILWAY_API_TOKEN in Railway Variables.")
 
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()

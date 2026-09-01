@@ -3,6 +3,7 @@ import re
 import asyncio
 import sqlite3
 import shutil
+import tempfile
 import socket
 import base64
 import hashlib
@@ -193,6 +194,184 @@ def get_conn():
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA synchronous=NORMAL")
     return db
+
+
+# ======================================================================
+# جایگزینی کامل دیتابیس از داخل پنل ادمین
+# ======================================================================
+DB_REPLACE_MAX_BYTES = 45 * 1024 * 1024
+DB_REPLACE_LOCK = asyncio.Lock()
+
+def _sqlite_signature(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read(16) == b"SQLite format 3\x00"
+    except OSError:
+        return False
+
+def _validate_sqlite_database(path):
+    if not _sqlite_signature(path):
+        return False, "فایل SQLite معتبر نیست."
+    db = None
+    try:
+        db = sqlite3.connect(path)
+        db.execute("PRAGMA query_only=ON")
+        result = db.execute("PRAGMA integrity_check").fetchone()
+        if not result or str(result[0]).lower() != "ok":
+            return False, f"integrity_check: {result[0] if result else 'unknown'}"
+        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not tables:
+            return False, "دیتابیس جدول قابل استفاده ندارد."
+        return True, f"SQLite سالم ({len(tables)} جدول)"
+    except Exception as e:
+        return False, f"خطا در خواندن SQLite: {e}"
+    finally:
+        if db:
+            db.close()
+
+def _looks_like_sql_dump(path):
+    try:
+        with open(path, "rb") as f:
+            sample = f.read(1024 * 1024)
+        text = sample.decode("utf-8-sig", errors="ignore")
+        upper = text.upper()
+        return ("CREATE TABLE" in upper and ("INSERT INTO" in upper or "CREATE TABLE" in upper))
+    except Exception:
+        return False
+
+def _prepare_sql_dump(path):
+    fd, target = tempfile.mkstemp(prefix="db_import_", suffix=".db", dir=DATA_DIR)
+    os.close(fd)
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="strict") as f:
+            sql = f.read()
+        db = sqlite3.connect(target)
+        db.executescript(sql)
+        db.commit()
+        db.close()
+        ok, detail = _validate_sqlite_database(target)
+        if not ok:
+            raise RuntimeError(detail)
+        return target, None
+    except Exception as e:
+        try:
+            os.remove(target)
+        except OSError:
+            pass
+        return None, str(e)
+
+def _backup_current_database():
+    if not os.path.exists(DB_PATH):
+        return None
+    stamp = datetime.now(TEHRAN_TZ).strftime("%Y%m%d_%H%M%S")
+    backup_path = os.path.join(BACKUP_DIR, f"before_replace_{stamp}.db")
+    shutil.copy2(DB_PATH, backup_path)
+    return backup_path
+
+def _reopen_database_after_replace():
+    global conn, c
+    try:
+        conn.close()
+    except Exception:
+        pass
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    c = conn.cursor()
+
+def prepare_replaced_database():
+    """Run the same compatibility migrations needed by an imported DB."""
+    # These functions use the global conn/c, which are reopened before this call.
+    migrate_sponsors()
+    migrate_tables_for_profile_isolation()
+    migrate_old_config()
+    migrate_header_modes()
+    fix_column_types()
+    conn.commit()
+
+async def replace_database_from_file(update, source_path, original_name="database"):
+    """Safely replace the live DB with a validated SQLite DB or SQL dump.
+
+    The uploaded file's extension is ignored; the actual contents are detected.
+    The current DB is backed up first, and the replacement is atomic.
+    """
+    global conn, c
+    if not os.path.isfile(source_path):
+        return False, "فایل پیدا نشد."
+    size = os.path.getsize(source_path)
+    if size <= 0:
+        return False, "فایل خالی است."
+    if size > DB_REPLACE_MAX_BYTES:
+        return False, f"حجم فایل بیش از {DB_REPLACE_MAX_BYTES // (1024 * 1024)}MB است."
+
+    async with DB_REPLACE_LOCK:
+        import_path = source_path
+        generated_path = None
+        try:
+            if _sqlite_signature(source_path):
+                ok, detail = _validate_sqlite_database(source_path)
+                if not ok:
+                    return False, detail
+            elif _looks_like_sql_dump(source_path):
+                generated_path, err = _prepare_sql_dump(source_path)
+                if err:
+                    return False, f"SQL dump قابل import نیست: {err[:250]}"
+                import_path = generated_path
+            else:
+                return False, "فرمت فایل قابل تشخیص نیست. فقط SQLite (با هر پسوندی) یا SQL Dump پشتیبانی می‌شود."
+
+            # Make sure the imported DB can be opened before touching the live DB.
+            test_db = sqlite3.connect(import_path)
+            test_db.execute("PRAGMA query_only=ON")
+            test_db.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+            test_db.close()
+
+            current_backup = _backup_current_database()
+            if current_backup:
+                log.info(f"Database replacement backup created: {current_backup}")
+
+            # Put the incoming database in place. Existing WAL/SHM files can otherwise
+            # make SQLite reopen an old journal.
+            for suffix in ("-wal", "-shm"):
+                try:
+                    os.remove(DB_PATH + suffix)
+                except FileNotFoundError:
+                    pass
+            os.replace(import_path, DB_PATH)
+            generated_path = None
+            _reopen_database_after_replace()
+            prepare_replaced_database()
+
+            # Final integrity check after migrations.
+            ok, detail = _validate_sqlite_database(DB_PATH)
+            if not ok:
+                raise RuntimeError(f"دیتابیس جایگزین‌شده معتبر نیست: {detail}")
+
+            log.info(f"✅ Database replaced successfully from {original_name}")
+            return True, detail
+        except Exception as e:
+            log.exception("Database replacement failed")
+            # If replacement failed after the swap, restore the latest pre-replace backup.
+            try:
+                backups = sorted(
+                    [os.path.join(BACKUP_DIR, x) for x in os.listdir(BACKUP_DIR) if x.startswith("before_replace_") and x.endswith(".db")],
+                    key=lambda x: os.path.getmtime(x), reverse=True
+                )
+                if backups:
+                    restore = backups[0]
+                    _reopen_database_after_replace()
+                    shutil.copy2(restore, DB_PATH)
+                    _reopen_database_after_replace()
+                    log.warning(f"Restored database from {restore}")
+            except Exception:
+                log.exception("Automatic database rollback failed")
+            return False, f"جایگزینی انجام نشد: {str(e)[:300]}"
+        finally:
+            if generated_path and os.path.exists(generated_path):
+                try:
+                    os.remove(generated_path)
+                except OSError:
+                    pass
 
 def migrate_header_modes():
     """Ensure per-profile header mode settings exist without resetting the database."""
@@ -3865,8 +4044,11 @@ T = {
         "btn_blacklist_add": "➕ افزودن",
         "btn_blacklist_clear": "🗑 پاک کردن همه",
         "btn_backup": "💾 بک‌آپ دیتابیس",
+        "btn_replace_database": "🔄 جایگزینی کامل دیتابیس",
         "backup_sent": "✅ فایل دیتابیس ارسال شد.",
         "backup_failed": "❌ ارسال بک‌آپ ناموفق.",
+        "database_replace_prompt": "🔄 <b>جایگزینی کامل دیتابیس</b>\n\nفایل دیتابیس قدیمی را همینجا ارسال کنید. پسوند فایل مهم نیست؛ محتوای فایل تشخیص داده می‌شود.\n\nپشتیبانی: SQLite با هر پسوند + SQL Dump.\n⚠️ قبل از جایگزینی، از دیتابیس فعلی بک‌آپ گرفته می‌شود.",
+        "database_replace_confirm": "⚠️ <b>هشدار مهم</b>\n\nبا تأیید، کل دیتابیس فعلی با فایل انتخاب‌شده جایگزین می‌شود و اطلاعات فعلی دیگر دیتابیس فعال نخواهد بود.\n\nابتدا بک‌آپ خودکار گرفته می‌شود. ادامه می‌دهید؟",
         "btn_set_schedule_cron": "⏰ زمان‌بندی پیشرفته (cron)",
         "schedule_cron_prompt": "⏰ عبارت cron را وارد کنید (مثلاً `*/5 * * * *` برای هر ۵ دقیقه).\n\nخالی بگذارید تا از بازه‌ی دقیقه‌ای استفاده شود.",
         "schedule_cron_set": "✅ زمان‌بندی cron تنظیم شد: {cron}",
@@ -4244,7 +4426,7 @@ def general_settings_kb():
         [InlineKeyboardButton(f"🌐 زبان: {lang_text}", callback_data="toggle_lang", style="primary")],
         [InlineKeyboardButton(msg("btn_admins"), callback_data="manage_admins", style="primary")],
         [InlineKeyboardButton(msg("btn_backup"), callback_data="backup_db", style="primary")],
-        [InlineKeyboardButton("📥 جایگزینی کامل دیتابیس", callback_data="replace_db", style="danger")],
+        [InlineKeyboardButton(msg("btn_replace_database"), callback_data="replace_db", style="danger")],
         [InlineKeyboardButton(msg("btn_back"), callback_data="back_home", style="primary")],
     ])
 
@@ -4478,6 +4660,15 @@ async def on_callback(u, ctx):
             await q.edit_message_text(txt, parse_mode="HTML", reply_markup=general_settings_kb())
             return
 
+        if d == "replace_db":
+            ctx.user_data["action"] = "replace_database"
+            await q.edit_message_text(
+                msg("database_replace_prompt"),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="general_settings", style="primary")]])
+            )
+            return
+
         if d == "show_balance":
             balance = None
             if balance is not None:
@@ -4524,11 +4715,6 @@ async def on_callback(u, ctx):
         if d == "remove_admin":
             ctx.user_data["action"] = "remove_admin"
             await q.edit_message_text("❌ شناسه ادمین مورد نظر برای حذف را وارد کنید:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="manage_admins", style="primary")]]))
-            return
-
-        if d == "replace_db":
-            ctx.user_data["action"] = "replace_db"
-            await q.edit_message_text("📥 فایل دیتابیس جدید را ارسال کنید.\n\nتمام محتوای دیتابیس فعلی با محتوای فایل ارسالی جایگزین می‌شود. نام فایل مهم نیست؛ فقط محتوای فایل بررسی می‌شود.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(msg("btn_back"), callback_data="general_settings", style="primary")]]))
             return
 
         if d == "backup_db":
@@ -6634,39 +6820,6 @@ async def on_text(u, ctx):
         await show_profile_admin(u.message, profile_id)
         return
 
-    if a == "replace_db":
-        try:
-            doc = u.message.document
-            if not doc:
-                await u.message.reply_text("❌ فایل دیتابیس ارسال نشده است.")
-                return
-            tmp_path = os.path.join(DATA_DIR, "database_replace_upload.tmp")
-            old_backup = os.path.join(BACKUP_DIR, f"before_replace_{get_tehran_time().replace(':','-')}.db")
-            await u.message.reply_text("⏳ در حال دریافت و جایگزینی دیتابیس...")
-            tg_file = await doc.get_file()
-            await tg_file.download_to_drive(tmp_path)
-
-            # validate sqlite database before replacing
-            test = sqlite3.connect(tmp_path)
-            test.execute("PRAGMA integrity_check")
-            test.close()
-
-            if os.path.exists(DB_PATH):
-                shutil.copy2(DB_PATH, old_backup)
-
-            shutil.move(tmp_path, DB_PATH)
-            ctx.user_data.pop("action", None)
-            await u.message.reply_text("✅ دیتابیس با موفقیت به طور کامل جایگزین شد. لطفاً بات را ری‌استارت کنید.")
-        except Exception as e:
-            log.exception("database replacement failed")
-            try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except:
-                pass
-            await u.message.reply_text(f"❌ خطا در جایگزینی دیتابیس: {str(e)[:200]}")
-        return
-
     if a.startswith("manual_"):
         profile_id = int(a.split("_")[1])
         await process_manual_text(u, u.message, profile_id, is_document=False)
@@ -6729,6 +6882,32 @@ async def on_document(u, ctx):
         return
     a = ctx.user_data.get("action")
     if not a:
+        return
+
+    if a == "replace_database":
+        doc = u.message.document
+        if not doc:
+            return
+        status = await u.message.reply_text("⏳ فایل دریافت شد؛ در حال بررسی و جایگزینی امن دیتابیس...")
+        temp_path = os.path.join(DATA_DIR, f"db_upload_{u.effective_user.id}_{int(time.time())}")
+        try:
+            file = await doc.get_file()
+            await file.download_to_drive(temp_path)
+            ok, detail = await replace_database_from_file(u, temp_path, doc.file_name or "database")
+            if ok:
+                await status.edit_text(f"✅ دیتابیس با موفقیت جایگزین شد.\n\n{detail}\n\n🔄 بات از این دیتابیس ادامه می‌دهد.", parse_mode="HTML")
+            else:
+                await status.edit_text(f"❌ {html.escape(detail)}", parse_mode="HTML")
+        except Exception as e:
+            log.exception("Database upload/replacement error")
+            await status.edit_text(f"❌ خطا در جایگزینی دیتابیس: {html.escape(str(e)[:300])}", parse_mode="HTML")
+        finally:
+            ctx.user_data.pop("action", None)
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except OSError:
+                pass
         return
 
     if a.startswith("manual_"):

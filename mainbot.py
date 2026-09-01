@@ -671,7 +671,7 @@ def migrate_old_config():
              interval_config, interval_proxy, max_post_config, max_post_proxy,
              naming_template, channel_link, ping_enabled, profile_enabled,
              country_display, show_ping, proxy_banner_template, proxy_post_mode, ping_testing)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (dest, old_sources, old_banner_config, old_banner_proxy,
              old_interval, old_max_post, old_max_proxies,
              old_post_configs, old_post_proxies, old_ping_mode, old_last_num,
